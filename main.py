@@ -3,6 +3,14 @@ import os
 from logging import config, getLogger
 
 import dotenv
+from discord import Intents
+from discord.ext import commands
+
+from cogs import chatbot
+
+
+def load_all_cogs(bot: commands.Bot):
+    chatbot.setup(bot)
 
 
 def main():
@@ -11,11 +19,12 @@ def main():
     with open("./log/logging_conf.json", "r", encoding="utf-8") as f:
         config.dictConfig(json.load(f))
 
-    logger = getLogger(__name__)
-    logger.setLevel(os.getenv("LOG_LEVEL", "WARNING"))
+    cogs_logger = getLogger("cogs")
+    cogs_logger.setLevel(os.getenv("LOG_LEVEL", "WARNING"))
 
-    logger.warning("This is a public service announcement!")
-    logger.debug("Debugging!")
+    bot = commands.Bot(intents=Intents.all())
+    load_all_cogs(bot)
+    bot.run(os.environ["DISCORD_BOT_TOKEN"])
 
 
 if __name__ == "__main__":
