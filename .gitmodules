@@ -1,0 +1,3 @@
+[submodule "cogs/papyrus-private-prompt"]
+	path = cogs/papyrus-private-prompt
+	url = git@github.com:22-o-clock/papyrus-private-prompt.git
