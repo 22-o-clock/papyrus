@@ -19,7 +19,7 @@ class ChatBot(commands.Cog):
         self.client = AsyncOpenAI()
         self.latest_response: Optional[str] = None
 
-    @commands.Cog.listener()
+    @commands.Cog.listener()  # type: ignore
     async def on_message(self, message: Message):
         for atc in message.attachments:
             logger.debug(f"{atc.content_type=}")
@@ -28,7 +28,7 @@ class ChatBot(commands.Cog):
             return
 
         for user in message.mentions:
-            if user.id == self.bot.user.id:
+            if user.id == self.bot.user.id:  # type: ignore
                 break
         else:
             return

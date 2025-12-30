@@ -45,9 +45,9 @@ def convert_message_to_chatgpt_input(message: Message):
 
 async def fetch_chatgpt_output_text(
     client: AsyncOpenAI, message: Message, previous_response_id: Optional[str] = None
-):
+) -> tuple[str, str]:
     response = await client.responses.create(
-        input=convert_message_to_chatgpt_input(message),
+        input=convert_message_to_chatgpt_input(message),  # type: ignore
         instructions=INSTRUCTIONS,
         model=OPENAI_MODEL,
         previous_response_id=previous_response_id,
@@ -66,4 +66,4 @@ async def fetch_chatgpt_output_text(
 
     logger.info(f"{response=}")
 
-    return response.output[-1].content[0].text, response.id
+    return response.output[-1].content[0].text, response.id  # type: ignore
