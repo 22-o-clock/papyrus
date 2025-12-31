@@ -1,0 +1,3 @@
+[submodule "cogs/chatbot/prompt"]
+	path = cogs/chatbot/prompt
+	url = https://github.com/22-o-clock/papyrus-prompt.git
