@@ -1,0 +1,35 @@
+{
+    "version": 1,
+    "disable_existing_loggers": false,
+    "formatters": {
+        "consoleFormatter": {
+            "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S"
+        },
+        "logFileFormatter": {
+            "format": "%(asctime)s [%(levelname)s] %(name)s | %(filename)s - line %(lineno)d - %(funcName)s(): %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S"
+        }
+    },
+    "root": {
+        "handlers": [
+            "consoleHandler",
+            "logFileHandler"
+        ]
+    },
+    "handlers": {
+        "consoleHandler": {
+            "class": "logging.StreamHandler",
+            "formatter": "consoleFormatter",
+            "stream": "ext://sys.stdout"
+        },
+        "logFileHandler": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "logFileFormatter",
+            "filename": "./log/app.log",
+            "maxBytes": 102400,
+            "backupCount": 4,
+            "encoding": "utf-8"
+        }
+    }
+}
