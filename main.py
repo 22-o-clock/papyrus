@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from logging import config, getLogger
@@ -10,8 +11,8 @@ from discord.ext import commands
 from cogs import chatbot
 
 
-def load_all_cogs(bot: commands.Bot) -> None:
-    chatbot.setup(bot)
+async def load_all_cogs(bot: commands.Bot) -> None:
+    await chatbot.setup(bot)
 
 
 def main() -> None:
@@ -23,8 +24,8 @@ def main() -> None:
     cogs_logger = getLogger("cogs")
     cogs_logger.setLevel(os.getenv("LOG_LEVEL", "WARNING"))
 
-    bot = commands.Bot(intents=Intents.all())
-    load_all_cogs(bot)
+    bot = commands.Bot(command_prefix="!?", intents=Intents.all())
+    asyncio.run(load_all_cogs(bot))
     bot.run(os.environ["DISCORD_BOT_TOKEN"])
 
 

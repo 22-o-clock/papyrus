@@ -1,7 +1,7 @@
 import os
 from logging import getLogger
 
-from discord import Message
+from discord import Message, TextChannel, app_commands
 from discord.ext import commands
 from openai import AsyncOpenAI
 
@@ -17,8 +17,10 @@ class ChatBot(commands.Cog):
         self.bot = bot
         self.client = AsyncOpenAI()
         self.latest_response: str | None = None
+        self.is_responding = False
+        self.target_channel: TextChannel | None = None
 
-    @commands.Cog.listener()  # type: ignore
+    @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
         if message.author.bot:
             return
@@ -35,6 +37,10 @@ class ChatBot(commands.Cog):
 
         await message.reply(response_text)
 
+    @app_commands.command()
+    async def summon(self, ctx) -> None:
+        pass
 
-def setup(bot: commands.Bot) -> None:
-    bot.add_cog(ChatBot(bot))
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(ChatBot(bot))
