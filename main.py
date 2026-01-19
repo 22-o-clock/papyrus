@@ -1,6 +1,7 @@
 import json
 import os
 from logging import config, getLogger
+from pathlib import Path
 
 import dotenv
 from discord import Intents
@@ -9,14 +10,14 @@ from discord.ext import commands
 from cogs import chatbot
 
 
-def load_all_cogs(bot: commands.Bot):
+def load_all_cogs(bot: commands.Bot) -> None:
     chatbot.setup(bot)
 
 
-def main():
+def main() -> None:
     dotenv.load_dotenv()
 
-    with open("./log/logging_conf.json", "r", encoding="utf-8") as f:
+    with Path("./log/logging_conf.json").open("r", encoding="utf-8") as f:
         config.dictConfig(json.load(f))
 
     cogs_logger = getLogger("cogs")

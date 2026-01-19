@@ -1,6 +1,5 @@
 import os
 from logging import getLogger
-from typing import Optional
 
 from discord import Message
 from discord.ext import commands
@@ -14,21 +13,18 @@ OPENAI_MODEL = os.getenv("RESPONSES_API_MODEL", "gpt-4.1")
 
 
 class ChatBot(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.client = AsyncOpenAI()
-        self.latest_response: Optional[str] = None
+        self.latest_response: str | None = None
 
     @commands.Cog.listener()  # type: ignore
-    async def on_message(self, message: Message):
-        for atc in message.attachments:
-            logger.debug(f"{atc.content_type=}")
-
+    async def on_message(self, message: Message) -> None:
         if message.author.bot:
             return
 
         for user in message.mentions:
-            if user.id == self.bot.user.id:  # type: ignore
+            if self.bot.user is not None and user.id == self.bot.user.id:
                 break
         else:
             return
@@ -40,5 +36,5 @@ class ChatBot(commands.Cog):
         await message.reply(response_text)
 
 
-def setup(bot: commands.Bot):
+def setup(bot: commands.Bot) -> None:
     bot.add_cog(ChatBot(bot))

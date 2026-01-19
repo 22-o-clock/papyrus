@@ -1,6 +1,6 @@
 import os
 from logging import getLogger
-from typing import Any, Optional
+from typing import Any
 
 from discord import Message
 from openai import AsyncOpenAI
@@ -12,8 +12,8 @@ logger = getLogger(__name__)
 OPENAI_MODEL = os.getenv("RESPONSES_API_MODEL", "gpt-4.1")
 
 
-def convert_message_to_chatgpt_input(message: Message):
-    input: list[dict[str, Any]] = [
+def convert_message_to_chatgpt_input(message: Message) -> list[dict[str, Any]]:
+    chatgpt_input: list[dict[str, Any]] = [
         {
             "role": "user",
             "content": [
@@ -31,20 +31,20 @@ def convert_message_to_chatgpt_input(message: Message):
             # Files with uncommon extensions (e.g., .jfif) may cause errors.
             # see https://platform.openai.com/docs/guides/images-vision
 
-            input[0]["content"].append(
+            chatgpt_input[0]["content"].append(
                 {"type": "input_image", "image_url": attachment.url}
             )
 
         if attachment.content_type == "application/pdf":
-            input[0]["content"].append(
+            chatgpt_input[0]["content"].append(
                 {"type": "input_file", "file_url": attachment.url}
             )
 
-    return input
+    return chatgpt_input
 
 
 async def fetch_chatgpt_output_text(
-    client: AsyncOpenAI, message: Message, previous_response_id: Optional[str] = None
+    client: AsyncOpenAI, message: Message, previous_response_id: str | None = None
 ) -> tuple[str, str]:
     response = await client.responses.create(
         input=convert_message_to_chatgpt_input(message),  # type: ignore
@@ -64,6 +64,6 @@ async def fetch_chatgpt_output_text(
         ],
     )
 
-    logger.info(f"{response=}")
+    logger.info("Response fetched: %s", response)
 
     return response.output[-1].content[0].text, response.id  # type: ignore
