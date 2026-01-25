@@ -8,6 +8,7 @@ dependencies = [
     "discord-py>=2.6.4",
     "dotenv>=0.9.9",
     "openai>=2.14.0",
+    "python-dateutil>=2.9.0.post0",
 ]
 
 [dependency-groups]
