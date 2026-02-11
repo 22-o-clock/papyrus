@@ -1,6 +1,11 @@
+import datetime
+import json
+import os
+from dataclasses import dataclass
 from logging import getLogger
-from typing import Any
 
+import discord
+import tiktoken
 from discord import Message
 from discord.ext import commands
 from openai import AsyncOpenAI
@@ -10,6 +15,85 @@ from .responses_api import DraftGenerator, ResponseStyler
 logger = getLogger(__name__)
 
 
+@dataclass
+class MessageInMemory:
+    message_id: int
+    author_name: str
+    content: str
+    reply_to: str
+    timestamp: datetime.datetime
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "author_name": self.author_name,
+            "content": self.content,
+            "reply_to": self.reply_to,
+        }
+
+
+class ShortTermMemory:
+    def __init__(self, model: str = "gpt-5-") -> None:
+        self.memory: list[MessageInMemory] = []
+        self.encoding = tiktoken.encoding_for_model(model)
+
+    async def append(self, message: Message) -> None:
+        reply_to = "All"
+
+        if message.reference and message.reference.message_id:
+            try:
+                target_message = await message.channel.fetch_message(message.reference.message_id)
+                reply_to = target_message.author.display_name
+            except discord.errors.NotFound:
+                if isinstance(message.channel, discord.Thread) and isinstance(message.channel.parent, discord.TextChannel):
+                    target_message = await message.channel.parent.fetch_message(message.reference.message_id)
+                    reply_to = target_message.author.display_name
+                else:
+                    logger.warning(
+                        "Referenced message not found (ref_id=%s, channel_id=%s, guild_id=%s)",
+                        message.reference.message_id,
+                        message.channel.id,
+                        message.guild.id if message.guild else None,
+                    )
+
+        self.memory.append(
+            MessageInMemory(
+                message_id=message.id,
+                author_name=message.author.display_name,
+                content=message.clean_content,
+                reply_to=reply_to,
+                timestamp=message.created_at,
+            )
+        )
+
+    def to_json(self) -> str:
+        return json.dumps([m.to_dict() for m in self.memory], ensure_ascii=False, indent=2)
+
+    def forget(self, maximum_token: int = 5000) -> None:
+        while self.memory:
+            text = json.dumps(
+                [m.to_dict() for m in self.memory],
+                ensure_ascii=False,
+            )
+            token_count = len(self.encoding.encode(text))
+
+            if token_count <= maximum_token:
+                break
+
+            self.memory.pop(0)
+
+        logger.info(
+            "Current memory in cache: %s tokens",
+            len(
+                self.encoding.encode(
+                    json.dumps(
+                        [m.to_dict() for m in self.memory],
+                        ensure_ascii=False,
+                    )
+                )
+            ),
+        )
+
+
 class ChatBot(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -17,40 +101,15 @@ class ChatBot(commands.Cog):
         self.draft_generator = DraftGenerator(self.client)
         self.response_styler = ResponseStyler(self.client)
         self.target_channel: int = 0
-        self.short_term_memory: list[Message] = []
+        self.short_term_memory = ShortTermMemory()
 
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
-        if message.channel.id == self.target_channel:
-            self.add_message_to_short_term_memory(message)
+        if message.channel.id == int(os.environ["TARGET_CHANNEL"]):
+            await self.short_term_memory.append(message)
 
-        if self.bot.user is not None and message.author.id == self.bot.user.id:
-            return
-
-        is_reply_required = await self.is_reply_required(message)
-
-        if is_reply_required:  # TODO @se-anthyme: ロック処理を追加
-            response_text = await self.generate_text_response()
-            await message.reply(response_text)
-
-    def add_message_to_short_term_memory(self, message: Message) -> None:
-        self.short_term_memory.append(message)
-
-    async def is_reply_required(self, message: Message) -> bool:
-        # TODO @se-anthyme: 判定ロジックを追加
-        return True
-
-    async def generate_text_response(self) -> str:
-        if self.bot.user is None:
-            raise TypeError
-
-        draft = await self.draft_generator.draft(self.bot.user.id, self.short_term_memory)
-        return await self.response_styler.style(draft)
-
-    @commands.hybrid_command()
-    async def summon(self, ctx: commands.Context[Any]) -> None:
-        await ctx.send("Hello!")
-        self.target_channel = ctx.channel.id
+        logger.info(self.short_term_memory.to_json())
+        self.short_term_memory.forget()
 
 
 async def setup(bot: commands.Bot) -> None:
