@@ -1,97 +1,16 @@
-import datetime
-import json
+import asyncio
 import os
-from dataclasses import dataclass
+import random
 from logging import getLogger
 
 import discord
-import tiktoken
 from discord import Message
 from discord.ext import commands
 from openai import AsyncOpenAI
 
-from .responses_api import DraftGenerator, ResponseStyler
+from .responses_api import DraftGenerator, ResponseStyler, ShortTermMemory
 
 logger = getLogger(__name__)
-
-
-@dataclass
-class MessageInMemory:
-    message_id: int
-    author_name: str
-    content: str
-    reply_to: str
-    timestamp: datetime.datetime
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "author_name": self.author_name,
-            "content": self.content,
-            "reply_to": self.reply_to,
-        }
-
-
-class ShortTermMemory:
-    def __init__(self, model: str = "gpt-5-") -> None:
-        self.memory: list[MessageInMemory] = []
-        self.encoding = tiktoken.encoding_for_model(model)
-
-    async def append(self, message: Message) -> None:
-        reply_to = "All"
-
-        if message.reference and message.reference.message_id:
-            try:
-                target_message = await message.channel.fetch_message(message.reference.message_id)
-                reply_to = target_message.author.display_name
-            except discord.errors.NotFound:
-                if isinstance(message.channel, discord.Thread) and isinstance(message.channel.parent, discord.TextChannel):
-                    target_message = await message.channel.parent.fetch_message(message.reference.message_id)
-                    reply_to = target_message.author.display_name
-                else:
-                    logger.warning(
-                        "Referenced message not found (ref_id=%s, channel_id=%s, guild_id=%s)",
-                        message.reference.message_id,
-                        message.channel.id,
-                        message.guild.id if message.guild else None,
-                    )
-
-        self.memory.append(
-            MessageInMemory(
-                message_id=message.id,
-                author_name=message.author.display_name,
-                content=message.clean_content,
-                reply_to=reply_to,
-                timestamp=message.created_at,
-            )
-        )
-
-    def to_json(self) -> str:
-        return json.dumps([m.to_dict() for m in self.memory], ensure_ascii=False, indent=2)
-
-    def forget(self, maximum_token: int = 5000) -> None:
-        while self.memory:
-            text = json.dumps(
-                [m.to_dict() for m in self.memory],
-                ensure_ascii=False,
-            )
-            token_count = len(self.encoding.encode(text))
-
-            if token_count <= maximum_token:
-                break
-
-            self.memory.pop(0)
-
-        logger.info(
-            "Current memory in cache: %s tokens",
-            len(
-                self.encoding.encode(
-                    json.dumps(
-                        [m.to_dict() for m in self.memory],
-                        ensure_ascii=False,
-                    )
-                )
-            ),
-        )
 
 
 class ChatBot(commands.Cog):
@@ -103,13 +22,133 @@ class ChatBot(commands.Cog):
         self.target_channel: int = 0
         self.short_term_memory = ShortTermMemory()
 
+        self._mem_lock = asyncio.Lock()
+        self._generating = False
+        self._pending: dict[int, discord.Message] = {}  # message_id -> Message（重複防止）
+        self._last_caught_up_id: int | None = None  # 追いつき用のカーソル
+        self._background_tasks: set[asyncio.Task[None]] = set()
+
+        self.reply_probability = 0.15
+
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
+        if message.channel.id != int(os.environ["TARGET_CHANNEL"]):
+            return
+
+        # 生成中なら memory を触らず pending に退避
+        if self._generating:
+            self._pending[message.id] = message
+            return
+
+        # 生成中でなければ普通に memory に追加
+        async with self._mem_lock:
+            await self.short_term_memory.append(message)
+            self.short_term_memory.forget()
+            self._last_caught_up_id = message.id
+
+        if message.author.bot:
+            return
+
+        # 一定確率で応答（生成は on_message の外で回す）
+        if random.random() < self.reply_probability and not self._generating:
+            task = asyncio.create_task(self._generate_and_post(message.channel))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            return
+
+        for user in message.mentions:
+            if user.id == self.bot.user.id:
+                task = asyncio.create_task(self._generate_and_post(message.channel))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+                return
+
         if message.channel.id == int(os.environ["TARGET_CHANNEL"]):
             await self.short_term_memory.append(message)
 
-        logger.info(self.short_term_memory.to_json())
-        self.short_term_memory.forget()
+    async def _generate_and_post(self, channel: discord.abc.Messageable) -> None:
+        # 二重起動防止
+        if self._generating:
+            return
+
+        self._generating = True
+
+        try:
+            # --- 1) 生成用スナップショットを作る（ここだけ lock）
+            async with self._mem_lock:
+                # pending が溜まっていたら、まずは取り込む（古い順）
+                for mid in sorted(self._pending):
+                    await self.short_term_memory.append(self._pending[mid])
+                self._pending.clear()
+
+                self.short_term_memory.forget()
+
+                # cutoff（この時点までを入力に含めた、という境界）
+                cutoff_id = self._last_caught_up_id
+
+            logger.info("Generating response...")
+
+            async with channel.typing():
+                # --- 2) LLM生成（ここは lock しない：時間がかかるので）
+                draft = await self.draft_generator.draft(
+                    self.bot.user.display_name if self.bot.user else "", self.short_term_memory
+                )
+                final_response = await self.response_styler.style(
+                    self.bot.user.display_name if self.bot.user else "", self.short_term_memory, draft
+                )
+
+                # --- 3) reply_to から対応するメッセージを検索
+                if final_response.reply_to == "All":
+                    await channel.send(final_response.content)
+                    return
+
+                reply_message = None
+
+                if isinstance(channel, discord.TextChannel | discord.Thread):
+                    # short_term_memory から reply_to に一致するメッセージの ID を探す
+                    for mem_msg in reversed(self.short_term_memory.memory):
+                        if mem_msg.author_name == final_response.reply_to:
+                            try:
+                                reply_message = await channel.fetch_message(mem_msg.message_id)
+                                break
+                            except discord.NotFound:
+                                logger.warning(f"Message {mem_msg.message_id} not found in channel")
+                                continue
+
+                # --- 4) 投稿
+                if reply_message:
+                    # リプライメッセージとして送信
+                    sent = await reply_message.reply(final_response.content)
+                else:
+                    # 対応するメッセージが見つからない場合は通常投稿
+                    sent = await channel.send(final_response.content)
+
+            # --- 5) 投稿後に「最新まで追いつく」
+            # cutoff 以降のメッセージを history から取り込む（Bot投稿も含めるなら sent も append）
+            async with self._mem_lock:
+                # bot の投稿も memory に入れたいなら（必要なら reply_to なども整備）
+                await self.short_term_memory.append(sent)  # append が Message を受け取れる前提
+                # cutoff が None の場合（初回など）は after を使わず recent を取る運用でもOK
+                if cutoff_id is not None and isinstance(channel, discord.TextChannel | discord.Thread):
+                    after_obj = discord.Object(id=cutoff_id)
+                    async for m in channel.history(after=after_obj, oldest_first=True, limit=200):
+                        # 生成中に on_message で拾えなかった分や、取りこぼし対策
+                        await self.short_term_memory.append(m)
+
+                # pending に溜まっていたものも取り込む（保険）
+                for mid in sorted(self._pending):
+                    await self.short_term_memory.append(self._pending[mid])
+                self._pending.clear()
+
+                self.short_term_memory.forget()
+
+                # 追いついた時点の最後を更新
+                if isinstance(channel, discord.TextChannel | discord.Thread):
+                    # history は取れない場合があるので、取れたものがあれば更新、なければ sent.id
+                    self._last_caught_up_id = max(self._last_caught_up_id or 0, sent.id)
+
+        finally:
+            self._generating = False
 
 
 async def setup(bot: commands.Bot) -> None:
