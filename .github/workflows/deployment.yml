@@ -1,8 +1,10 @@
 name: Push Docker image
 
 on:
+  workflow_dispatch:
+
   push:
-#  workflow_dispatch:
+    branches: [ master ]
 
 env:
   GAR_LOCATION: us-west1
