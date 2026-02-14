@@ -2,7 +2,6 @@ import datetime
 import json
 from dataclasses import dataclass
 from logging import getLogger
-from typing import Any
 
 import dateutil
 import discord
@@ -26,19 +25,21 @@ class MessageInMemory:
     Attributes:
         message_id: メッセージのID
         author_name: メッセージの送信者の名前
-        author_id: メッセージの送信者のID
         content: メッセージの内容
         reply_to: 返信先のメッセージの送信者名
         timestamp: メッセージが作成された日時
+        image_url: メッセージに含まれる画像のURL（存在する場合）
+        pdf_url: メッセージに含まれるPDFのURL（存在する場合）
 
     """
 
     message_id: int
     author_name: str
-    # author_id: int
     content: str
     reply_to: str
     timestamp: datetime.datetime
+    image_url: str | None = None
+    pdf_url: str | None = None
 
     def to_dict(self) -> dict[str, str]:
         """プロンプト作成に用いる要素のみを辞書形式で出力します。
@@ -74,43 +75,28 @@ class ShortTermMemory:
             message: 追加するDiscordメッセージ
 
         """
+        # 1. デフォルト値の設定
+
+        message_id = message.id
+        author_name = message.author.display_name
+        content = message.clean_content
+        reply_to = "All"
+        timestamp = message.created_at
+        image_url = None
+        pdf_url = None
+
+        # 2. reply_to に関する特殊処理
+
         if message.message_snapshots:  # メッセージが転送である場合
-            self.memory.append(
-                MessageInMemory(
-                    message_id=message.id,
-                    author_name=message.author.display_name,
-                    content=f"{message.author.display_name}がメッセージを転送: 「{message.message_snapshots[0].content}」",
-                    reply_to="All",
-                    timestamp=message.created_at,
-                )
-            )
-            return
+            content = f"{author_name}がメッセージを転送: 「{message.message_snapshots[0].content}」"
 
         if message.type == discord.MessageType.reply:  # メッセージが返信である場合
             if message.reference and message.reference.cached_message:  # 返信先のメッセージがキャッシュされている場合
-                self.memory.append(
-                    MessageInMemory(
-                        message_id=message.id,
-                        author_name=message.author.display_name,
-                        content=message.clean_content,
-                        reply_to=message.reference.cached_message.author.display_name,
-                        timestamp=message.created_at,
-                    )
-                )
-                return
+                reply_to = message.reference.cached_message.author.display_name
 
             if message.reference and message.reference.message_id:  # 返信先のメッセージがキャッシュされていない場合
                 replied_message = await message.channel.fetch_message(message.reference.message_id)
-                self.memory.append(
-                    MessageInMemory(
-                        message_id=message.id,
-                        author_name=message.author.display_name,
-                        content=message.clean_content,
-                        reply_to=replied_message.author.display_name,
-                        timestamp=message.created_at,
-                    )
-                )
-                return
+                reply_to = replied_message.author.display_name
 
             logger.warning(
                 "Message is a reply but referenced message not found (ref_id=%s, channel_id=%s, guild_id=%s)",
@@ -120,27 +106,33 @@ class ShortTermMemory:
             )
 
         if message.mentions:  # メッセージにメンションが含まれている場合
-            mentioned_name = (
+            reply_to = (
                 message.mentions[0].display_name
             )  # 先頭のメンションのみを返信先として扱う。順序は不定なので、複数のメンションが含まれる場合の動作は保証されない。
-            self.memory.append(
-                MessageInMemory(
-                    message_id=message.id,
-                    author_name=message.author.display_name,
-                    content=message.clean_content,
-                    reply_to=mentioned_name,
-                    timestamp=message.created_at,
-                )
-            )
-            return
+
+        # 3. 添付ファイルに関する特殊処理
+
+        for attachment in message.attachments:
+            if attachment.content_type in ("image/jpeg", "image/png"):
+                # OpenAI supports PNG (.png), JPEG (.jpeg, .jpg), WEBP (.webp), and Non-animated GIF (.gif).
+                # Files with uncommon extensions (e.g., .jfif) may cause errors.
+                # see https://platform.openai.com/docs/guides/images-vision
+                image_url = attachment.url
+
+            if attachment.content_type == "application/pdf":
+                pdf_url = attachment.url
+
+        # 4. メモリへの追加
 
         self.memory.append(
             MessageInMemory(
-                message_id=message.id,
-                author_name=message.author.display_name,
-                content=message.clean_content,
-                reply_to="All",
-                timestamp=message.created_at,
+                message_id=message_id,
+                author_name=author_name,
+                content=content,
+                reply_to=reply_to,
+                timestamp=timestamp,
+                image_url=image_url,
+                pdf_url=pdf_url,
             )
         )
 
@@ -148,7 +140,7 @@ class ShortTermMemory:
         """短期記憶内のメッセージをプロンプトに用いるJSON形式の文字列に変換します。
 
         Returns:
-            メモリ内のメッセージのJSON表現
+            メモリ内のメッセージのauthor_name, content, reply_toを含むJSON表現
 
         """
         return json.dumps([m.to_dict() for m in self.memory], ensure_ascii=False, indent=2)
@@ -172,7 +164,7 @@ class ShortTermMemory:
 
             self.memory.pop(0)
 
-        logger.info(
+        logger.debug(
             "Current messages in memory: %s tokens",
             len(
                 self.encoding.encode(
@@ -184,43 +176,7 @@ class ShortTermMemory:
             ),
         )
 
-        logger.info(f"{self.memory=}")
-
-
-def convert_message_to_chatgpt_input(message: Message) -> list[dict[str, Any]]:
-    """Discordメッセージを ChatGPT API入力形式に変換します。
-
-    Args:
-        message: 変換するDiscordメッセージ
-
-    Returns:
-        ChatGPT API形式のメッセージリスト
-
-    """
-    chatgpt_input: list[dict[str, Any]] = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": message.clean_content,
-                }
-            ],
-        }
-    ]
-
-    for attachment in message.attachments:
-        if attachment.content_type in ("image/jpeg", "image/png"):
-            # OpenAI supports PNG (.png), JPEG (.jpeg, .jpg), WEBP (.webp), and Non-animated GIF (.gif).
-            # Files with uncommon extensions (e.g., .jfif) may cause errors.
-            # see https://platform.openai.com/docs/guides/images-vision
-
-            chatgpt_input[0]["content"].append({"type": "input_image", "image_url": attachment.url})
-
-        if attachment.content_type == "application/pdf":
-            chatgpt_input[0]["content"].append({"type": "input_file", "file_url": attachment.url})
-
-    return chatgpt_input
+        logger.debug("Current memory: %s", self.memory)
 
 
 class LLMMessage(BaseModel):
