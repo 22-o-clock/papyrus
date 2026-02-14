@@ -26,6 +26,7 @@ class MessageInMemory:
     Attributes:
         message_id: メッセージのID
         author_name: メッセージの送信者の名前
+        author_id: メッセージの送信者のID
         content: メッセージの内容
         reply_to: 返信先のメッセージの送信者名
         timestamp: メッセージが作成された日時
@@ -34,6 +35,7 @@ class MessageInMemory:
 
     message_id: int
     author_name: str
+    # author_id: int
     content: str
     reply_to: str
     timestamp: datetime.datetime
@@ -72,30 +74,57 @@ class ShortTermMemory:
             message: 追加するDiscordメッセージ
 
         """
-        reply_to = "All"
+        if message.message_snapshots:  # メッセージが転送である場合
+            self.memory.append(
+                MessageInMemory(
+                    message_id=message.id,
+                    author_name=message.author.display_name,
+                    content=f"{message.author.display_name}がメッセージを転送: 「{message.message_snapshots[0].content}」",
+                    reply_to="All",
+                    timestamp=message.created_at,
+                )
+            )
+            return
 
-        if message.reference and message.reference.message_id:
-            try:
-                target_message = await message.channel.fetch_message(message.reference.message_id)
-                reply_to = target_message.author.display_name
-            except discord.errors.NotFound:
-                if isinstance(message.channel, discord.Thread) and isinstance(message.channel.parent, discord.TextChannel):
-                    target_message = await message.channel.parent.fetch_message(message.reference.message_id)
-                    reply_to = target_message.author.display_name
-                else:
-                    logger.warning(
-                        "Referenced message not found (ref_id=%s, channel_id=%s, guild_id=%s)",
-                        message.reference.message_id,
-                        message.channel.id,
-                        message.guild.id if message.guild else None,
+        if message.type == discord.MessageType.reply:  # メッセージが返信である場合
+            if message.reference and message.reference.cached_message:  # 返信先のメッセージがキャッシュされている場合
+                self.memory.append(
+                    MessageInMemory(
+                        message_id=message.id,
+                        author_name=message.author.display_name,
+                        content=message.clean_content,
+                        reply_to=message.reference.cached_message.author.display_name,
+                        timestamp=message.created_at,
                     )
+                )
+                return
+
+            if message.reference and message.reference.message_id:  # 返信先のメッセージがキャッシュされていない場合
+                replied_message = await message.channel.fetch_message(message.reference.message_id)
+                self.memory.append(
+                    MessageInMemory(
+                        message_id=message.id,
+                        author_name=message.author.display_name,
+                        content=message.clean_content,
+                        reply_to=replied_message.author.display_name,
+                        timestamp=message.created_at,
+                    )
+                )
+                return
+
+            logger.warning(
+                "Message is a reply but referenced message not found (ref_id=%s, channel_id=%s, guild_id=%s)",
+                message.reference.message_id if message.reference else None,
+                message.channel.id,
+                message.guild.id if message.guild else None,
+            )
 
         self.memory.append(
             MessageInMemory(
                 message_id=message.id,
                 author_name=message.author.display_name,
                 content=message.clean_content,
-                reply_to=reply_to,
+                reply_to="All",
                 timestamp=message.created_at,
             )
         )
@@ -139,6 +168,8 @@ class ShortTermMemory:
                 )
             ),
         )
+
+        logger.info(f"{self.memory=}")
 
 
 def convert_message_to_chatgpt_input(message: Message) -> list[dict[str, Any]]:
