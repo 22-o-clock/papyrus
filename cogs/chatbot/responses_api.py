@@ -2,6 +2,7 @@ import datetime
 import json
 from dataclasses import dataclass
 from logging import getLogger
+from typing import Any
 
 import dateutil
 import discord
@@ -14,7 +15,8 @@ from .prompt import draft_generator_prompt, response_styler_prompt
 
 logger = getLogger(__name__)
 
-OPENAI_MODEL = "gpt-5.2"
+DRAFT_GENERATOR_MODEL = "gpt-5.2"
+STYLER_MODEL = "gpt-4.1"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 
 
@@ -28,8 +30,8 @@ class MessageInMemory:
         content: メッセージの内容
         reply_to: 返信先のメッセージの送信者名
         timestamp: メッセージが作成された日時
-        image_url: メッセージに含まれる画像のURL（存在する場合）
-        pdf_url: メッセージに含まれるPDFのURL（存在する場合）
+        image_url: メッセージに含まれる画像のURL (存在する場合)
+        pdf_url: メッセージに含まれるPDFのURL (存在する場合)
 
     """
 
@@ -62,7 +64,7 @@ class ShortTermMemory:
         """短期メモリを初期化します。
 
         Args:
-            model: トークンカウント用のtiktokenのモデル名（デフォルト: "gpt-5-"）
+            model: トークンカウント用のtiktokenのモデル名 (デフォルト: "gpt-5-")
 
         """
         self.memory: list[MessageInMemory] = []
@@ -149,7 +151,7 @@ class ShortTermMemory:
         """メモリ内のメッセージを古い順に削除して、トークン数を制限以下に保ちます。
 
         Args:
-            maximum_token: 保持される最大トークン数（デフォルト: 5000）
+            maximum_token: 保持される最大トークン数 (デフォルト: 5000)
 
         """
         while self.memory:
@@ -235,16 +237,40 @@ class DraftGenerator:
             生成されたドラフト回答を含むLLMMessageオブジェクト
 
         """
+        # TODO @se-Anthyme: 履歴にある画像とPDFを扱えるようにする (現状は直接の返信元に含まれる場合のみ渡している)
+
+        llm_input: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": short_term_memory.to_json(),
+                    }
+                ],
+            }
+        ]
+
+        if short_term_memory.memory[-1].image_url:
+            llm_input[0]["content"].append({"type": "input_image", "image_url": short_term_memory.memory[-1].image_url})
+
+        if short_term_memory.memory[-1].pdf_url:
+            llm_input[0]["content"].append({"type": "input_file", "file_url": short_term_memory.memory[-1].pdf_url})
+
         api_response = await self.client.responses.parse(
-            input=short_term_memory.to_json(),
+            input=llm_input,  # type: ignore
             instructions=draft_generator_prompt.DRAFT_INSTRUCTIONS.format(bot_name=bot_name),
-            model=OPENAI_MODEL,
+            model=DRAFT_GENERATOR_MODEL,
             reasoning={"effort": "medium"},
             tools=[
                 {
                     "type": "web_search",
                     "user_location": {"type": "approximate", "country": "JP"},
-                }
+                },
+                {
+                    "type": "code_interpreter",
+                    "container": {"type": "auto"},
+                },
             ],
             text_format=LLMMessage,
         )
@@ -286,7 +312,7 @@ class ResponseStyler:
                 short_term_memory=short_term_memory.to_json(),
                 draft=original_draft.to_json(bot_name=bot_name),
             ),
-            model=OPENAI_MODEL,
+            model=STYLER_MODEL,
             text_format=LLMMessage,
         )
 
