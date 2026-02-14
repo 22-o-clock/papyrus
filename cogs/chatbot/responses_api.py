@@ -119,6 +119,21 @@ class ShortTermMemory:
                 message.guild.id if message.guild else None,
             )
 
+        if message.mentions:  # メッセージにメンションが含まれている場合
+            mentioned_name = (
+                message.mentions[0].display_name
+            )  # 先頭のメンションのみを返信先として扱う。順序は不定なので、複数のメンションが含まれる場合の動作は保証されない。
+            self.memory.append(
+                MessageInMemory(
+                    message_id=message.id,
+                    author_name=message.author.display_name,
+                    content=message.clean_content,
+                    reply_to=mentioned_name,
+                    timestamp=message.created_at,
+                )
+            )
+            return
+
         self.memory.append(
             MessageInMemory(
                 message_id=message.id,
