@@ -138,6 +138,11 @@ class ShortTermMemory:
             )
         )
 
+        # 5. メモリ内のメッセージを日時順にソート
+        self.memory.sort(key=lambda m: m.timestamp)
+
+        logger.debug("Current messages in memory: %s", self.memory)
+
     def to_json(self) -> str:
         """短期記憶内のメッセージをプロンプトに用いるJSON形式の文字列に変換します。
 
