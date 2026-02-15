@@ -1,14 +1,14 @@
 import asyncio
-import os
 import random
 from logging import getLogger
 
 import discord
-from discord import Message
+from discord import Message, app_commands
 from discord.ext import commands
 from openai import AsyncOpenAI
 
-from .responses_api import DraftGenerator, ResponseStyler, ShortTermMemory
+from .database_envs import DatabaseEnvManager
+from .responses_api import ResponsePipeline
 
 logger = getLogger(__name__)
 
@@ -16,136 +16,170 @@ logger = getLogger(__name__)
 class ChatBot(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.client = AsyncOpenAI()
-        self.draft_generator = DraftGenerator(self.client)
-        self.response_styler = ResponseStyler(self.client)
-        self.target_channel: int = 0
-        self.short_term_memory = ShortTermMemory()
+        self.response_pipelines: dict[int, ResponsePipeline] = {}
+        self.env_manager = DatabaseEnvManager()
 
         self._mem_lock = asyncio.Lock()
         self._generating = False
-        self._pending: dict[int, discord.Message] = {}  # message_id -> Message（重複防止）
-        self._last_caught_up_id: int | None = None  # 追いつき用のカーソル
+        self._pending: list[Message] = []
         self._background_tasks: set[asyncio.Task[None]] = set()
 
         self.reply_probability = 0.15
+        self.target_channel_list: list[int] = []
+
+    async def initialize_response_pipeline_for_channel(self, channel_id: int) -> None:
+        if self.bot.user:
+            self.response_pipelines[channel_id] = ResponsePipeline(AsyncOpenAI(), self.bot.user.display_name)
+        else:
+            logger.warning(
+                "Bot user is not available during initialization, response pipeline may not be initialized correctly"
+            )
+            self.response_pipelines[channel_id] = ResponsePipeline(AsyncOpenAI(), "Bot")
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        # データベースからターゲットチャンネルIDのリストを取得
+        target_channel_ids_str = await self.env_manager.get_env("TARGET_CHANNEL_IDS")
+        if target_channel_ids_str:
+            self.target_channel_list = [int(cid) for cid in target_channel_ids_str.split(",")]
+
+        # 各ターゲットチャンネルに対して ResponsePipeline を初期化
+        for channel_id in self.target_channel_list:
+            await self.initialize_response_pipeline_for_channel(channel_id)
+
+        # ボットの返信確率を取得
+        self.reply_probability = float(await self.env_manager.get_env("REPLY_PROBABILITY") or 0.15)
+
+    @app_commands.command(
+        description="ボットが返信する確率を変更します (0から1の間)",
+    )
+    async def change_reply_probability(self, interaction: discord.Interaction, probability: float) -> None:
+        if not 0 <= probability <= 1:
+            await interaction.response.send_message("確率は0から1の間で指定してください。", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            f"ボットの返信確率を {self.reply_probability:.2f} から {probability:.2f} に変更しました。"
+        )
+        self.reply_probability = probability
+        await self.env_manager.set_env("REPLY_PROBABILITY", str(probability))
+
+    @app_commands.command(
+        description="コマンドが呼ばれたチャンネルをボットの返信対象チャンネルに追加します",
+    )
+    async def add_target_channel(self, interaction: discord.Interaction) -> None:
+        channel_id = interaction.channel_id
+
+        if channel_id in self.target_channel_list:
+            await interaction.response.send_message("このチャンネルはすでに返信対象に含まれています。", ephemeral=True)
+            return
+
+        if channel_id is None:
+            await interaction.response.send_message("チャンネル情報が取得できませんでした。", ephemeral=True)
+            return
+
+        # 途中で on_ready が呼ばれないように lock してからリストに追加し、ResponsePipeline を初期化する
+        async with self._mem_lock:
+            self.target_channel_list.append(channel_id)
+            await self.initialize_response_pipeline_for_channel(channel_id)
+
+        await self.env_manager.set_env("TARGET_CHANNEL_IDS", ",".join(str(cid) for cid in self.target_channel_list))
+        await interaction.response.send_message(
+            f"このチャンネルを返信対象に追加しました。現在の対象チャンネル数: {len(self.target_channel_list)}"
+        )
+
+    @app_commands.command(
+        description="コマンドが呼ばれたチャンネルをボットの返信対象チャンネルから削除します",
+    )
+    async def remove_target_channel(self, interaction: discord.Interaction) -> None:
+        channel_id = interaction.channel_id
+
+        if channel_id not in self.target_channel_list:
+            await interaction.response.send_message("このチャンネルは返信対象に含まれていません。", ephemeral=True)
+            return
+
+        self.target_channel_list.remove(channel_id)
+        await self.env_manager.set_env("TARGET_CHANNEL_IDS", ",".join(str(cid) for cid in self.target_channel_list))
+        await interaction.response.send_message(
+            f"このチャンネルを返信対象から削除しました。現在の対象チャンネル数: {len(self.target_channel_list)}"
+        )
 
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
-        if message.channel.id != int(os.environ["TARGET_CHANNEL"]):
+        # 1. 対象チャンネル以外に対するメッセージは無視
+        if message.channel.id not in self.target_channel_list:
             return
 
-        # 生成中なら memory を触らず pending に退避
+        # 2. 回答の生成中は memory を触らずメッセージを pending に退避して終了
         if self._generating:
-            self._pending[message.id] = message
+            self._pending.append(message)
             return
 
-        # 生成中でなければ普通に memory に追加
+        # 3. 回答が生成中でない場合の処理
+        # 3.1 メッセージを memory に追加 (ここは lock する)
         async with self._mem_lock:
-            await self.short_term_memory.append(message)
-            self.short_term_memory.forget()
-            self._last_caught_up_id = message.id
+            await self.response_pipelines[message.channel.id].short_term_memory.append(message)
 
+        # 3.2 回答を行うかの判定
+        # 3.2.1 ボットのメッセージについては返信しない
         if message.author.bot:
             return
 
-        # 一定確率で応答（生成は on_message の外で回す）
+        # 3.2.2 reply_probability に基づいて返信するかを決定
         if random.random() < self.reply_probability and not self._generating:
-            task = asyncio.create_task(self._generate_and_post(message.channel))
+            task = asyncio.create_task(self.reply_to_message(message))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
             return
 
+        # 3.2.3 メンションがあった場合は必ず返信
         for user in message.mentions:
-            if user.id == self.bot.user.id:
-                task = asyncio.create_task(self._generate_and_post(message.channel))
+            if self.bot.user and user.id == self.bot.user.id and not self._generating:
+                task = asyncio.create_task(self.reply_to_message(message))
                 self._background_tasks.add(task)
                 task.add_done_callback(self._background_tasks.discard)
                 return
 
-        if message.channel.id == int(os.environ["TARGET_CHANNEL"]):
-            await self.short_term_memory.append(message)
-
-    async def _generate_and_post(self, channel: discord.abc.Messageable) -> None:
-        # 二重起動防止
+    async def reply_to_message(self, message: Message) -> None:
+        # 1. 念のため generating フラグを確認して、生成中なら何もしないで終了
         if self._generating:
             return
 
         self._generating = True
 
         try:
-            # --- 1) 生成用スナップショットを作る（ここだけ lock）
+            # 2. 念のため、生成前に pending に溜まっているメッセージを memory に取り込む (ここは lock する)
             async with self._mem_lock:
-                # pending が溜まっていたら、まずは取り込む（古い順）
-                for mid in sorted(self._pending):
-                    await self.short_term_memory.append(self._pending[mid])
+                for pending_message in sorted(self._pending, key=lambda m: m.id):
+                    await self.response_pipelines[pending_message.channel.id].short_term_memory.append(pending_message)
                 self._pending.clear()
 
-                self.short_term_memory.forget()
+            # 3. typing エフェクトを出しつつ、LLM で回答を生成
+            async with message.channel.typing():
+                generated_response = await self.response_pipelines[message.channel.id].generate_response()
+                is_replied = False
 
-                # cutoff（この時点までを入力に含めた、という境界）
-                cutoff_id = self._last_caught_up_id
+                # 3.1 返信が生成された場合の処理
+                # 3.1.1 short_term_memory から宛先のユーザーによる最新のメッセージが見つかれば、そのメッセージに返信
+                if generated_response.reply_to != "All":
+                    for message_in_memory in reversed(self.response_pipelines[message.channel.id].short_term_memory.memory):
+                        if message_in_memory.author_name == generated_response.reply_to and isinstance(
+                            message.channel, discord.TextChannel | discord.Thread
+                        ):
+                            target_message = message.channel.get_partial_message(message_in_memory.message_id)
+                            await target_message.reply(generated_response.content)
+                            is_replied = True
+                            break
 
-            logger.info("Generating response...")
+                # 3.1.2 見つからない場合は通常のメッセージとして送信
+                if not is_replied:
+                    await message.channel.send(generated_response.content)
 
-            async with channel.typing():
-                # --- 2) LLM生成（ここは lock しない：時間がかかるので）
-                draft = await self.draft_generator.draft(
-                    self.bot.user.display_name if self.bot.user else "", self.short_term_memory
-                )
-                final_response = await self.response_styler.style(
-                    self.bot.user.display_name if self.bot.user else "", self.short_term_memory, draft
-                )
-
-                # --- 3) reply_to から対応するメッセージを検索
-                if final_response.reply_to == "All":
-                    await channel.send(final_response.content)
-                    return
-
-                reply_message = None
-
-                if isinstance(channel, discord.TextChannel | discord.Thread):
-                    # short_term_memory から reply_to に一致するメッセージの ID を探す
-                    for mem_msg in reversed(self.short_term_memory.memory):
-                        if mem_msg.author_name == final_response.reply_to:
-                            try:
-                                reply_message = await channel.fetch_message(mem_msg.message_id)
-                                break
-                            except discord.NotFound:
-                                logger.warning(f"Message {mem_msg.message_id} not found in channel")
-                                continue
-
-                # --- 4) 投稿
-                if reply_message:
-                    # リプライメッセージとして送信
-                    sent = await reply_message.reply(final_response.content)
-                else:
-                    # 対応するメッセージが見つからない場合は通常投稿
-                    sent = await channel.send(final_response.content)
-
-            # --- 5) 投稿後に「最新まで追いつく」
-            # cutoff 以降のメッセージを history から取り込む（Bot投稿も含めるなら sent も append）
+            # 4. 生成中に投稿されたメッセージを memory に取り込む (ここは lock する)
             async with self._mem_lock:
-                # bot の投稿も memory に入れたいなら（必要なら reply_to なども整備）
-                await self.short_term_memory.append(sent)  # append が Message を受け取れる前提
-                # cutoff が None の場合（初回など）は after を使わず recent を取る運用でもOK
-                if cutoff_id is not None and isinstance(channel, discord.TextChannel | discord.Thread):
-                    after_obj = discord.Object(id=cutoff_id)
-                    async for m in channel.history(after=after_obj, oldest_first=True, limit=200):
-                        # 生成中に on_message で拾えなかった分や、取りこぼし対策
-                        await self.short_term_memory.append(m)
-
-                # pending に溜まっていたものも取り込む（保険）
-                for mid in sorted(self._pending):
-                    await self.short_term_memory.append(self._pending[mid])
+                for pending_message in sorted(self._pending, key=lambda m: m.id):
+                    await self.response_pipelines[pending_message.channel.id].short_term_memory.append(pending_message)
                 self._pending.clear()
-
-                self.short_term_memory.forget()
-
-                # 追いついた時点の最後を更新
-                if isinstance(channel, discord.TextChannel | discord.Thread):
-                    # history は取れない場合があるので、取れたものがあれば更新、なければ sent.id
-                    self._last_caught_up_id = max(self._last_caught_up_id or 0, sent.id)
 
         finally:
             self._generating = False
