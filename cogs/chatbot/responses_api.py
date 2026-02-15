@@ -217,20 +217,21 @@ class LLMMessage(BaseModel):
 class DraftGenerator:
     """回答のドラフト生成を担当するクラス。OpenAI APIを使用して回答のドラフトを生成します。"""
 
-    def __init__(self, client: AsyncOpenAI) -> None:
+    def __init__(self, client: AsyncOpenAI, bot_name: str) -> None:
         """クラスを初期化します。
 
         Args:
             client: OpenAIの非同期クライアント
+            bot_name: botの名前
 
         """
         self.client = client
+        self.bot_name = bot_name
 
-    async def draft(self, bot_name: str, short_term_memory: ShortTermMemory) -> LLMMessage:
+    async def draft(self, short_term_memory: ShortTermMemory) -> LLMMessage:
         """メッセージのドラフト回答を生成します。
 
         Args:
-            bot_name: botの名前
             short_term_memory: メッセージ履歴
 
         Returns:
@@ -259,7 +260,7 @@ class DraftGenerator:
 
         api_response = await self.client.responses.parse(
             input=llm_input,  # type: ignore
-            instructions=draft_generator_prompt.DRAFT_INSTRUCTIONS.format(bot_name=bot_name),
+            instructions=draft_generator_prompt.DRAFT_INSTRUCTIONS.format(bot_name=self.bot_name),
             model=DRAFT_GENERATOR_MODEL,
             reasoning={"effort": "medium"},
             tools=[
@@ -285,20 +286,21 @@ class DraftGenerator:
 class ResponseStyler:
     """回答の形式面を調整するクラス。ドラフトを整形して最終回答を生成します。"""
 
-    def __init__(self, client: AsyncOpenAI) -> None:
+    def __init__(self, client: AsyncOpenAI, bot_name: str) -> None:
         """クラスを初期化します。
 
         Args:
             client: OpenAIの非同期クライアント
+            bot_name: botの名前
 
         """
         self.client = client
+        self.bot_name = bot_name
 
-    async def style(self, bot_name: str, short_term_memory: ShortTermMemory, original_draft: LLMMessage) -> LLMMessage:
+    async def style(self, short_term_memory: ShortTermMemory, original_draft: LLMMessage) -> LLMMessage:
         """ドラフトをスタイリングして最終回答を生成します。
 
         Args:
-            bot_name: botの名前
             short_term_memory: メッセージ履歴
             original_draft: DraftGeneratorが生成した原案
 
@@ -307,10 +309,10 @@ class ResponseStyler:
 
         """
         api_response = await self.client.responses.parse(
-            instructions=response_styler_prompt.STYLE_INSTRUCTIONS.format(bot_name=bot_name),
+            instructions=response_styler_prompt.STYLE_INSTRUCTIONS.format(bot_name=self.bot_name),
             input=response_styler_prompt.STYLE_INPUT.format(
                 short_term_memory=short_term_memory.to_json(),
-                draft=original_draft.to_json(bot_name=bot_name),
+                draft=original_draft.to_json(bot_name=self.bot_name),
             ),
             model=STYLER_MODEL,
             text_format=LLMMessage,
@@ -321,3 +323,43 @@ class ResponseStyler:
             return LLMMessage(content="", reply_to="All")
 
         return api_response.output_parsed
+
+
+class ResponsePipeline:
+    """ドラフト生成とスタイリングを一連の流れで実行するクラス。"""
+
+    def __init__(self, client: AsyncOpenAI, bot_name: str) -> None:
+        """クラスを初期化します。
+
+        Args:
+            client: OpenAIの非同期クライアント
+            bot_name: botの名前
+
+        """
+        self.draft_generator = DraftGenerator(client, bot_name)
+        self.response_styler = ResponseStyler(client, bot_name)
+        self.short_term_memory = ShortTermMemory()
+        self.bot_name = bot_name
+
+    async def add_message_to_memory(self, message: Message) -> None:
+        """Discordのメッセージを短期記憶に追加します。
+
+        Args:
+            message: 追加するDiscordメッセージ
+
+        """
+        await self.short_term_memory.append(message)
+        self.short_term_memory.forget()
+
+    async def generate_response(self) -> LLMMessage:
+        """短期記憶から最終回答を生成します。
+
+        Args:
+            short_term_memory: メッセージ履歴
+
+        Returns:
+            スタイリングされた最終回答を含むLLMMessageオブジェクト
+
+        """
+        draft = await self.draft_generator.draft(self.short_term_memory)
+        return await self.response_styler.style(self.short_term_memory, draft)
