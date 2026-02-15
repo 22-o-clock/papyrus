@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 from logging import config, getLogger
@@ -15,6 +14,14 @@ async def load_all_cogs(bot: commands.Bot) -> None:
     await chatbot.setup(bot)
 
 
+class MyBot(commands.Bot):
+    async def setup_hook(self) -> None:
+        await load_all_cogs(self)
+        my_server = await self.fetch_guild(int(os.environ["SERVER_ID"]))
+        self.tree.copy_global_to(guild=my_server)
+        await self.tree.sync(guild=my_server)
+
+
 def main() -> None:
     dotenv.load_dotenv()
 
@@ -24,8 +31,7 @@ def main() -> None:
     cogs_logger = getLogger("cogs")
     cogs_logger.setLevel(os.getenv("LOG_LEVEL", "WARNING"))
 
-    bot = commands.Bot(command_prefix="!?", intents=Intents.all())
-    asyncio.run(load_all_cogs(bot))
+    bot = MyBot(command_prefix="!?", intents=Intents.all())
     bot.run(os.environ["DISCORD_BOT_TOKEN"])
 
 
