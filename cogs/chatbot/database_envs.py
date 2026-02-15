@@ -9,8 +9,6 @@ from sqlalchemy.sql.expression import Select
 
 logger = getLogger(__name__)
 
-CONNECTION_STRING = os.environ["SUPABASE_CONNECTION_STRING"]
-
 
 class Base(DeclarativeBase):
     pass
@@ -28,7 +26,7 @@ class DatabaseEnvs(Base):
 
 class DatabaseEnvManager:
     def __init__(self) -> None:
-        self.engine: AsyncEngine = create_async_engine(CONNECTION_STRING)
+        self.engine: AsyncEngine = create_async_engine(os.environ["SUPABASE_CONNECTION_STRING"])
 
     async def get_env(self, key: str) -> str | None:
         """指定したキーに対応する環境変数の値をデータベースから取得します。
