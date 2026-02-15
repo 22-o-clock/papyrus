@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy import CursorResult, Text, insert, update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, DeclarativeMeta, mapped_column
+from sqlalchemy.orm import DeclarativeBase, mapped_column
 from sqlalchemy.sql.expression import Select
 
 logger = getLogger(__name__)
@@ -29,18 +29,6 @@ class DatabaseEnvs(Base):
 class DatabaseEnvManager:
     def __init__(self) -> None:
         self.engine: AsyncEngine = create_async_engine(CONNECTION_STRING)
-
-    async def create_all_tables(self, model: DeclarativeMeta) -> None:
-        async with self.engine.begin() as conn:
-            await conn.run_sync(model.metadata.create_all)
-
-        await self.engine.dispose()
-
-    async def drop_all_tables(self, model: DeclarativeMeta) -> None:
-        async with self.engine.begin() as conn:
-            await conn.run_sync(model.metadata.drop_all)
-
-        await self.engine.dispose()
 
     async def get_env(self, key: str) -> str | None:
         """指定したキーに対応する環境変数の値をデータベースから取得します。
