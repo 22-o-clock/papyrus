@@ -15,8 +15,8 @@ from .prompt import draft_generator_prompt, response_styler_prompt
 
 logger = getLogger(__name__)
 
-DRAFT_GENERATOR_MODEL = "gpt-5.2"
-STYLER_MODEL = "gpt-4.1"
+DRAFT_GENERATOR_MODEL = "gpt-5.1"
+STYLER_MODEL = "gpt-5-mini"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 
 
@@ -320,6 +320,7 @@ class ResponseStyler:
                 draft=original_draft.to_json(bot_name=self.bot_name),
             ),
             model=STYLER_MODEL,
+            reasoning={"effort": "low"},
             text_format=LLMMessage,
         )
 

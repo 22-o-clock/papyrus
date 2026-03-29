@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS builder
 
 ARG WORKDIR="/bot"
 
@@ -9,7 +9,7 @@ RUN uv sync --frozen --no-install-project --no-dev
 
 COPY . .
 
-FROM python:3.12-slim-bookworm
+FROM python:3.13-slim-bookworm
 
 ARG  USER_ID="10000"
 ARG  GROUP_ID="10001"
