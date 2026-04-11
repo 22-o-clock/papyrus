@@ -18,7 +18,7 @@ ARG  WORKDIR="/bot"
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="${WORKDIR}/.venv/bin:$PATH" \
-    PYTHONPATH="${WORKDIR}/.venv/lib/python3.12/site-packages"
+    PYTHONPATH="${WORKDIR}/.venv/lib/python3.13/site-packages"
 
 WORKDIR ${WORKDIR}
 COPY --from=builder ${WORKDIR} ${WORKDIR}
