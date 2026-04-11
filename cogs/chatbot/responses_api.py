@@ -54,6 +54,7 @@ class MessageInMemory:
             "author_name": self.author_name,
             "content": self.content,
             "reply_to": self.reply_to,
+            "timestamp": self.timestamp.astimezone(LOCAL_TIMEZONE).isoformat(),
         }
 
 
