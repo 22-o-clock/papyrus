@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim AS builder
 
 ARG WORKDIR="/bot"
 
@@ -9,7 +9,7 @@ RUN uv sync --frozen --no-install-project --no-dev
 
 COPY . .
 
-FROM python:3.13-slim-bookworm
+FROM python:3.13-slim-trixie
 
 ARG  USER_ID="10000"
 ARG  GROUP_ID="10001"
@@ -22,6 +22,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR ${WORKDIR}
 COPY --from=builder ${WORKDIR} ${WORKDIR}
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg=* \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -g "${GROUP_ID}" "${USER_NAME}" && \
     useradd -l -u "${USER_ID}" -m "${USER_NAME}" -g "${USER_NAME}"
