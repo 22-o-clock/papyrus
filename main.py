@@ -9,11 +9,12 @@ from discord.ext import commands
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from cogs import chatbot, voicevox
+from cogs import chatbot, voicevox, admin
 from core.db import dispose_engine, init_engine
 
 
 async def load_all_cogs(bot: commands.Bot, session_factory: async_sessionmaker) -> None:
+    await admin.setup(bot)
     await chatbot.setup(bot, session_factory)
     await voicevox.setup(bot, session_factory)
 

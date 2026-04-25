@@ -5,7 +5,7 @@ import os
 
 import asyncio
 import io
-from aiohttp import ClientSession, ClientResponse
+from aiohttp import ClientSession
 
 from discord import app_commands, Interaction
 from discord import VoiceChannel, StageChannel, VoiceClient
