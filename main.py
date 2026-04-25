@@ -10,7 +10,7 @@ from discord.ext import commands
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from cogs import chatbot, voicevox
-from cogs.db import dispose_engine, init_engine
+from core.db import dispose_engine, init_engine
 
 
 async def load_all_cogs(bot: commands.Bot, session_factory: async_sessionmaker) -> None:

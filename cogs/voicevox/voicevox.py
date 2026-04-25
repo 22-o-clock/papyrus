@@ -15,8 +15,8 @@ from discord import Message
 from discord.ext import commands
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from cogs.tools.utils import get_voice_client_from_author
-from cogs.tools.utils import get_voice_client_from_ctx, get_voice_channel_from_ctx
+from core.tools.utils import get_voice_client_from_author
+from core.tools.utils import get_voice_client_from_ctx, get_voice_channel_from_ctx
 from .database import VoiceVoxDatabase
 
 logger = getLogger(__name__)
