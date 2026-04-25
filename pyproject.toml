@@ -5,8 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "aiohttp>=3.13.3",
+    "asyncio>=4.0.0",
     "asyncpg>=0.31.0",
-    "discord-py>=2.6.4",
+    "discord-py[voice]>=2.7.1",
     "dotenv>=0.9.9",
     "openai>=2.14.0",
     "pydantic>=2.12.5",
