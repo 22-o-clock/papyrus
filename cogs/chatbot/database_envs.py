@@ -1,17 +1,13 @@
-import os
 from logging import getLogger
 from typing import Any
 
-from sqlalchemy import CursorResult, Text, insert, update
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, mapped_column
-from sqlalchemy.sql.expression import Select
+from sqlalchemy import CursorResult, Text, insert, select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import mapped_column
+
+from cogs.db import Base
 
 logger = getLogger(__name__)
-
-
-class Base(DeclarativeBase):
-    pass
 
 
 class DatabaseEnvs(Base):
@@ -25,8 +21,8 @@ class DatabaseEnvs(Base):
 
 
 class DatabaseEnvManager:
-    def __init__(self) -> None:
-        self.engine: AsyncEngine = create_async_engine(os.environ["SUPABASE_CONNECTION_STRING"])
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
 
     async def get_env(self, key: str) -> str | None:
         """指定したキーに対応する環境変数の値をデータベースから取得します。
@@ -38,11 +34,9 @@ class DatabaseEnvManager:
             指定したキーに対応する値。存在しない場合は None。
 
         """
-        async with self.engine.connect() as conn:
-            cursor_result: CursorResult[Any] = await conn.execute(Select(DatabaseEnvs.value).where(DatabaseEnvs.key == key))
+        async with self._session_factory() as session:
+            cursor_result: CursorResult[Any] = await session.execute(select(DatabaseEnvs.value).where(DatabaseEnvs.key == key))
             result = cursor_result.all()
-
-        await self.engine.dispose()
 
         return result[0][0] if result else None
 
@@ -57,15 +51,13 @@ class DatabaseEnvManager:
             value: 保存したい環境変数の値
 
         """
-        async with self.engine.begin() as conn:
+        async with self._session_factory.begin() as session:
             # 既に存在するかチェック
-            result: CursorResult[Any] = await conn.execute(Select(DatabaseEnvs).where(DatabaseEnvs.key == key))
+            result: CursorResult[Any] = await session.execute(select(DatabaseEnvs).where(DatabaseEnvs.key == key))
 
             if result.first():
                 # UPDATE
-                await conn.execute(update(DatabaseEnvs).where(DatabaseEnvs.key == key).values(value=value))
+                await session.execute(update(DatabaseEnvs).where(DatabaseEnvs.key == key).values(value=value))
             else:
                 # INSERT
-                await conn.execute(insert(DatabaseEnvs).values(key=key, value=value))
-
-        await self.engine.dispose()
+                await session.execute(insert(DatabaseEnvs).values(key=key, value=value))

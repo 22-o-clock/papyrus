@@ -6,6 +6,7 @@ import discord
 from discord import Message, app_commands
 from discord.ext import commands
 from openai import AsyncOpenAI
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .database_envs import DatabaseEnvManager
 from .responses_api import ResponsePipeline
@@ -14,10 +15,10 @@ logger = getLogger(__name__)
 
 
 class ChatBot(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
         self.response_pipelines: dict[int, ResponsePipeline] = {}
-        self.env_manager = DatabaseEnvManager()
+        self.env_manager = DatabaseEnvManager(session_factory)
 
         self._mem_lock = asyncio.Lock()
         self._generating = False
@@ -185,5 +186,5 @@ class ChatBot(commands.Cog):
             self._generating = False
 
 
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(ChatBot(bot))
+async def setup(bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    await bot.add_cog(ChatBot(bot, session_factory))

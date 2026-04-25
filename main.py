@@ -7,19 +7,28 @@ import dotenv
 from discord import Intents
 from discord.ext import commands
 
-from cogs import chatbot
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from cogs import chatbot, voicevox
+from cogs.db import dispose_engine, init_engine
 
 
-async def load_all_cogs(bot: commands.Bot) -> None:
-    await chatbot.setup(bot)
+async def load_all_cogs(bot: commands.Bot, session_factory: async_sessionmaker) -> None:
+    await chatbot.setup(bot, session_factory)
+    await voicevox.setup(bot, session_factory)
 
 
 class MyBot(commands.Bot):
     async def setup_hook(self) -> None:
-        await load_all_cogs(self)
+        session_factory = init_engine()
+        await load_all_cogs(self, session_factory)
         my_server = await self.fetch_guild(int(os.environ["SERVER_ID"]))
         self.tree.copy_global_to(guild=my_server)
         await self.tree.sync(guild=my_server)
+
+    async def close(self) -> None:
+        await dispose_engine()
+        await super().close()
 
 
 def main() -> None:
