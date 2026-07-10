@@ -1,6 +1,4 @@
-from discord import TextChannel, Thread, VoiceChannel, StageChannel
-from discord import VoiceClient, VoiceState, User, Member
-from discord import Interaction
+from discord import Interaction, Member, StageChannel, TextChannel, Thread, User, VoiceChannel, VoiceClient, VoiceState
 from discord.ext import commands
 
 
@@ -10,10 +8,7 @@ async def fetch_text_channel(bot: commands.Bot, channel_id: int):
     if isinstance(channel, (Thread, TextChannel)):
         return channel
 
-    else:
-        raise TypeError(
-            f"Unexpected type of bot.fetch_channel({channel_id}):expected Thread or TextChannel, got {type(channel)}."
-        )
+    raise TypeError(f"Unexpected type of bot.fetch_channel({channel_id}):expected Thread or TextChannel, got {type(channel)}.")
 
 
 def get_voice_client_from_author(author: User | Member) -> VoiceClient:

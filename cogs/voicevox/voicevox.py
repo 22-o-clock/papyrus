@@ -1,22 +1,26 @@
-from logging import getLogger
-import re
-from re import Pattern
-import os
-
 import asyncio
 import io
-from aiohttp import ClientSession
+import os
+import re
+from logging import getLogger
+from re import Pattern
 
-from discord import Member, app_commands, Interaction
-from discord import VoiceChannel, StageChannel, VoiceClient
-from discord import ClientException
-from discord import FFmpegPCMAudio
-from discord import Message
+from aiohttp import ClientSession
+from discord import (
+    ClientException,
+    FFmpegPCMAudio,
+    Interaction,
+    Message,
+    StageChannel,
+    VoiceChannel,
+    VoiceClient,
+    app_commands,
+)
 from discord.ext import commands
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from core.tools.utils import get_voice_client_from_author
-from core.tools.utils import get_voice_client_from_ctx, get_voice_channel_from_ctx
+from core.tools.utils import get_voice_channel_from_ctx, get_voice_client_from_author, get_voice_client_from_ctx
+
 from .database import VoiceVoxDatabase
 
 logger = getLogger(__name__)
@@ -46,10 +50,6 @@ class Voicevox(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
-        if message.guild.voice_client is None:
-            return
-        if message.author.voice is None:
-            return
         if message.author.bot:
             return
         if str(message.channel.id) != self.message_channel:
@@ -150,12 +150,11 @@ class Voicevox(commands.Cog):
         await interaction.response.send_message(f"現在のキャラクター: {speaker_name} (ID: {speaker_id})", ephemeral=True)
 
     async def get_speakers(self) -> dict[int, str]:
-        async with ClientSession() as session:
-            async with session.get(f"{self.voicevox_url}/speakers") as response:
-                if response.status != 200:
-                    logger.error(f"Failed to get speakers: {response.status}")
-                    return {}
-                speakers = await response.json()
+        async with ClientSession() as session, session.get(f"{self.voicevox_url}/speakers") as response:
+            if response.status != 200:
+                logger.error(f"Failed to get speakers: {response.status}")
+                return {}
+            speakers = await response.json()
 
         response = dict()
 
