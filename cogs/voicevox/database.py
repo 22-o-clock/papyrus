@@ -4,7 +4,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
 
-from cogs.db import Base
+from core.db import Base
 
 
 class VoiceVoxTable(Base):
