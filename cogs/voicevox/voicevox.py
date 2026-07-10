@@ -7,7 +7,7 @@ import asyncio
 import io
 from aiohttp import ClientSession
 
-from discord import app_commands, Interaction
+from discord import Member, app_commands, Interaction
 from discord import VoiceChannel, StageChannel, VoiceClient
 from discord import ClientException
 from discord import FFmpegPCMAudio
@@ -46,6 +46,10 @@ class Voicevox(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
+        if message.guild.voice_client is None:
+            return
+        if message.author.voice is None:
+            return
         if message.author.bot:
             return
         if str(message.channel.id) != self.message_channel:
