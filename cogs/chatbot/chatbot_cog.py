@@ -1,5 +1,6 @@
 import asyncio
 import random
+from dataclasses import dataclass, field
 from logging import getLogger
 
 import discord
@@ -13,6 +14,26 @@ from .database_envs import DatabaseEnvManager
 from .responses_api import ResponsePipeline
 
 logger = getLogger(__name__)
+
+
+@dataclass
+class ChannelProcessingState:
+    """チャンネルごとの生成状態と生成中に受信したメッセージを保持します。"""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    generating: bool = False
+    pending_messages: list[Message] = field(default_factory=list)
+    queued_response_message: Message | None = None
+
+
+def claim_response_slot(state: ChannelProcessingState, message: Message) -> bool:
+    """生成枠を確保し、使用中の場合は次の返信対象としてメッセージを保持します。"""
+    if state.generating:
+        state.queued_response_message = message
+        return False
+
+    state.generating = True
+    return True
 
 
 def can_change_channel_role(*, is_thread: bool, manage_channels: bool) -> bool:
@@ -48,9 +69,8 @@ class ChatBot(commands.Cog):
         self.env_manager = DatabaseEnvManager(session_factory)
         self.channel_role_manager = ChannelRoleManager(self.env_manager)
 
-        self._mem_lock = asyncio.Lock()
-        self._generating = False
-        self._pending: list[Message] = []
+        self._initialization_lock = asyncio.Lock()
+        self._channel_states: dict[int, ChannelProcessingState] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
 
         self.reply_probability = 0.15
@@ -63,6 +83,15 @@ class ChatBot(commands.Cog):
                 "Bot user is not available during initialization, response pipeline may not be initialized correctly"
             )
             self.response_pipelines[channel_id] = ResponsePipeline(AsyncOpenAI(), "Bot")
+
+    async def _ensure_channel_state(self, channel_id: int) -> ChannelProcessingState:
+        """チャンネルの応答パイプラインと処理状態を一度だけ初期化します。"""
+        if channel_id not in self._channel_states:
+            async with self._initialization_lock:
+                if channel_id not in self._channel_states:
+                    await self.initialize_response_pipeline_for_channel(channel_id)
+                    self._channel_states[channel_id] = ChannelProcessingState()
+        return self._channel_states[channel_id]
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -160,23 +189,17 @@ class ChatBot(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
         # 1. 明示的に呼ばれる前の会話も保持するため、チャンネルごとにパイプラインを遅延初期化
-        if message.channel.id not in self.response_pipelines:
-            async with self._mem_lock:
-                if message.channel.id not in self.response_pipelines:
-                    await self.initialize_response_pipeline_for_channel(message.channel.id)
+        state = await self._ensure_channel_state(message.channel.id)
 
-        # 2. 回答の生成中は memory を触らずメッセージを pending に退避して終了
-        if self._generating:
-            self._pending.append(message)
-            return
+        # 2. 同じチャンネルで回答を生成中の場合、生成中の文脈を変えないようメッセージを保留
+        async with state.lock:
+            if state.generating:
+                state.pending_messages.append(message)
+            else:
+                await self.response_pipelines[message.channel.id].short_term_memory.append(message)
 
-        # 3. 回答が生成中でない場合の処理
-        # 3.1 メッセージを memory に追加 (ここは lock する)
-        async with self._mem_lock:
-            await self.response_pipelines[message.channel.id].short_term_memory.append(message)
-
-        # 3.2 回答を行うかの判定
-        # 3.2.1 ボットのメッセージについては返信しない
+        # 3. 回答を行うかの判定
+        # 3.1 ボットのメッセージについては返信しない
         if message.author.bot:
             return
 
@@ -196,9 +219,17 @@ class ChatBot(commands.Cog):
             replied_to_bot=replied_to_bot,
             spontaneous_chat_reply=spontaneous_chat_reply,
         ):
-            task = asyncio.create_task(self.reply_to_message(message))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            await self._schedule_response(message, state)
+
+    async def _schedule_response(self, message: Message, state: ChannelProcessingState) -> None:
+        """チャンネルの生成枠を確保し、確保できた場合は応答処理を開始します。"""
+        async with state.lock:
+            if not claim_response_slot(state, message):
+                return
+
+        task = asyncio.create_task(self._process_response_queue(message, state))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
         """受信したメッセージが、このボットの発言へのDiscord返信か判定します。
@@ -237,50 +268,55 @@ class ChatBot(commands.Cog):
 
         return referenced_message.author.id == bot_user.id
 
-    async def reply_to_message(self, message: Message) -> None:
-        # 1. 念のため generating フラグを確認して、生成中なら何もしないで終了
-        if self._generating:
-            return
-
-        self._generating = True
-
+    async def _process_response_queue(self, message: Message, state: ChannelProcessingState) -> None:
+        """同一チャンネルの返信要求を順番に生成し、保留メッセージを文脈へ反映します。"""
+        current_message = message
+        completed_normally = False
         try:
-            # 2. 念のため、生成前に pending に溜まっているメッセージを memory に取り込む (ここは lock する)
-            async with self._mem_lock:
-                for pending_message in sorted(self._pending, key=lambda m: m.id):
-                    await self.response_pipelines[pending_message.channel.id].short_term_memory.append(pending_message)
-                self._pending.clear()
+            while True:
+                await self._generate_and_send_response(current_message)
 
-            # 3. typing エフェクトを出しつつ、LLM で回答を生成
-            async with message.channel.typing():
-                generated_response = await self.response_pipelines[message.channel.id].generate_response()
-                is_replied = False
-
-                # 3.1 返信が生成された場合の処理
-                # 3.1.1 モデルが短期記憶内のメッセージIDを指定した場合、そのメッセージに返信
-                reply_to_message_id = generated_response.reply_to_message_id
-                short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
-                if (
-                    reply_to_message_id is not None
-                    and short_term_memory.contains_message(reply_to_message_id)
-                    and isinstance(message.channel, discord.TextChannel | discord.Thread)
-                ):
-                    target_message = message.channel.get_partial_message(reply_to_message_id)
-                    await target_message.reply(generated_response.content)
-                    is_replied = True
-
-                # 3.1.2 見つからない場合は通常のメッセージとして送信
-                if not is_replied:
-                    await message.channel.send(generated_response.content)
-
-            # 4. 生成中に投稿されたメッセージを memory に取り込む (ここは lock する)
-            async with self._mem_lock:
-                for pending_message in sorted(self._pending, key=lambda m: m.id):
-                    await self.response_pipelines[pending_message.channel.id].short_term_memory.append(pending_message)
-                self._pending.clear()
-
+                async with state.lock:
+                    await self._flush_pending_messages(current_message.channel.id, state)
+                    next_message = state.queued_response_message
+                    state.queued_response_message = None
+                    if next_message is None:
+                        state.generating = False
+                        completed_normally = True
+                        return
+                    current_message = next_message
         finally:
-            self._generating = False
+            if not completed_normally:
+                async with state.lock:
+                    await self._flush_pending_messages(message.channel.id, state)
+                    state.queued_response_message = None
+                    state.generating = False
+
+    async def _flush_pending_messages(self, channel_id: int, state: ChannelProcessingState) -> None:
+        """生成中に保留したメッセージを時系列順で短期記憶へ移します。"""
+        for pending_message in sorted(state.pending_messages, key=lambda pending: pending.id):
+            await self.response_pipelines[channel_id].short_term_memory.append(pending_message)
+        state.pending_messages.clear()
+
+    async def _generate_and_send_response(self, message: Message) -> None:
+        """短期記憶から回答を1件生成し、指定されたチャンネルへ送信します。"""
+        async with message.channel.typing():
+            generated_response = await self.response_pipelines[message.channel.id].generate_response()
+            is_replied = False
+
+            reply_to_message_id = generated_response.reply_to_message_id
+            short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
+            if (
+                reply_to_message_id is not None
+                and short_term_memory.contains_message(reply_to_message_id)
+                and isinstance(message.channel, discord.TextChannel | discord.Thread)
+            ):
+                target_message = message.channel.get_partial_message(reply_to_message_id)
+                await target_message.reply(generated_response.content)
+                is_replied = True
+
+            if not is_replied:
+                await message.channel.send(generated_response.content)
 
 
 async def setup(bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:

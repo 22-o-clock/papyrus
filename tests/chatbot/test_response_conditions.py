@@ -6,7 +6,13 @@ from unittest.mock import Mock
 from discord import Message, MessageReference
 
 from cogs.chatbot.channel_roles import ChannelRole
-from cogs.chatbot.chatbot_cog import can_change_channel_role, get_available_referenced_author_id, should_respond
+from cogs.chatbot.chatbot_cog import (
+    ChannelProcessingState,
+    can_change_channel_role,
+    claim_response_slot,
+    get_available_referenced_author_id,
+    should_respond,
+)
 
 
 def make_discord_message(author_id: int) -> Message:
@@ -83,6 +89,43 @@ class ChannelRolePermissionTest(unittest.TestCase):
             self.fail("権限のないメンバーが通常チャンネルの役割を変更できます")
         if not can_change_channel_role(is_thread=False, manage_channels=True):
             self.fail("チャンネル管理者が通常チャンネルの役割を変更できません")
+
+
+class ChannelProcessingStateTest(unittest.TestCase):
+    def test_different_channels_can_claim_generation_slots(self) -> None:
+        first_state = ChannelProcessingState()
+        second_state = ChannelProcessingState()
+        first_message = make_discord_message(author_id=100)
+        second_message = make_discord_message(author_id=200)
+
+        first_claimed = claim_response_slot(first_state, first_message)
+        second_claimed = claim_response_slot(second_state, second_message)
+
+        if not first_claimed or not second_claimed:
+            self.fail("別チャンネルの生成枠が互いに干渉しています")
+
+    def test_same_channel_queues_latest_response_request(self) -> None:
+        state = ChannelProcessingState()
+        first_message = make_discord_message(author_id=100)
+        second_message = make_discord_message(author_id=200)
+
+        first_claimed = claim_response_slot(state, first_message)
+        second_claimed = claim_response_slot(state, second_message)
+
+        if not first_claimed:
+            self.fail("最初の返信要求が生成枠を確保できません")
+        if second_claimed:
+            self.fail("同じチャンネルで生成枠を二重に確保しています")
+        if state.queued_response_message is not second_message:
+            self.fail("生成中に受けた返信要求を次回処理へ保持していません")
+
+    def test_channel_states_do_not_share_pending_messages(self) -> None:
+        first_state = ChannelProcessingState()
+        second_state = ChannelProcessingState()
+        first_state.pending_messages.append(make_discord_message(author_id=100))
+
+        if second_state.pending_messages:
+            self.fail("別チャンネル間で保留メッセージを共有しています")
 
 
 class ReferencedAuthorTest(unittest.TestCase):
