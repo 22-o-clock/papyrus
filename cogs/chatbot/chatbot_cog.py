@@ -15,6 +15,10 @@ from .responses_api import ResponsePipeline
 
 logger = getLogger(__name__)
 
+ASSISTANT_DEBOUNCE_SECONDS = 2.0
+CHAT_DEBOUNCE_MIN_SECONDS = 5.0
+CHAT_DEBOUNCE_MAX_SECONDS = 15.0
+
 
 @dataclass
 class ChannelProcessingState:
@@ -24,16 +28,32 @@ class ChannelProcessingState:
     generating: bool = False
     pending_messages: list[Message] = field(default_factory=list)
     queued_response_message: Message | None = None
+    debounce_task: asyncio.Task[None] | None = None
+    debounced_response_message: Message | None = None
+    generation_revision: int = 0
 
 
 def claim_response_slot(state: ChannelProcessingState, message: Message) -> bool:
     """生成枠を確保し、使用中の場合は次の返信対象としてメッセージを保持します。"""
     if state.generating:
         state.queued_response_message = message
+        state.generation_revision += 1
         return False
 
     state.generating = True
     return True
+
+
+def get_response_debounce_seconds(role: ChannelRole) -> float:
+    """役割に応じた返信生成前の待機秒数を返します。"""
+    if role is ChannelRole.ASSISTANT:
+        return ASSISTANT_DEBOUNCE_SECONDS
+    return random.SystemRandom().uniform(CHAT_DEBOUNCE_MIN_SECONDS, CHAT_DEBOUNCE_MAX_SECONDS)
+
+
+def is_generation_current(state: ChannelProcessingState, revision: int) -> bool:
+    """生成開始後に、回答を作り直す必要がある返信要求が追加されていないか確認します。"""
+    return state.generation_revision == revision
 
 
 def can_change_channel_role(*, is_thread: bool, manage_channels: bool) -> bool:
@@ -213,23 +233,64 @@ class ChatBot(commands.Cog):
         replied_to_bot = await self._is_reply_to_bot(message)
         spontaneous_chat_reply = role is ChannelRole.CHAT and random.SystemRandom().random() < self.reply_probability
 
-        if should_respond(
+        response_required = should_respond(
             role,
             mentioned_bot=mentioned_bot,
             replied_to_bot=replied_to_bot,
             spontaneous_chat_reply=spontaneous_chat_reply,
-        ):
-            await self._schedule_response(message, state)
+        )
+        await self._update_response_schedule(message if response_required else None, state, role)
 
-    async def _schedule_response(self, message: Message, state: ChannelProcessingState) -> None:
-        """チャンネルの生成枠を確保し、確保できた場合は応答処理を開始します。"""
+    async def _update_response_schedule(
+        self,
+        response_message: Message | None,
+        state: ChannelProcessingState,
+        role: ChannelRole,
+    ) -> None:
+        """返信対象を更新し、最後の人間投稿から一定時間後に生成を開始します。"""
         async with state.lock:
-            if not claim_response_slot(state, message):
+            if state.generating:
+                if response_message is not None:
+                    claim_response_slot(state, response_message)
                 return
 
-        task = asyncio.create_task(self._process_response_queue(message, state))
+            if response_message is not None:
+                state.debounced_response_message = response_message
+            if state.debounced_response_message is None:
+                return
+
+            if state.debounce_task is not None:
+                state.debounce_task.cancel()
+
+            delay_seconds = get_response_debounce_seconds(role)
+            task = asyncio.create_task(self._start_response_after_delay(state, delay_seconds))
+            state.debounce_task = task
+
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+
+    async def _start_response_after_delay(
+        self,
+        state: ChannelProcessingState,
+        delay_seconds: float,
+    ) -> None:
+        """デバウンス時間の経過後、最新の返信対象に対する生成を開始します。"""
+        try:
+            await asyncio.sleep(delay_seconds)
+        except asyncio.CancelledError:
+            return
+
+        async with state.lock:
+            if state.debounce_task is not asyncio.current_task():
+                return
+
+            message = state.debounced_response_message
+            state.debounce_task = None
+            state.debounced_response_message = None
+            if message is None or not claim_response_slot(state, message):
+                return
+
+        await self._process_response_queue(message, state)
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
         """受信したメッセージが、このボットの発言へのDiscord返信か判定します。
@@ -274,7 +335,7 @@ class ChatBot(commands.Cog):
         completed_normally = False
         try:
             while True:
-                await self._generate_and_send_response(current_message)
+                await self._generate_and_send_response(current_message, state)
 
                 async with state.lock:
                     await self._flush_pending_messages(current_message.channel.id, state)
@@ -298,25 +359,30 @@ class ChatBot(commands.Cog):
             await self.response_pipelines[channel_id].short_term_memory.append(pending_message)
         state.pending_messages.clear()
 
-    async def _generate_and_send_response(self, message: Message) -> None:
-        """短期記憶から回答を1件生成し、指定されたチャンネルへ送信します。"""
+    async def _generate_and_send_response(self, message: Message, state: ChannelProcessingState) -> None:
+        """短期記憶から回答を生成し、生成中に文脈が更新されていなければ送信します。"""
+        generation_revision = state.generation_revision
         async with message.channel.typing():
             generated_response = await self.response_pipelines[message.channel.id].generate_response()
-            is_replied = False
 
-            reply_to_message_id = generated_response.reply_to_message_id
-            short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
-            if (
-                reply_to_message_id is not None
-                and short_term_memory.contains_message(reply_to_message_id)
-                and isinstance(message.channel, discord.TextChannel | discord.Thread)
-            ):
-                target_message = message.channel.get_partial_message(reply_to_message_id)
-                await target_message.reply(generated_response.content)
-                is_replied = True
+            async with state.lock:
+                if not is_generation_current(state, generation_revision):
+                    return
 
-            if not is_replied:
-                await message.channel.send(generated_response.content)
+                is_replied = False
+                reply_to_message_id = generated_response.reply_to_message_id
+                short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
+                if (
+                    reply_to_message_id is not None
+                    and short_term_memory.contains_message(reply_to_message_id)
+                    and isinstance(message.channel, discord.TextChannel | discord.Thread)
+                ):
+                    target_message = message.channel.get_partial_message(reply_to_message_id)
+                    await target_message.reply(generated_response.content)
+                    is_replied = True
+
+                if not is_replied:
+                    await message.channel.send(generated_response.content)
 
 
 async def setup(bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:

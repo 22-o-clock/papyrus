@@ -7,10 +7,15 @@ from discord import Message, MessageReference
 
 from cogs.chatbot.channel_roles import ChannelRole
 from cogs.chatbot.chatbot_cog import (
+    ASSISTANT_DEBOUNCE_SECONDS,
+    CHAT_DEBOUNCE_MAX_SECONDS,
+    CHAT_DEBOUNCE_MIN_SECONDS,
     ChannelProcessingState,
     can_change_channel_role,
     claim_response_slot,
     get_available_referenced_author_id,
+    get_response_debounce_seconds,
+    is_generation_current,
     should_respond,
 )
 
@@ -118,6 +123,8 @@ class ChannelProcessingStateTest(unittest.TestCase):
             self.fail("同じチャンネルで生成枠を二重に確保しています")
         if state.queued_response_message is not second_message:
             self.fail("生成中に受けた返信要求を次回処理へ保持していません")
+        if is_generation_current(state, revision=0):
+            self.fail("追加の返信要求を受けても生成リビジョンが更新されていません")
 
     def test_channel_states_do_not_share_pending_messages(self) -> None:
         first_state = ChannelProcessingState()
@@ -126,6 +133,20 @@ class ChannelProcessingStateTest(unittest.TestCase):
 
         if second_state.pending_messages:
             self.fail("別チャンネル間で保留メッセージを共有しています")
+
+
+class ResponseDebounceTest(unittest.TestCase):
+    def test_assistant_uses_short_fixed_delay(self) -> None:
+        delay_seconds = get_response_debounce_seconds(ChannelRole.ASSISTANT)
+
+        if delay_seconds != ASSISTANT_DEBOUNCE_SECONDS:
+            self.fail("assistantの待機時間が短い固定値になっていません")
+
+    def test_chat_delay_is_randomized_within_configured_range(self) -> None:
+        delay_seconds = get_response_debounce_seconds(ChannelRole.CHAT)
+
+        if not CHAT_DEBOUNCE_MIN_SECONDS <= delay_seconds <= CHAT_DEBOUNCE_MAX_SECONDS:
+            self.fail("chatの待機時間が設定範囲を外れています")
 
 
 class ReferencedAuthorTest(unittest.TestCase):
