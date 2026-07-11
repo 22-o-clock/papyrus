@@ -1,5 +1,6 @@
 from typing import Any
-from sqlalchemy import CursorResult, BigInteger, Integer, select
+
+from sqlalchemy import BigInteger, CursorResult, Integer, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column

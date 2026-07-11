@@ -1,7 +1,7 @@
 import traceback
 from logging import getLogger
 
-from discord import app_commands, Interaction
+from discord import Interaction, app_commands
 from discord.ext import commands
 
 from core.exception.exception import BotException, HandledError, MissingRequiredRole
