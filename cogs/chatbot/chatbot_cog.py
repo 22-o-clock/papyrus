@@ -8,6 +8,7 @@ from discord.ext import commands
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .channel_roles import ChannelRole, ChannelRoleManager
 from .database_envs import DatabaseEnvManager
 from .responses_api import ResponsePipeline
 
@@ -19,6 +20,7 @@ class ChatBot(commands.Cog):
         self.bot = bot
         self.response_pipelines: dict[int, ResponsePipeline] = {}
         self.env_manager = DatabaseEnvManager(session_factory)
+        self.channel_role_manager = ChannelRoleManager(self.env_manager)
 
         self._mem_lock = asyncio.Lock()
         self._generating = False
@@ -104,6 +106,28 @@ class ChatBot(commands.Cog):
         await interaction.response.send_message(
             f"このチャンネルを返信対象から削除しました。現在の対象チャンネル数: {len(self.target_channel_list)}"
         )
+
+    @app_commands.command(name="show_chatbot_role", description="このチャンネルでのChatbotの役割を表示します")
+    async def show_chatbot_role(self, interaction: discord.Interaction) -> None:
+        channel_id = interaction.channel_id
+        if channel_id is None:
+            await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
+            return
+
+        role = await self.channel_role_manager.get_role(channel_id)
+        await interaction.response.send_message(f"このチャンネルのChatbotの役割は `{role.value}` です。", ephemeral=True)
+
+    @app_commands.command(name="set_chatbot_role", description="このチャンネルでのChatbotの役割を変更します")
+    @app_commands.describe(role="assistant または chat を選択します")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def set_chatbot_role(self, interaction: discord.Interaction, role: ChannelRole) -> None:
+        channel_id = interaction.channel_id
+        if channel_id is None:
+            await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
+            return
+
+        await self.channel_role_manager.set_role(channel_id, role)
+        await interaction.response.send_message(f"このチャンネルのChatbotの役割を `{role.value}` に変更しました。")
 
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
