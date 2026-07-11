@@ -127,7 +127,7 @@ class ChatBot(commands.Cog):
             return
 
         # 3.2.2 reply_probability に基づいて返信するかを決定
-        if random.random() < self.reply_probability and not self._generating:
+        if random.SystemRandom().random() < self.reply_probability and not self._generating:
             task = asyncio.create_task(self.reply_to_message(message))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
@@ -161,16 +161,17 @@ class ChatBot(commands.Cog):
                 is_replied = False
 
                 # 3.1 返信が生成された場合の処理
-                # 3.1.1 short_term_memory から宛先のユーザーによる最新のメッセージが見つかれば、そのメッセージに返信
-                if generated_response.reply_to != "All":
-                    for message_in_memory in reversed(self.response_pipelines[message.channel.id].short_term_memory.memory):
-                        if message_in_memory.author_name == generated_response.reply_to and isinstance(
-                            message.channel, discord.TextChannel | discord.Thread
-                        ):
-                            target_message = message.channel.get_partial_message(message_in_memory.message_id)
-                            await target_message.reply(generated_response.content)
-                            is_replied = True
-                            break
+                # 3.1.1 モデルが短期記憶内のメッセージIDを指定した場合、そのメッセージに返信
+                reply_to_message_id = generated_response.reply_to_message_id
+                short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
+                if (
+                    reply_to_message_id is not None
+                    and short_term_memory.contains_message(reply_to_message_id)
+                    and isinstance(message.channel, discord.TextChannel | discord.Thread)
+                ):
+                    target_message = message.channel.get_partial_message(reply_to_message_id)
+                    await target_message.reply(generated_response.content)
+                    is_replied = True
 
                 # 3.1.2 見つからない場合は通常のメッセージとして送信
                 if not is_replied:

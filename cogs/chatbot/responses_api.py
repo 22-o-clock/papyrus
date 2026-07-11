@@ -26,9 +26,11 @@ class MessageInMemory:
 
     Attributes:
         message_id: メッセージのID
-        author_name: メッセージの送信者の名前
+        author_id: メッセージの送信者のDiscordユーザーID
+        author_name: メッセージの送信者の表示名
         content: メッセージの内容
-        reply_to: 返信先のメッセージの送信者名
+        reply_to_message_id: 返信先のDiscordメッセージID
+        mentioned_user_ids: メンションされたDiscordユーザーIDの一覧
         timestamp: メッセージが作成された日時
         image_url: メッセージに含まれる画像のURL (存在する場合)
         pdf_url: メッセージに含まれるPDFのURL (存在する場合)
@@ -36,24 +38,29 @@ class MessageInMemory:
     """
 
     message_id: int
+    author_id: int
     author_name: str
     content: str
-    reply_to: str
+    reply_to_message_id: int | None
+    mentioned_user_ids: list[int]
     timestamp: datetime.datetime
     image_url: str | None = None
     pdf_url: str | None = None
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, object]:
         """プロンプト作成に用いる要素のみを辞書形式で出力します。
 
         Returns:
-            author_name、content、reply_toを含む辞書
+            人物と返信先をDiscord IDで識別できる辞書
 
         """
         return {
+            "message_id": self.message_id,
+            "author_id": self.author_id,
             "author_name": self.author_name,
             "content": self.content,
-            "reply_to": self.reply_to,
+            "reply_to_message_id": self.reply_to_message_id,
+            "mentioned_user_ids": self.mentioned_user_ids,
             "timestamp": self.timestamp.astimezone(LOCAL_TIMEZONE).isoformat(),
         }
 
@@ -81,9 +88,11 @@ class ShortTermMemory:
         # 1. デフォルト値の設定
 
         message_id = message.id
+        author_id = message.author.id
         author_name = message.author.display_name
         content = message.clean_content
-        reply_to = "All"
+        reply_to_message_id = None
+        mentioned_user_ids = [user.id for user in message.mentions]
         timestamp = message.created_at
         image_url = None
         pdf_url = None
@@ -93,25 +102,15 @@ class ShortTermMemory:
         if message.message_snapshots:  # メッセージが転送である場合
             content = f"{author_name}がメッセージを転送: 「{message.message_snapshots[0].content}」"
 
-        if message.type == discord.MessageType.reply:  # メッセージが返信である場合
-            if message.reference and message.reference.cached_message:  # 返信先のメッセージがキャッシュされている場合
-                reply_to = message.reference.cached_message.author.display_name
-
-            if message.reference and message.reference.message_id:  # 返信先のメッセージがキャッシュされていない場合
-                replied_message = await message.channel.fetch_message(message.reference.message_id)
-                reply_to = replied_message.author.display_name
-
+        if message.type == discord.MessageType.reply and message.reference and message.reference.message_id:
+            reply_to_message_id = message.reference.message_id
+        elif message.type == discord.MessageType.reply:
             logger.warning(
                 "Message is a reply but referenced message not found (ref_id=%s, channel_id=%s, guild_id=%s)",
                 message.reference.message_id if message.reference else None,
                 message.channel.id,
                 message.guild.id if message.guild else None,
             )
-
-        if message.mentions:  # メッセージにメンションが含まれている場合
-            reply_to = (
-                message.mentions[0].display_name
-            )  # 先頭のメンションのみを返信先として扱う。順序は不定なので、複数のメンションが含まれる場合の動作は保証されない。
 
         # 3. 添付ファイルに関する特殊処理
 
@@ -130,9 +129,11 @@ class ShortTermMemory:
         self.memory.append(
             MessageInMemory(
                 message_id=message_id,
+                author_id=author_id,
                 author_name=author_name,
                 content=content,
-                reply_to=reply_to,
+                reply_to_message_id=reply_to_message_id,
+                mentioned_user_ids=mentioned_user_ids,
                 timestamp=timestamp,
                 image_url=image_url,
                 pdf_url=pdf_url,
@@ -148,7 +149,7 @@ class ShortTermMemory:
         """短期記憶内のメッセージをプロンプトに用いるJSON形式の文字列に変換します。
 
         Returns:
-            メモリ内のメッセージのauthor_name, content, reply_toを含むJSON表現
+            人物と返信先をDiscord IDで識別できるJSON表現
 
         """
         return json.dumps([m.to_dict() for m in self.memory], ensure_ascii=False, indent=2)
@@ -186,18 +187,22 @@ class ShortTermMemory:
 
         logger.debug("Current memory: %s", self.memory)
 
+    def contains_message(self, message_id: int) -> bool:
+        """指定されたDiscordメッセージが現在の短期記憶に含まれるか確認します。"""
+        return any(message.message_id == message_id for message in self.memory)
+
 
 class LLMMessage(BaseModel):
     """OpenAI APIによって生成されるメッセージのデータモデル。
 
     Attributes:
         content: メッセージの内容
-        reply_to: 返信先のメッセージの送信者名
+        reply_to_message_id: 返信先のDiscordメッセージID。通常投稿の場合はNone
 
     """
 
     content: str
-    reply_to: str
+    reply_to_message_id: int | None
 
     def to_json(self, bot_name: str) -> str:
         """メッセージをJSON形式の文字列に変換します。
@@ -213,7 +218,7 @@ class LLMMessage(BaseModel):
             {
                 "author_name": bot_name,
                 "content": self.content,
-                "reply_to": self.reply_to,
+                "reply_to_message_id": self.reply_to_message_id,
             },
             ensure_ascii=False,
             indent=2,
@@ -244,7 +249,7 @@ class DraftGenerator:
             生成されたドラフト回答を含むLLMMessageオブジェクト
 
         """
-        # TODO @se-Anthyme: 履歴にある画像とPDFを扱えるようにする (現状は直接の返信元に含まれる場合のみ渡している)
+        # 履歴内の画像とPDFは、入力サイズを制御する方針が決まるまで直接の返信元だけを対象とする。
 
         llm_input: list[dict[str, Any]] = [
             {
@@ -284,7 +289,7 @@ class DraftGenerator:
 
         if api_response.output_parsed is None:
             logger.warning("Failed to parse LLM response into LLMMessage")
-            return LLMMessage(content="", reply_to="All")
+            return LLMMessage(content="", reply_to_message_id=None)
 
         return api_response.output_parsed
 
@@ -327,7 +332,7 @@ class ResponseStyler:
 
         if api_response.output_parsed is None:
             logger.warning("Failed to parse LLM response into LLMMessage")
-            return LLMMessage(content="", reply_to="All")
+            return LLMMessage(content="", reply_to_message_id=None)
 
         return api_response.output_parsed
 
