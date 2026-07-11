@@ -62,11 +62,12 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_keeps_reply_message_id_and_all_mentioned_user_ids(self) -> None:
         memory = ShortTermMemory()
+        author_id = 30
         await memory.append(
             make_message(
                 MessageSpec(
                     message_id=3,
-                    author_id=30,
+                    author_id=author_id,
                     author_name="発言者",
                     content="返信内容",
                     mentioned_user_ids=(40, 50),
@@ -85,6 +86,10 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
             self.fail("保存済みメッセージを検出できません")
         if memory.contains_message(999):
             self.fail("未保存のメッセージを誤検出しています")
+        if memory.get_author_id(3) != author_id:
+            self.fail("メッセージIDから発言者IDを取得できません")
+        if memory.get_author_id(999) is not None:
+            self.fail("未保存メッセージに発言者IDを返しています")
 
 
 class LLMMessageTest(unittest.TestCase):

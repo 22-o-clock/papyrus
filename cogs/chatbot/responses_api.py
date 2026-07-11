@@ -191,6 +191,13 @@ class ShortTermMemory:
         """指定されたDiscordメッセージが現在の短期記憶に含まれるか確認します。"""
         return any(message.message_id == message_id for message in self.memory)
 
+    def get_author_id(self, message_id: int) -> int | None:
+        """指定されたDiscordメッセージの発言者IDを取得します。"""
+        for message in self.memory:
+            if message.message_id == message_id:
+                return message.author_id
+        return None
+
 
 class LLMMessage(BaseModel):
     """OpenAI APIによって生成されるメッセージのデータモデル。
