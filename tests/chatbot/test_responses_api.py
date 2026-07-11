@@ -8,7 +8,7 @@ from typing import cast
 import discord
 from discord import Message
 
-from cogs.chatbot.responses_api import LLMMessage, ShortTermMemory
+from cogs.chatbot.responses_api import LLMMessage, ResponseAction, ShortTermMemory
 
 
 @dataclass
@@ -95,7 +95,11 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
 class LLMMessageTest(unittest.TestCase):
     def test_serializes_reply_target_as_message_id(self) -> None:
         reply_to_message_id = 123
-        response = LLMMessage(content="返信です", reply_to_message_id=reply_to_message_id)
+        response = LLMMessage(
+            action=ResponseAction.REPLY,
+            content="返信です",
+            reply_to_message_id=reply_to_message_id,
+        )
 
         serialized = json.loads(response.to_json(bot_name="Papyrus"))
 
@@ -103,3 +107,19 @@ class LLMMessageTest(unittest.TestCase):
             self.fail("生成結果の返信先がメッセージIDとして出力されていません")
         if "reply_to" in serialized:
             self.fail("表示名ベースの返信先が生成結果に残っています")
+
+    def test_accepts_silence_without_content(self) -> None:
+        response = LLMMessage(action=ResponseAction.SILENCE)
+
+        if response.content:
+            self.fail("沈黙行動に不要な本文が設定されています")
+
+    def test_accepts_reaction_with_target_and_emoji(self) -> None:
+        response = LLMMessage(
+            action=ResponseAction.REACTION,
+            reply_to_message_id=123,
+            reaction_emoji="👍",
+        )
+
+        if response.reaction_emoji != "👍":
+            self.fail("リアクション絵文字を保持できません")

@@ -1,16 +1,18 @@
 import datetime
 import json
 from dataclasses import dataclass
+from enum import StrEnum
 from logging import getLogger
-from typing import Any
+from typing import Any, Self
 
 import dateutil
 import discord
 import tiktoken
 from discord import Message
 from openai import AsyncOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
+from .channel_roles import ChannelRole
 from .prompt import draft_generator_prompt, response_styler_prompt
 
 logger = getLogger(__name__)
@@ -199,17 +201,44 @@ class ShortTermMemory:
         return None
 
 
+class ResponseAction(StrEnum):
+    """LLMが選択できるDiscord上の応答方法。"""
+
+    SILENCE = "silence"
+    REACTION = "reaction"
+    REPLY = "reply"
+    MESSAGE = "message"
+
+
 class LLMMessage(BaseModel):
     """OpenAI APIによって生成されるメッセージのデータモデル。
 
     Attributes:
         content: メッセージの内容
+        action: Discord上で実行する応答方法
         reply_to_message_id: 返信先のDiscordメッセージID。通常投稿の場合はNone
+        reaction_emoji: リアクションに使用するUnicode絵文字
 
     """
 
-    content: str
-    reply_to_message_id: int | None
+    action: ResponseAction
+    content: str = ""
+    reply_to_message_id: int | None = None
+    reaction_emoji: str | None = None
+
+    @model_validator(mode="after")
+    def validate_action_fields(self) -> Self:
+        """選択した行動の実行に必要なフィールドが揃っていることを保証します。"""
+        if self.action is ResponseAction.REPLY and self.reply_to_message_id is None:
+            msg = "reply action requires reply_to_message_id"
+            raise ValueError(msg)
+        if self.action is ResponseAction.REACTION and (self.reply_to_message_id is None or self.reaction_emoji is None):
+            msg = "reaction action requires reply_to_message_id and reaction_emoji"
+            raise ValueError(msg)
+        if self.action in (ResponseAction.REPLY, ResponseAction.MESSAGE) and not self.content.strip():
+            msg = "text response action requires content"
+            raise ValueError(msg)
+        return self
 
     def to_json(self, bot_name: str) -> str:
         """メッセージをJSON形式の文字列に変換します。
@@ -224,8 +253,10 @@ class LLMMessage(BaseModel):
         return json.dumps(
             {
                 "author_name": bot_name,
+                "action": self.action.value,
                 "content": self.content,
                 "reply_to_message_id": self.reply_to_message_id,
+                "reaction_emoji": self.reaction_emoji,
             },
             ensure_ascii=False,
             indent=2,
@@ -246,11 +277,12 @@ class DraftGenerator:
         self.client = client
         self.bot_name = bot_name
 
-    async def draft(self, short_term_memory: ShortTermMemory) -> LLMMessage:
+    async def draft(self, short_term_memory: ShortTermMemory, channel_role: ChannelRole) -> LLMMessage:
         """メッセージのドラフト回答を生成します。
 
         Args:
             short_term_memory: メッセージ履歴
+            channel_role: 対象チャンネルでのChatbotの役割
 
         Returns:
             生成されたドラフト回答を含むLLMMessageオブジェクト
@@ -278,7 +310,10 @@ class DraftGenerator:
 
         api_response = await self.client.responses.parse(
             input=llm_input,  # type: ignore
-            instructions=draft_generator_prompt.DRAFT_INSTRUCTIONS.format(bot_name=self.bot_name),
+            instructions=draft_generator_prompt.DRAFT_INSTRUCTIONS.format(
+                bot_name=self.bot_name,
+                channel_role=channel_role.value,
+            ),
             model=DRAFT_GENERATOR_MODEL,
             reasoning={"effort": "medium"},
             tools=[
@@ -296,7 +331,7 @@ class DraftGenerator:
 
         if api_response.output_parsed is None:
             logger.warning("Failed to parse LLM response into LLMMessage")
-            return LLMMessage(content="", reply_to_message_id=None)
+            return LLMMessage(action=ResponseAction.SILENCE)
 
         return api_response.output_parsed
 
@@ -315,19 +350,28 @@ class ResponseStyler:
         self.client = client
         self.bot_name = bot_name
 
-    async def style(self, short_term_memory: ShortTermMemory, original_draft: LLMMessage) -> LLMMessage:
+    async def style(
+        self,
+        short_term_memory: ShortTermMemory,
+        original_draft: LLMMessage,
+        channel_role: ChannelRole,
+    ) -> LLMMessage:
         """ドラフトをスタイリングして最終回答を生成します。
 
         Args:
             short_term_memory: メッセージ履歴
             original_draft: DraftGeneratorが生成した原案
+            channel_role: 対象チャンネルでのChatbotの役割
 
         Returns:
             スタイリングされた回答を含むLLMMessageオブジェクト
 
         """
         api_response = await self.client.responses.parse(
-            instructions=response_styler_prompt.STYLE_INSTRUCTIONS.format(bot_name=self.bot_name),
+            instructions=response_styler_prompt.STYLE_INSTRUCTIONS.format(
+                bot_name=self.bot_name,
+                channel_role=channel_role.value,
+            ),
             input=response_styler_prompt.STYLE_INPUT.format(
                 short_term_memory=short_term_memory.to_json(),
                 draft=original_draft.to_json(bot_name=self.bot_name),
@@ -339,9 +383,14 @@ class ResponseStyler:
 
         if api_response.output_parsed is None:
             logger.warning("Failed to parse LLM response into LLMMessage")
-            return LLMMessage(content="", reply_to_message_id=None)
+            return original_draft
 
-        return api_response.output_parsed
+        return LLMMessage(
+            action=original_draft.action,
+            content=api_response.output_parsed.content,
+            reply_to_message_id=original_draft.reply_to_message_id,
+            reaction_emoji=original_draft.reaction_emoji,
+        )
 
 
 class ResponsePipeline:
@@ -370,15 +419,17 @@ class ResponsePipeline:
         await self.short_term_memory.append(message)
         self.short_term_memory.forget()
 
-    async def generate_response(self) -> LLMMessage:
+    async def generate_response(self, channel_role: ChannelRole) -> LLMMessage:
         """短期記憶から最終回答を生成します。
 
         Args:
-            short_term_memory: メッセージ履歴
+            channel_role: 対象チャンネルでのChatbotの役割
 
         Returns:
             スタイリングされた最終回答を含むLLMMessageオブジェクト
 
         """
-        draft = await self.draft_generator.draft(self.short_term_memory)
-        return await self.response_styler.style(self.short_term_memory, draft)
+        draft = await self.draft_generator.draft(self.short_term_memory, channel_role)
+        if draft.action in (ResponseAction.SILENCE, ResponseAction.REACTION):
+            return draft
+        return await self.response_styler.style(self.short_term_memory, draft, channel_role)

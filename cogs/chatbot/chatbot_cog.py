@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .channel_roles import ChannelRole, ChannelRoleManager
 from .database_envs import DatabaseEnvManager
-from .responses_api import ResponsePipeline
+from .responses_api import LLMMessage, ResponseAction, ResponsePipeline
 
 logger = getLogger(__name__)
 
@@ -363,26 +363,49 @@ class ChatBot(commands.Cog):
         """短期記憶から回答を生成し、生成中に文脈が更新されていなければ送信します。"""
         generation_revision = state.generation_revision
         async with message.channel.typing():
-            generated_response = await self.response_pipelines[message.channel.id].generate_response()
+            parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
+            role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
+            generated_response = await self.response_pipelines[message.channel.id].generate_response(role)
 
             async with state.lock:
                 if not is_generation_current(state, generation_revision):
                     return
+                await self._execute_response_action(message, generated_response)
 
-                is_replied = False
-                reply_to_message_id = generated_response.reply_to_message_id
-                short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
-                if (
-                    reply_to_message_id is not None
-                    and short_term_memory.contains_message(reply_to_message_id)
-                    and isinstance(message.channel, discord.TextChannel | discord.Thread)
-                ):
-                    target_message = message.channel.get_partial_message(reply_to_message_id)
-                    await target_message.reply(generated_response.content)
-                    is_replied = True
+    async def _execute_response_action(self, message: Message, response: LLMMessage) -> None:
+        """構造化された応答行動をDiscord上で実行します。"""
+        if response.action is ResponseAction.SILENCE:
+            return
 
-                if not is_replied:
-                    await message.channel.send(generated_response.content)
+        if response.action is ResponseAction.MESSAGE:
+            await message.channel.send(response.content)
+            return
+
+        reply_to_message_id = response.reply_to_message_id
+        short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
+        if (
+            reply_to_message_id is None
+            or not short_term_memory.contains_message(reply_to_message_id)
+            or not isinstance(message.channel, discord.TextChannel | discord.Thread)
+        ):
+            logger.warning(
+                "Generated response refers to unavailable message (action=%s, message_id=%s, channel_id=%s)",
+                response.action.value,
+                reply_to_message_id,
+                message.channel.id,
+            )
+            return
+
+        target_message = message.channel.get_partial_message(reply_to_message_id)
+        if response.action is ResponseAction.REACTION:
+            reaction_emoji = response.reaction_emoji
+            if reaction_emoji is None:
+                logger.warning("Generated reaction has no emoji (message_id=%s)", reply_to_message_id)
+                return
+            await target_message.add_reaction(reaction_emoji)
+            return
+
+        await target_message.reply(response.content)
 
 
 async def setup(bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
