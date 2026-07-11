@@ -3,7 +3,7 @@ import random
 from logging import getLogger
 
 import discord
-from discord import Message, app_commands
+from discord import Message, MessageReference, app_commands
 from discord.ext import commands
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -13,6 +13,15 @@ from .database_envs import DatabaseEnvManager
 from .responses_api import ResponsePipeline
 
 logger = getLogger(__name__)
+
+
+def get_available_referenced_author_id(reference: MessageReference) -> int | None:
+    """追加のAPI取得なしで利用できる返信元メッセージの発言者IDを返します。"""
+    if isinstance(reference.resolved, Message):
+        return reference.resolved.author.id
+    if reference.cached_message is not None:
+        return reference.cached_message.author.id
+    return None
 
 
 def should_respond(
@@ -134,14 +143,24 @@ class ChatBot(commands.Cog):
             task.add_done_callback(self._background_tasks.discard)
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
-        """Discordの返信元がこのボットの発言かをユーザーIDで判定します。"""
+        """受信したメッセージが、このボットの発言へのDiscord返信か判定します。
+
+        Args:
+            message: on_messageで受信した判定対象のメッセージ。
+
+        Returns:
+            返信元の投稿者がこのボットの場合はTrue。
+            通常投稿または他ユーザーへの返信の場合はFalse。
+
+        """
         reference = message.reference
         bot_user = self.bot.user
         if message.type != discord.MessageType.reply or reference is None or reference.message_id is None or bot_user is None:
             return False
 
-        if reference.cached_message is not None:
-            return reference.cached_message.author.id == bot_user.id
+        referenced_author_id = get_available_referenced_author_id(reference)
+        if referenced_author_id is not None:
+            return referenced_author_id == bot_user.id
 
         short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
         referenced_author_id = short_term_memory.get_author_id(reference.message_id)

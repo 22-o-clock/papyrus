@@ -1,7 +1,19 @@
 import unittest
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import Mock
+
+from discord import Message, MessageReference
 
 from cogs.chatbot.channel_roles import ChannelRole
-from cogs.chatbot.chatbot_cog import should_respond
+from cogs.chatbot.chatbot_cog import get_available_referenced_author_id, should_respond
+
+
+def make_discord_message(author_id: int) -> Message:
+    """返信元の発言者判定に必要な属性だけを持つDiscordメッセージを作成します。"""
+    message = Mock(spec=Message)
+    message.author = SimpleNamespace(id=author_id)
+    return cast("Message", message)
 
 
 class ShouldRespondTest(unittest.TestCase):
@@ -59,3 +71,40 @@ class ShouldRespondTest(unittest.TestCase):
 
         if result:
             self.fail("chatが返信不要の判定でも応答します")
+
+
+class ReferencedAuthorTest(unittest.TestCase):
+    def test_uses_resolved_message_before_cached_message(self) -> None:
+        resolved_author_id = 100
+        reference = cast(
+            "MessageReference",
+            SimpleNamespace(
+                resolved=make_discord_message(resolved_author_id),
+                cached_message=make_discord_message(200),
+            ),
+        )
+
+        author_id = get_available_referenced_author_id(reference)
+
+        if author_id != resolved_author_id:
+            self.fail("Discordイベントに同梱された返信元メッセージを優先していません")
+
+    def test_falls_back_to_cached_message(self) -> None:
+        cached_author_id = 200
+        reference = cast(
+            "MessageReference",
+            SimpleNamespace(resolved=None, cached_message=make_discord_message(cached_author_id)),
+        )
+
+        author_id = get_available_referenced_author_id(reference)
+
+        if author_id != cached_author_id:
+            self.fail("返信元メッセージのキャッシュを利用できません")
+
+    def test_returns_none_when_reference_has_no_message(self) -> None:
+        reference = cast("MessageReference", SimpleNamespace(resolved=None, cached_message=None))
+
+        author_id = get_available_referenced_author_id(reference)
+
+        if author_id is not None:
+            self.fail("返信元メッセージがない状態で発言者IDを返しています")
