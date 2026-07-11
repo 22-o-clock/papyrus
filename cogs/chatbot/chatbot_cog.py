@@ -15,6 +15,11 @@ from .responses_api import ResponsePipeline
 logger = getLogger(__name__)
 
 
+def can_change_channel_role(*, is_thread: bool, manage_channels: bool) -> bool:
+    """スレッドでは全員、通常チャンネルでは管理権限を持つ人だけに変更を許可します。"""
+    return is_thread or manage_channels
+
+
 def get_available_referenced_author_id(reference: MessageReference) -> int | None:
     """追加のAPI取得なしで利用できる返信元メッセージの発言者IDを返します。"""
     if isinstance(reference.resolved, Message):
@@ -85,20 +90,72 @@ class ChatBot(commands.Cog):
             await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
             return
 
-        role = await self.channel_role_manager.get_role(channel_id)
-        await interaction.response.send_message(f"このチャンネルのChatbotの役割は `{role.value}` です。", ephemeral=True)
+        is_thread = isinstance(interaction.channel, discord.Thread)
+        parent_channel_id = interaction.channel.parent_id if is_thread else None
+        configured_role = await self.channel_role_manager.get_configured_role(channel_id)
+        role = await self.channel_role_manager.get_role(channel_id, parent_channel_id)
+        source = "このスレッド固有の設定" if configured_role is not None else "親チャンネルからの継承"
+        if not is_thread:
+            source = "このチャンネルの設定" if configured_role is not None else "既定値"
+        await interaction.response.send_message(
+            f"このチャンネルのChatbotの役割は `{role.value}` です。設定元: {source}。",
+            ephemeral=True,
+        )
 
     @app_commands.command(name="set_chatbot_role", description="このチャンネルでのChatbotの役割を変更します")
     @app_commands.describe(role="assistant または chat を選択します")
-    @app_commands.checks.has_permissions(manage_channels=True)
     async def set_chatbot_role(self, interaction: discord.Interaction, role: ChannelRole) -> None:
         channel_id = interaction.channel_id
         if channel_id is None:
             await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
             return
 
+        is_thread = isinstance(interaction.channel, discord.Thread)
+        if not can_change_channel_role(
+            is_thread=is_thread,
+            manage_channels=interaction.permissions.manage_channels,
+        ):
+            await interaction.response.send_message(
+                "通常チャンネルの役割変更には「チャンネルの管理」権限が必要です。",
+                ephemeral=True,
+            )
+            return
+
         await self.channel_role_manager.set_role(channel_id, role)
-        await interaction.response.send_message(f"このチャンネルのChatbotの役割を `{role.value}` に変更しました。")
+        target_name = "スレッド" if is_thread else "チャンネル"
+        await interaction.response.send_message(
+            f"{interaction.user.mention} がこの{target_name}のChatbotの役割を `{role.value}` に変更しました。"
+        )
+
+    @app_commands.command(name="reset_chatbot_role", description="このチャンネル固有のChatbot役割を解除します")
+    async def reset_chatbot_role(self, interaction: discord.Interaction) -> None:
+        channel_id = interaction.channel_id
+        if channel_id is None:
+            await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
+            return
+
+        is_thread = isinstance(interaction.channel, discord.Thread)
+        if not can_change_channel_role(
+            is_thread=is_thread,
+            manage_channels=interaction.permissions.manage_channels,
+        ):
+            await interaction.response.send_message(
+                "通常チャンネルの役割変更には「チャンネルの管理」権限が必要です。",
+                ephemeral=True,
+            )
+            return
+
+        await self.channel_role_manager.clear_role(channel_id)
+        role = await self.channel_role_manager.get_role(
+            channel_id,
+            interaction.channel.parent_id if is_thread else None,
+        )
+        target_name = "スレッド" if is_thread else "チャンネル"
+        source = "親チャンネルから継承" if is_thread else "既定値を使用"
+        await interaction.response.send_message(
+            f"{interaction.user.mention} がこの{target_name}固有の設定を解除しました。"
+            f"現在は `{role.value}` です。設定元: {source}。"
+        )
 
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
@@ -127,7 +184,8 @@ class ChatBot(commands.Cog):
         if bot_user is None:
             return
 
-        role = await self.channel_role_manager.get_role(message.channel.id)
+        parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
+        role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
         mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
         replied_to_bot = await self._is_reply_to_bot(message)
         spontaneous_chat_reply = role is ChannelRole.CHAT and random.SystemRandom().random() < self.reply_probability

@@ -31,24 +31,52 @@ class ChannelRoleManager:
         self._env_manager = env_manager
         self._write_lock = asyncio.Lock()
 
-    async def get_role(self, channel_id: int) -> ChannelRole:
-        """チャンネルの役割を取得し、未設定または不正な設定ではassistantを返します。"""
+    async def get_role(self, channel_id: int, parent_channel_id: int | None = None) -> ChannelRole:
+        """チャンネルの役割を取得し、未設定のスレッドでは親チャンネルから継承します。"""
+        roles = await self._load_roles()
+        for candidate_channel_id in (channel_id, parent_channel_id):
+            if candidate_channel_id is None:
+                continue
+            configured_role = roles.get(str(candidate_channel_id))
+            if configured_role is None:
+                continue
+
+            try:
+                return ChannelRole(configured_role)
+            except ValueError:
+                logger.warning(
+                    "Unknown chatbot channel role (channel_id=%s, role=%r)",
+                    candidate_channel_id,
+                    configured_role,
+                )
+
+        return ChannelRole.ASSISTANT
+
+    async def get_configured_role(self, channel_id: int) -> ChannelRole | None:
+        """チャンネル自体に明示的に保存された役割を取得します。"""
         roles = await self._load_roles()
         configured_role = roles.get(str(channel_id))
         if configured_role is None:
-            return ChannelRole.ASSISTANT
+            return None
 
         try:
             return ChannelRole(configured_role)
         except ValueError:
             logger.warning("Unknown chatbot channel role (channel_id=%s, role=%r)", channel_id, configured_role)
-            return ChannelRole.ASSISTANT
+            return None
 
     async def set_role(self, channel_id: int, role: ChannelRole) -> None:
         """チャンネルの役割を保存します。"""
         async with self._write_lock:
             roles = await self._load_roles()
             roles[str(channel_id)] = role.value
+            await self._env_manager.set_env(CHANNEL_ROLES_KEY, json.dumps(roles, ensure_ascii=False, sort_keys=True))
+
+    async def clear_role(self, channel_id: int) -> None:
+        """チャンネル固有の役割を削除し、既定値または親チャンネルの継承へ戻します。"""
+        async with self._write_lock:
+            roles = await self._load_roles()
+            roles.pop(str(channel_id), None)
             await self._env_manager.set_env(CHANNEL_ROLES_KEY, json.dumps(roles, ensure_ascii=False, sort_keys=True))
 
     async def _load_roles(self) -> dict[str, str]:

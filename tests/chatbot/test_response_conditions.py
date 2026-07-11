@@ -6,7 +6,7 @@ from unittest.mock import Mock
 from discord import Message, MessageReference
 
 from cogs.chatbot.channel_roles import ChannelRole
-from cogs.chatbot.chatbot_cog import get_available_referenced_author_id, should_respond
+from cogs.chatbot.chatbot_cog import can_change_channel_role, get_available_referenced_author_id, should_respond
 
 
 def make_discord_message(author_id: int) -> Message:
@@ -71,6 +71,18 @@ class ShouldRespondTest(unittest.TestCase):
 
         if result:
             self.fail("chatが返信不要の判定でも応答します")
+
+
+class ChannelRolePermissionTest(unittest.TestCase):
+    def test_allows_any_member_to_change_thread_role(self) -> None:
+        if not can_change_channel_role(is_thread=True, manage_channels=False):
+            self.fail("一般メンバーがスレッドの役割を変更できません")
+
+    def test_requires_permission_for_regular_channel(self) -> None:
+        if can_change_channel_role(is_thread=False, manage_channels=False):
+            self.fail("権限のないメンバーが通常チャンネルの役割を変更できます")
+        if not can_change_channel_role(is_thread=False, manage_channels=True):
+            self.fail("チャンネル管理者が通常チャンネルの役割を変更できません")
 
 
 class ReferencedAuthorTest(unittest.TestCase):
