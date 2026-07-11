@@ -11,7 +11,6 @@ dependencies = [
     "discord-py[voice]>=2.7.1",
     "dotenv>=0.9.9",
     "openai>=2.14.0",
-    "pydantic>=2.12.5",
     "python-dateutil>=2.9.0.post0",
     "sqlalchemy>=2.0.46",
     "tiktoken>=0.12.0",
