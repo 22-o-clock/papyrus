@@ -152,6 +152,19 @@ class ChatbotMemberAliasEvidence(ChatbotBase):
     created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
+class ChatbotMemberAliasHistory(ChatbotBase):
+    """管理者による別名の一括変更履歴。"""
+
+    __tablename__ = "chatbot_member_alias_histories"
+
+    id = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    alias_id = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    administrator_user_id = mapped_column(BigInteger, nullable=False, index=True)
+    before_value = mapped_column(JSONB, nullable=False)
+    after_value = mapped_column(JSONB, nullable=False)
+    created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
+
+
 class ChatbotMemoryExtractionQueue(ChatbotBase):
     """まとめて抽出する長期記憶候補のメッセージキュー。"""
 
@@ -254,6 +267,40 @@ class MemberAliasInput:
     evidence_message_ids: list[int]
     evidence_author_ids: list[int]
     evidence_excerpts: list[str]
+
+
+@dataclass
+class MemberAliasEvidenceRecord:
+    """Excelへ表示する別名の根拠投稿。"""
+
+    message_id: int
+    author_name: str
+    excerpt: str
+    channel_id: int | None
+
+
+@dataclass
+class MemberAliasReviewRecord:
+    """Excelで確認する別名と根拠の現在値。"""
+
+    id: uuid.UUID
+    alias: str
+    normalized_alias: str
+    target_user_id: int
+    status: str
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    evidences: list[MemberAliasEvidenceRecord]
+
+
+@dataclass
+class MemberAliasUpdateInput:
+    """Excelから一括適用する別名の変更。"""
+
+    alias_id: uuid.UUID
+    alias: str
+    action: str
+    target_user_id: int | None
 
 
 @dataclass
@@ -715,6 +762,117 @@ class ChatbotMemberAliasStore:
                 )
             )
             return dict(result.tuples().all())
+
+    async def get_review_records(self) -> list[MemberAliasReviewRecord]:
+        """全別名を曖昧なものから順に根拠付きで返します。"""
+        async with self._session_factory() as session:
+            alias_result = await session.execute(
+                select(ChatbotMemberAlias).order_by(
+                    (ChatbotMemberAlias.status == "ambiguous").desc(),
+                    ChatbotMemberAlias.created_at.desc(),
+                )
+            )
+            aliases = list(alias_result.scalars().all())
+            evidence_result = await session.execute(
+                select(
+                    ChatbotMemberAliasEvidence.alias_id,
+                    ChatbotMemberAliasEvidence.message_id,
+                    ChatbotStoredMessage.author_name,
+                    ChatbotMemberAliasEvidence.excerpt,
+                    ChatbotStoredMessage.channel_id,
+                ).outerjoin(
+                    ChatbotStoredMessage,
+                    ChatbotStoredMessage.message_id == ChatbotMemberAliasEvidence.message_id,
+                )
+            )
+            evidences_by_alias: dict[uuid.UUID, list[MemberAliasEvidenceRecord]] = {}
+            for alias_id, message_id, author_name, excerpt, channel_id in evidence_result:
+                evidences_by_alias.setdefault(alias_id, []).append(
+                    MemberAliasEvidenceRecord(
+                        message_id=message_id,
+                        author_name=author_name or str(message_id),
+                        excerpt=excerpt,
+                        channel_id=channel_id,
+                    )
+                )
+            return [
+                MemberAliasReviewRecord(
+                    id=alias.id,
+                    alias=alias.alias,
+                    normalized_alias=alias.normalized_alias,
+                    target_user_id=alias.target_user_id,
+                    status=alias.status,
+                    created_at=alias.created_at,
+                    updated_at=alias.updated_at,
+                    evidences=evidences_by_alias.get(alias.id, []),
+                )
+                for alias in aliases
+            ]
+
+    async def apply_updates(
+        self,
+        updates: list[MemberAliasUpdateInput],
+        administrator_user_id: int,
+    ) -> None:
+        """検証済みのExcel変更を一つのトランザクションで適用します。"""
+        now = datetime.datetime.now(datetime.UTC)
+        async with self._session_factory.begin() as session:
+            result = await session.execute(
+                select(ChatbotMemberAlias)
+                .where(ChatbotMemberAlias.id.in_([update_input.alias_id for update_input in updates]))
+                .with_for_update()
+            )
+            aliases_by_id = {alias.id: alias for alias in result.scalars().all()}
+            if len(aliases_by_id) != len(updates):
+                msg = "存在しない別名IDが含まれています"
+                raise ValueError(msg)
+            affected_normalized_aliases: set[str] = set()
+            for update_input in updates:
+                alias = aliases_by_id[update_input.alias_id]
+                before_value = self._alias_history_value(alias)
+                affected_normalized_aliases.add(alias.normalized_alias)
+                if update_input.action == "invalidate":
+                    alias.status = "invalidated"
+                    alias.invalidated_at = now
+                else:
+                    normalized_alias = normalize_member_alias(update_input.alias)
+                    if not normalized_alias:
+                        msg = "別名を空にはできません"
+                        raise ValueError(msg)
+                    alias.alias = update_input.alias.strip()
+                    alias.normalized_alias = normalized_alias
+                    if update_input.action == "change_target":
+                        if update_input.target_user_id is None:
+                            msg = "変更後の対象者がありません"
+                            raise ValueError(msg)
+                        alias.target_user_id = update_input.target_user_id
+                        alias.status = "active"
+                    alias.invalidated_at = None
+                    affected_normalized_aliases.add(normalized_alias)
+                alias.updated_at = now
+                after_value = self._alias_history_value(alias)
+                if before_value != after_value:
+                    session.add(
+                        ChatbotMemberAliasHistory(
+                            alias_id=alias.id,
+                            administrator_user_id=administrator_user_id,
+                            before_value=before_value,
+                            after_value=after_value,
+                            created_at=now,
+                        )
+                    )
+            await session.flush()
+            for normalized_alias in affected_normalized_aliases:
+                await self._refresh_resolution(session, normalized_alias, now)
+
+    def _alias_history_value(self, alias: ChatbotMemberAlias) -> dict[str, object]:
+        """履歴へ保存する別名の管理対象項目を返します。"""
+        return {
+            "alias": alias.alias,
+            "normalized_alias": alias.normalized_alias,
+            "target_user_id": alias.target_user_id,
+            "status": alias.status,
+        }
 
     async def _refresh_resolution(
         self,
