@@ -20,9 +20,15 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .channel_roles import ChannelRole, ChannelRoleManager
-from .database import ChatbotShadowCandidateStore, ShadowCandidateInput, ShadowEvaluationInput
+from .database import (
+    ChatbotShadowCandidateStore,
+    ChatbotShortTermMessageStore,
+    ShadowCandidateInput,
+    ShadowEvaluationInput,
+    StoredMessageInput,
+)
 from .database_envs import DatabaseEnvManager
-from .responses_api import LLMMessage, ResponseAction, ResponsePipeline, ShadowReason
+from .responses_api import LLMMessage, MessageInMemory, ResponseAction, ResponsePipeline, ShadowReason
 from .shadow_mode import ShadowModeManager
 
 logger = getLogger(__name__)
@@ -222,6 +228,7 @@ class ChatBot(commands.Cog):
         self.channel_role_manager = ChannelRoleManager(self.env_manager)
         self.shadow_mode_manager = ShadowModeManager(self.env_manager)
         self.shadow_candidate_store = ChatbotShadowCandidateStore(session_factory)
+        self.short_term_message_store = ChatbotShortTermMessageStore(session_factory)
 
         self._initialization_lock = asyncio.Lock()
         self._channel_states: dict[int, ChannelProcessingState] = {}
@@ -245,7 +252,28 @@ class ChatBot(commands.Cog):
             async with self._initialization_lock:
                 if channel_id not in self._channel_states:
                     await self.initialize_response_pipeline_for_channel(channel_id)
-                    self._channel_states[channel_id] = ChannelProcessingState()
+                    stored_messages = await self.short_term_message_store.get_for_channel(channel_id)
+                    self.response_pipelines[channel_id].short_term_memory.restore(
+                        [
+                            MessageInMemory(
+                                message_id=stored.message_id,
+                                author_id=stored.author_id,
+                                author_name=stored.author_name,
+                                content=stored.content,
+                                reply_to_message_id=stored.reply_to_message_id,
+                                mentioned_user_ids=stored.mentioned_user_ids,
+                                timestamp=stored.created_at,
+                            )
+                            for stored in stored_messages
+                        ]
+                    )
+                    last_human_message = next(
+                        (stored for stored in reversed(stored_messages) if not stored.is_bot),
+                        None,
+                    )
+                    self._channel_states[channel_id] = ChannelProcessingState(
+                        last_human_message_timestamp=(last_human_message.created_at if last_human_message is not None else None)
+                    )
         return self._channel_states[channel_id]
 
     @commands.Cog.listener()
@@ -828,17 +856,44 @@ class ChatBot(commands.Cog):
     @commands.Cog.listener()
     async def on_message_delete(self, message: Message) -> None:
         """待機中の質問が削除された場合は、遅延した回答を取り消します。"""
+        await self.short_term_message_store.delete(message.id)
         state = self._channel_states.get(message.channel.id)
         if state is None:
             return
 
         async with state.lock:
+            self.response_pipelines[message.channel.id].short_term_memory.remove(message.id)
             if state.unanswered_question_message_id != message.id:
                 return
             if state.unanswered_question_task is not None:
                 state.unanswered_question_task.cancel()
             state.unanswered_question_task = None
             state.unanswered_question_message_id = None
+
+    @commands.Cog.listener()
+    async def on_message_edit(self, before: Message, after: Message) -> None:
+        """編集された投稿を短期保存と現在の短期記憶へ反映します。"""
+        state = await self._ensure_channel_state(after.channel.id)
+        async with state.lock:
+            short_term_memory = self.response_pipelines[after.channel.id].short_term_memory
+            short_term_memory.remove(before.id)
+            await short_term_memory.append(after)
+            stored_message = short_term_memory.get_message(after.id)
+            if stored_message is None:
+                return
+            await self.short_term_message_store.save(
+                StoredMessageInput(
+                    message_id=stored_message.message_id,
+                    channel_id=after.channel.id,
+                    author_id=stored_message.author_id,
+                    author_name=stored_message.author_name,
+                    content=stored_message.content,
+                    reply_to_message_id=stored_message.reply_to_message_id,
+                    mentioned_user_ids=stored_message.mentioned_user_ids,
+                    created_at=stored_message.timestamp,
+                    is_bot=after.author.bot,
+                )
+            )
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
         """受信したメッセージが、このボットの発言へのDiscord返信か判定します。
@@ -955,6 +1010,21 @@ class ChatBot(commands.Cog):
             short_term_memory.reset_for_new_conversation()
 
         await short_term_memory.append(message)
+        stored_message = short_term_memory.get_message(message.id)
+        if stored_message is not None:
+            await self.short_term_message_store.save(
+                StoredMessageInput(
+                    message_id=stored_message.message_id,
+                    channel_id=message.channel.id,
+                    author_id=stored_message.author_id,
+                    author_name=stored_message.author_name,
+                    content=stored_message.content,
+                    reply_to_message_id=stored_message.reply_to_message_id,
+                    mentioned_user_ids=stored_message.mentioned_user_ids,
+                    created_at=stored_message.timestamp,
+                    is_bot=message.author.bot,
+                )
+            )
         if not message.author.bot:
             state.last_human_message_timestamp = message.created_at
 

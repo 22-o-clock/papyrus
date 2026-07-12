@@ -2,7 +2,7 @@ import datetime
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import BigInteger, ForeignKey, Text, delete, select
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Text, delete, select
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
@@ -26,6 +26,22 @@ class ChatbotShadowCandidate(Base):
     reason = mapped_column(Text, nullable=False)
     context_message_ids = mapped_column(JSONB, nullable=False)
     context_snapshot = mapped_column(JSONB, nullable=False)
+
+
+class ChatbotStoredMessage(Base):
+    """期限付きで保存する短期文脈メッセージ。"""
+
+    __tablename__ = "chatbot_stored_messages"
+
+    message_id = mapped_column(BigInteger, primary_key=True)
+    channel_id = mapped_column(BigInteger, nullable=False, index=True)
+    author_id = mapped_column(BigInteger, nullable=False)
+    author_name = mapped_column(Text, nullable=False)
+    content = mapped_column(Text, nullable=False)
+    reply_to_message_id = mapped_column(BigInteger, nullable=True)
+    mentioned_user_ids = mapped_column(JSONB, nullable=False)
+    created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
+    is_bot = mapped_column(Boolean, nullable=False)
 
 
 class ChatbotShadowEvaluation(Base):
@@ -59,6 +75,21 @@ class ShadowCandidateInput:
     reason: str
     context_message_ids: list[int]
     context_snapshot: list[dict[str, object]]
+
+
+@dataclass
+class StoredMessageInput:
+    """短期文脈として保存するDiscordメッセージ。"""
+
+    message_id: int
+    channel_id: int
+    author_id: int
+    author_name: str
+    content: str
+    reply_to_message_id: int | None
+    mentioned_user_ids: list[int]
+    created_at: datetime.datetime
+    is_bot: bool
 
 
 @dataclass
@@ -151,3 +182,53 @@ class ChatbotShadowCandidateStore:
             else:
                 for field, value in values.items():
                     setattr(existing_evaluation, field, value)
+
+
+class ChatbotShortTermMessageStore:
+    """短期文脈メッセージを30日間保存します。"""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def save(self, message: StoredMessageInput) -> None:
+        """メッセージを保存し、期限切れの本文を削除します。"""
+        expiration = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=30)
+        async with self._session_factory.begin() as session:
+            await session.execute(delete(ChatbotStoredMessage).where(ChatbotStoredMessage.created_at < expiration))
+            existing = await session.get(ChatbotStoredMessage, message.message_id)
+            if existing is None:
+                session.add(
+                    ChatbotStoredMessage(
+                        message_id=message.message_id,
+                        channel_id=message.channel_id,
+                        author_id=message.author_id,
+                        author_name=message.author_name,
+                        content=message.content,
+                        reply_to_message_id=message.reply_to_message_id,
+                        mentioned_user_ids=message.mentioned_user_ids,
+                        created_at=message.created_at,
+                        is_bot=message.is_bot,
+                    )
+                )
+                return
+            existing.author_name = message.author_name
+            existing.content = message.content
+            existing.reply_to_message_id = message.reply_to_message_id
+            existing.mentioned_user_ids = message.mentioned_user_ids
+            existing.is_bot = message.is_bot
+
+    async def delete(self, message_id: int) -> None:
+        """削除されたDiscordメッセージを短期保存から除去します。"""
+        async with self._session_factory.begin() as session:
+            await session.execute(delete(ChatbotStoredMessage).where(ChatbotStoredMessage.message_id == message_id))
+
+    async def get_for_channel(self, channel_id: int) -> list[ChatbotStoredMessage]:
+        """指定チャンネルの保存済み短期文脈を時系列順で取得します。"""
+        expiration = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=30)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ChatbotStoredMessage)
+                .where(ChatbotStoredMessage.channel_id == channel_id, ChatbotStoredMessage.created_at >= expiration)
+                .order_by(ChatbotStoredMessage.created_at)
+            )
+            return list(result.scalars().all())

@@ -203,6 +203,14 @@ class ShortTermMemory:
                 return message.author_id
         return None
 
+    def get_message(self, message_id: int) -> MessageInMemory | None:
+        """指定されたDiscordメッセージの短期記憶データを取得します。"""
+        return next((message for message in self.memory if message.message_id == message_id), None)
+
+    def remove(self, message_id: int) -> None:
+        """指定されたDiscordメッセージを短期記憶から除去します。"""
+        self.memory = [message for message in self.memory if message.message_id != message_id]
+
     def can_target_message(self, message_id: int) -> bool:
         """返信またはリアクションの対象にできる現在の会話内メッセージか判定します。"""
         return any(message.message_id == message_id and not message.is_stale_context for message in self.memory)
@@ -215,6 +223,11 @@ class ShortTermMemory:
         last_message = self.memory[-1]
         last_message.is_stale_context = True
         self.memory = [last_message]
+
+    def restore(self, messages: list[MessageInMemory]) -> None:
+        """DBから復元したメッセージを時系列順で短期記憶へ設定します。"""
+        self.memory = sorted(messages, key=lambda message: message.timestamp)
+        self.forget()
 
 
 class ResponseAction(StrEnum):
