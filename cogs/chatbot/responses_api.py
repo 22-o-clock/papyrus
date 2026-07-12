@@ -19,8 +19,8 @@ from .prompt import draft_generator_prompt, memory_extraction_prompt, memory_rec
 
 logger = getLogger(__name__)
 
-DRAFT_GENERATOR_MODEL = "gpt-5.6-sol"
-MEMORY_EXTRACTION_MODEL = "gpt-5.4"
+DRAFT_GENERATOR_MODEL = "gpt-5.6-terra"
+MEMORY_EXTRACTION_MODEL = "gpt-5.6-terra"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 
 
@@ -428,6 +428,7 @@ class LongTermMemoryReconciler:
         log_chatbot_api_call("memory_reconciliation", MEMORY_EXTRACTION_MODEL)
         response = await self.client.responses.parse(
             model=MEMORY_EXTRACTION_MODEL,
+            reasoning={"effort": "none"},
             instructions=memory_reconciliation_prompt.MEMORY_RECONCILIATION_INSTRUCTIONS,
             input=json.dumps(
                 {
@@ -457,6 +458,7 @@ class LongTermMemoryExtractor:
         log_chatbot_api_call("memory_extraction", MEMORY_EXTRACTION_MODEL, item_count=len(messages))
         api_response = await self.client.responses.parse(
             model=MEMORY_EXTRACTION_MODEL,
+            reasoning={"effort": "none"},
             instructions=memory_extraction_prompt.MEMORY_EXTRACTION_INSTRUCTIONS,
             input=json.dumps(
                 {"messages": [message.to_dict() for message in messages], "members": member_references},
