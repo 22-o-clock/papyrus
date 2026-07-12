@@ -1,4 +1,5 @@
 import unittest
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -24,8 +25,11 @@ from cogs.chatbot.chatbot_cog import (
     get_unanswered_question_wait_minutes,
     is_generation_current,
     is_unaddressed_question,
+    parse_memory_admin_expiration,
+    parse_memory_admin_target,
     should_reset_conversation,
     should_respond,
+    validate_exported_memory_ids,
 )
 from cogs.chatbot.responses_api import MessageInMemory, ResponseAction
 
@@ -53,6 +57,40 @@ class MemorySearchQueryTest(unittest.TestCase):
 
         if result != message.content:
             self.fail("最新投稿の検索クエリにメッセージIDなどのメタデータが混入しています")
+
+
+class MemoryAdminInputTest(unittest.TestCase):
+    def test_resolves_selected_member(self) -> None:
+        result = parse_memory_admin_target("メンバー", "テストユーザー (123)", {"テストユーザー (123)": 123})
+
+        if result != (123, None, "member"):
+            self.fail("Excelで選択したメンバーを対象ユーザーIDへ変換できません")
+
+    def test_rejects_shared_target_with_value(self) -> None:
+        try:
+            parse_memory_admin_target("共有情報", "不要な対象", {})
+        except ValueError:
+            return
+        self.fail("共有情報に不要な対象名が指定されても拒否されません")
+
+    def test_interprets_naive_excel_datetime_as_japan_time(self) -> None:
+        excel_datetime = datetime(2026, 7, 12, 21, 0, tzinfo=UTC).replace(tzinfo=None)
+        result = parse_memory_admin_expiration(excel_datetime)
+
+        if result != datetime(2026, 7, 12, 12, 0, tzinfo=UTC):
+            self.fail("Excelの日本時間をUTCへ正しく変換できません")
+
+    def test_accepts_exported_subset_when_database_has_new_memories(self) -> None:
+        exported_id = uuid.uuid4()
+
+        validate_exported_memory_ids({exported_id}, {exported_id})
+
+    def test_rejects_deleted_exported_memory_row(self) -> None:
+        try:
+            validate_exported_memory_ids(set(), {uuid.uuid4()})
+        except ValueError:
+            return
+        self.fail("出力後に削除された記憶行が拒否されません")
 
 
 class ShouldRespondTest(unittest.TestCase):

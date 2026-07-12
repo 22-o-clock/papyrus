@@ -133,6 +133,19 @@ class ChatbotLongTermMemoryChange(ChatbotBase):
     created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
 
 
+class ChatbotLongTermMemoryAdminHistory(ChatbotBase):
+    """管理者による長期記憶の一括変更履歴。"""
+
+    __tablename__ = "chatbot_long_term_memory_admin_histories"
+
+    id = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    memory_id = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    administrator_user_id = mapped_column(BigInteger, nullable=False, index=True)
+    before_value = mapped_column(JSONB, nullable=False)
+    after_value = mapped_column(JSONB, nullable=False)
+    created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
+
+
 class ChatbotMemberAlias(ChatbotBase):
     """サーバーメンバーを会話中の呼称へ結び付けます。"""
 
@@ -282,6 +295,41 @@ class MemoryReconciliationInput:
     action: str
     existing_memory_ids: list[uuid.UUID]
     evidence_message_ids: list[int]
+
+
+@dataclass
+class LongTermMemoryEvidenceRecord:
+    """管理Excelへ表示する長期記憶の根拠投稿。"""
+
+    message_id: int
+    author_name: str
+    excerpt: str
+    channel_id: int | None
+
+
+@dataclass
+class LongTermMemoryReviewRecord:
+    """管理Excelへ出力する長期記憶の現在値。"""
+
+    memory: ChatbotLongTermMemory
+    evidences: list[LongTermMemoryEvidenceRecord]
+
+
+@dataclass
+class LongTermMemoryUpdateInput:
+    """管理Excelから一括適用する長期記憶の変更。"""
+
+    memory_id: uuid.UUID
+    action: str
+    content: str
+    target_user_id: int | None
+    external_entity_name: str | None
+    target_resolution: str
+    kind: str
+    source_type: str
+    is_sensitive: bool
+    expires_at: datetime.datetime | None
+    embedding: list[float] | None
 
 
 @dataclass
@@ -703,6 +751,110 @@ class ChatbotLongTermMemoryStore:
                 .order_by(ChatbotLongTermMemory.observed_at, ChatbotLongTermMemory.created_at)
             )
             return list(result.scalars().all())
+
+    async def get_review_records(self) -> list[LongTermMemoryReviewRecord]:
+        """全長期記憶を管理確認向けの優先順で根拠とともに返します。"""
+        now = datetime.datetime.now(datetime.UTC)
+        async with self._session_factory() as session:
+            result = await session.execute(select(ChatbotLongTermMemory))
+            memories = list(result.scalars().all())
+            priority = {"conflicted": 0, "active": 1, "invalidated": 2, "superseded": 3}
+            memories.sort(
+                key=lambda memory: (
+                    4
+                    if memory.status == "active" and memory.expires_at and memory.expires_at <= now
+                    else priority.get(memory.status, 5),
+                    -(memory.observed_at or memory.created_at).timestamp(),
+                )
+            )
+            evidence_result = await session.execute(
+                select(
+                    ChatbotLongTermMemoryEvidence.memory_id,
+                    ChatbotLongTermMemoryEvidence.message_id,
+                    ChatbotStoredMessage.author_name,
+                    ChatbotLongTermMemoryEvidence.excerpt,
+                    ChatbotStoredMessage.channel_id,
+                ).outerjoin(
+                    ChatbotStoredMessage,
+                    ChatbotStoredMessage.message_id == ChatbotLongTermMemoryEvidence.message_id,
+                )
+            )
+            evidences: dict[uuid.UUID, list[LongTermMemoryEvidenceRecord]] = {}
+            for memory_id, message_id, author_name, excerpt, channel_id in evidence_result:
+                evidences.setdefault(memory_id, []).append(
+                    LongTermMemoryEvidenceRecord(message_id, author_name or str(message_id), excerpt, channel_id)
+                )
+            return [LongTermMemoryReviewRecord(memory, evidences.get(memory.id, [])) for memory in memories]
+
+    async def apply_admin_updates(
+        self,
+        updates: list[LongTermMemoryUpdateInput],
+        administrator_user_id: int,
+    ) -> int:
+        """検証・埋め込み生成済みの記憶変更を一括適用します。"""
+        now = datetime.datetime.now(datetime.UTC)
+        changed_count = 0
+        async with self._session_factory.begin() as session:
+            result = await session.execute(
+                select(ChatbotLongTermMemory)
+                .where(ChatbotLongTermMemory.id.in_([item.memory_id for item in updates]))
+                .with_for_update()
+            )
+            memories = {memory.id: memory for memory in result.scalars().all()}
+            if len(memories) != len(updates):
+                msg = "存在しない記憶IDが含まれています"
+                raise ValueError(msg)
+            for item in updates:
+                memory = memories[item.memory_id]
+                before = self._admin_history_value(memory)
+                if item.action == "invalidate":
+                    memory.status = "invalidated"
+                    memory.invalidated_at = now
+                elif item.action in {"update", "activate"}:
+                    memory.content = item.content
+                    memory.target_user_id = item.target_user_id
+                    memory.external_entity_name = item.external_entity_name
+                    memory.target_resolution = item.target_resolution
+                    memory.kind = item.kind
+                    memory.source_type = item.source_type
+                    memory.is_sensitive = item.is_sensitive
+                    memory.expires_at = item.expires_at
+                    if item.embedding is not None:
+                        memory.embedding = item.embedding
+                    if item.action == "activate":
+                        memory.status = "active"
+                        memory.invalidated_at = None
+                        memory.superseded_by_memory_id = None
+                        memory.conflict_group_id = None
+                after = self._admin_history_value(memory)
+                if before != after:
+                    changed_count += 1
+                    session.add(
+                        ChatbotLongTermMemoryAdminHistory(
+                            memory_id=memory.id,
+                            administrator_user_id=administrator_user_id,
+                            before_value=before,
+                            after_value=after,
+                            created_at=now,
+                        )
+                    )
+        return changed_count
+
+    def _admin_history_value(self, memory: ChatbotLongTermMemory) -> dict[str, object]:
+        """管理者変更履歴へ保存する長期記憶の値を返します。"""
+        return {
+            "content": memory.content,
+            "target_user_id": memory.target_user_id,
+            "external_entity_name": memory.external_entity_name,
+            "target_resolution": memory.target_resolution,
+            "kind": memory.kind,
+            "source_type": memory.source_type,
+            "is_sensitive": memory.is_sensitive,
+            "expires_at": memory.expires_at.isoformat() if memory.expires_at else None,
+            "status": memory.status,
+            "superseded_by_memory_id": str(memory.superseded_by_memory_id) if memory.superseded_by_memory_id else None,
+            "conflict_group_id": str(memory.conflict_group_id) if memory.conflict_group_id else None,
+        }
 
     async def apply_reconciliation(
         self,
