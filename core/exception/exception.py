@@ -2,6 +2,7 @@ class BotException(Exception):
     """パッケージ独自の例外の基底クラス"""
 
     def __init__(self, message: str = "") -> None:
+        super().__init__(message)
         self.message = message
 
 
