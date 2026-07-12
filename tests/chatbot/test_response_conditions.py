@@ -20,7 +20,9 @@ from cogs.chatbot.chatbot_cog import (
     claim_response_slot,
     get_available_referenced_author_id,
     get_response_debounce_seconds,
+    get_unanswered_question_wait_minutes,
     is_generation_current,
+    is_unaddressed_question,
     should_reset_conversation,
     should_respond,
 )
@@ -95,8 +97,18 @@ class ChannelProcessingStateTest(unittest.TestCase):
         first_message = make_discord_message(author_id=100)
         second_message = make_discord_message(author_id=200)
 
-        first_claimed = claim_response_slot(first_state, first_message, is_explicit_call=False)
-        second_claimed = claim_response_slot(second_state, second_message, is_explicit_call=False)
+        first_claimed = claim_response_slot(
+            first_state,
+            first_message,
+            is_explicit_call=False,
+            is_unanswered_question=False,
+        )
+        second_claimed = claim_response_slot(
+            second_state,
+            second_message,
+            is_explicit_call=False,
+            is_unanswered_question=False,
+        )
 
         if not first_claimed or not second_claimed:
             self.fail("別チャンネルの生成枠が互いに干渉しています")
@@ -106,8 +118,18 @@ class ChannelProcessingStateTest(unittest.TestCase):
         first_message = make_discord_message(author_id=100)
         second_message = make_discord_message(author_id=200)
 
-        first_claimed = claim_response_slot(state, first_message, is_explicit_call=False)
-        second_claimed = claim_response_slot(state, second_message, is_explicit_call=True)
+        first_claimed = claim_response_slot(
+            state,
+            first_message,
+            is_explicit_call=False,
+            is_unanswered_question=False,
+        )
+        second_claimed = claim_response_slot(
+            state,
+            second_message,
+            is_explicit_call=True,
+            is_unanswered_question=False,
+        )
 
         if not first_claimed:
             self.fail("最初の返信要求が生成枠を確保できません")
@@ -221,6 +243,44 @@ class ConversationResetTest(unittest.TestCase):
 
         if should_reset:
             self.fail("過去の人間投稿がないチャンネルで会話をリセットします")
+
+
+class UnaddressedQuestionTest(unittest.TestCase):
+    def test_detects_question_mark_and_japanese_question_ending(self) -> None:
+        question_mark_result = is_unaddressed_question(
+            content="これは何ですか\uff1f",
+            is_reply=False,
+            mentioned_user_ids=[],
+        )
+        ending_result = is_unaddressed_question(
+            content="これは何ですか",
+            is_reply=False,
+            mentioned_user_ids=[],
+        )
+
+        if not question_mark_result or not ending_result:
+            self.fail("宛先のない疑問文を待機対象として検出できません")
+
+    def test_ignores_question_addressed_to_user_or_reply_target(self) -> None:
+        mentioned_user_result = is_unaddressed_question(
+            content="@誰か これは何ですか\uff1f",
+            is_reply=False,
+            mentioned_user_ids=[100],
+        )
+        reply_result = is_unaddressed_question(
+            content="これは何ですか\uff1f",
+            is_reply=True,
+            mentioned_user_ids=[],
+        )
+
+        if mentioned_user_result or reply_result:
+            self.fail("宛先のある質問を待機対象にしています")
+
+    def test_selects_wait_within_configured_range(self) -> None:
+        wait_minutes = get_unanswered_question_wait_minutes(1, 2)
+
+        if wait_minutes not in (1, 2):
+            self.fail("質問への待機時間が設定範囲を外れています")
 
 
 class ReferencedAuthorTest(unittest.TestCase):

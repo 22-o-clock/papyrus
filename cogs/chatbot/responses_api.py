@@ -293,12 +293,19 @@ class DraftGenerator:
         self.client = client
         self.bot_name = bot_name
 
-    async def draft(self, short_term_memory: ShortTermMemory, channel_role: ChannelRole) -> LLMMessage:
+    async def draft(
+        self,
+        short_term_memory: ShortTermMemory,
+        channel_role: ChannelRole,
+        *,
+        is_unanswered_question: bool,
+    ) -> LLMMessage:
         """メッセージのドラフト回答を生成します。
 
         Args:
             short_term_memory: メッセージ履歴
             channel_role: 対象チャンネルでのChatbotの役割
+            is_unanswered_question: 人間からの回答を待った宛先のない質問への回答か
 
         Returns:
             生成されたドラフト回答を含むLLMMessageオブジェクト
@@ -329,6 +336,13 @@ class DraftGenerator:
             instructions=draft_generator_prompt.DRAFT_INSTRUCTIONS.format(
                 bot_name=self.bot_name,
                 channel_role=channel_role.value,
+                unanswered_question_instruction=(
+                    "- この回答は、人間からの回答を待った宛先のない質問へのものです。"
+                    "短く明確に答えられる場合だけ応答してください。"
+                    "詳しい調査や長い説明が必要ならsilenceを選んでください。"
+                    if is_unanswered_question
+                    else ""
+                ),
             ),
             model=DRAFT_GENERATOR_MODEL,
             reasoning={"effort": "medium"},
@@ -435,17 +449,27 @@ class ResponsePipeline:
         await self.short_term_memory.append(message)
         self.short_term_memory.forget()
 
-    async def generate_response(self, channel_role: ChannelRole) -> LLMMessage:
+    async def generate_response(
+        self,
+        channel_role: ChannelRole,
+        *,
+        is_unanswered_question: bool,
+    ) -> LLMMessage:
         """短期記憶から最終回答を生成します。
 
         Args:
             channel_role: 対象チャンネルでのChatbotの役割
+            is_unanswered_question: 人間からの回答を待った宛先のない質問への回答か
 
         Returns:
             スタイリングされた最終回答を含むLLMMessageオブジェクト
 
         """
-        draft = await self.draft_generator.draft(self.short_term_memory, channel_role)
+        draft = await self.draft_generator.draft(
+            self.short_term_memory,
+            channel_role,
+            is_unanswered_question=is_unanswered_question,
+        )
         if draft.action in (ResponseAction.SILENCE, ResponseAction.REACTION):
             return draft
         return await self.response_styler.style(self.short_term_memory, draft, channel_role)

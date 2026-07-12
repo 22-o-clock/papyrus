@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import random
+import re
 from dataclasses import dataclass, field
 from logging import getLogger
 
@@ -24,6 +25,12 @@ CHAT_REACTION_COOLDOWN_SECONDS = 2 * 60
 DEFAULT_CONVERSATION_RESET_MINUTES = 12 * 60
 MINIMUM_CONVERSATION_RESET_MINUTES = 1
 CONVERSATION_RESET_MINUTES_KEY = "CHATBOT_CONVERSATION_RESET_MINUTES"
+DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES = 30
+DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES = 60
+UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY = "CHATBOT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES"
+UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY = "CHATBOT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES"
+
+QUESTION_ENDING_PATTERN = re.compile(r"(?:\?|ですか|ますか|でしょうか|かな|の\?|何\?|どう\?|誰\?|どこ\?|いつ\?)$")
 
 
 @dataclass
@@ -41,6 +48,10 @@ class ChannelProcessingState:
     generation_revision: int = 0
     last_spontaneous_action_at: float | None = None
     last_human_message_timestamp: datetime.datetime | None = None
+    unanswered_question_task: asyncio.Task[None] | None = None
+    unanswered_question_message_id: int | None = None
+    queued_response_is_unanswered_question: bool = False
+    debounced_response_is_unanswered_question: bool = False
 
 
 def claim_response_slot(
@@ -48,11 +59,13 @@ def claim_response_slot(
     message: Message,
     *,
     is_explicit_call: bool,
+    is_unanswered_question: bool,
 ) -> bool:
     """生成枠を確保し、使用中の場合は次の返信対象としてメッセージを保持します。"""
     if state.generating:
         state.queued_response_message = message
         state.queued_response_is_explicit_call = is_explicit_call
+        state.queued_response_is_unanswered_question = is_unanswered_question
         state.generation_revision += 1
         return False
 
@@ -103,6 +116,24 @@ def should_reset_conversation(
     return current_message_timestamp - last_human_message_timestamp >= datetime.timedelta(minutes=reset_minutes)
 
 
+def is_unaddressed_question(
+    *,
+    content: str,
+    is_reply: bool,
+    mentioned_user_ids: list[int],
+) -> bool:
+    """宛先のない質問として待機対象にする投稿か判定します。"""
+    if is_reply or mentioned_user_ids:
+        return False
+    normalized_content = content.replace("\uff1f", "?").strip()
+    return QUESTION_ENDING_PATTERN.search(normalized_content) is not None
+
+
+def get_unanswered_question_wait_minutes(minimum_minutes: int, maximum_minutes: int) -> int:
+    """宛先のない質問への回答を待つ時間を一様ランダムに選びます。"""
+    return random.SystemRandom().randint(minimum_minutes, maximum_minutes)
+
+
 def can_change_channel_role(*, is_thread: bool, manage_channels: bool) -> bool:
     """スレッドでは全員、通常チャンネルでは管理権限を持つ人だけに変更を許可します。"""
     return is_thread or manage_channels
@@ -139,6 +170,8 @@ class ChatBot(commands.Cog):
         self._channel_states: dict[int, ChannelProcessingState] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self.conversation_reset_minutes = DEFAULT_CONVERSATION_RESET_MINUTES
+        self.unanswered_question_minimum_wait_minutes = DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES
+        self.unanswered_question_maximum_wait_minutes = DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES
 
     async def initialize_response_pipeline_for_channel(self, channel_id: int) -> None:
         if self.bot.user:
@@ -160,22 +193,45 @@ class ChatBot(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        """会話リセット時間のサーバー設定を読み込みます。"""
-        configured_minutes = await self.env_manager.get_env(CONVERSATION_RESET_MINUTES_KEY)
-        if configured_minutes is None:
+        """サーバー共通の待機時間設定を読み込みます。"""
+        self.conversation_reset_minutes = await self._load_positive_minutes(
+            CONVERSATION_RESET_MINUTES_KEY,
+            DEFAULT_CONVERSATION_RESET_MINUTES,
+        )
+        minimum_minutes = await self._load_positive_minutes(
+            UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY,
+            DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES,
+        )
+        maximum_minutes = await self._load_positive_minutes(
+            UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY,
+            DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES,
+        )
+        if minimum_minutes > maximum_minutes:
+            logger.warning(
+                "Invalid chatbot unanswered question wait range (minimum=%s, maximum=%s)",
+                minimum_minutes,
+                maximum_minutes,
+            )
             return
+        self.unanswered_question_minimum_wait_minutes = minimum_minutes
+        self.unanswered_question_maximum_wait_minutes = maximum_minutes
+
+    async def _load_positive_minutes(self, key: str, default: int) -> int:
+        """DBに保存した分単位の正の整数設定を読み込み、異常値は既定値へ戻します。"""
+        configured_minutes = await self.env_manager.get_env(key)
+        if configured_minutes is None:
+            return default
 
         try:
             minutes = int(configured_minutes)
         except ValueError:
-            logger.warning("Invalid chatbot conversation reset minutes: %r", configured_minutes)
-            return
+            logger.warning("Invalid chatbot minutes setting (key=%s, value=%r)", key, configured_minutes)
+            return default
 
         if minutes < MINIMUM_CONVERSATION_RESET_MINUTES:
-            logger.warning("Chatbot conversation reset minutes is too small: %s", minutes)
-            return
-
-        self.conversation_reset_minutes = minutes
+            logger.warning("Chatbot minutes setting is too small (key=%s, value=%s)", key, minutes)
+            return default
+        return minutes
 
     @app_commands.command(name="show_chatbot_role", description="このチャンネルでのChatbotの役割を表示します")
     async def show_chatbot_role(self, interaction: discord.Interaction) -> None:
@@ -219,6 +275,43 @@ class ChatBot(commands.Cog):
         await self.env_manager.set_env(CONVERSATION_RESET_MINUTES_KEY, str(minutes))
         await interaction.response.send_message(
             f"Chatbotの会話リセット時間を {previous_minutes}分から {minutes}分に変更しました。"
+        )
+
+    @app_commands.command(name="set_chatbot_question_wait", description="宛先のない質問への回答待機時間を変更します")
+    @app_commands.describe(
+        minimum_minutes="最短待機時間 (分、1以上)",
+        maximum_minutes="最長待機時間 (分、最短以上)",
+    )
+    async def set_chatbot_question_wait(
+        self,
+        interaction: discord.Interaction,
+        minimum_minutes: int,
+        maximum_minutes: int,
+    ) -> None:
+        """サーバー全体の宛先のない質問への待機時間を保存します。"""
+        if not interaction.permissions.manage_guild:
+            await interaction.response.send_message(
+                "質問への回答待機時間の変更には「サーバー管理」権限が必要です。",
+                ephemeral=True,
+            )
+            return
+        if minimum_minutes < MINIMUM_CONVERSATION_RESET_MINUTES or minimum_minutes > maximum_minutes:
+            await interaction.response.send_message(
+                "待機時間は「1以上の最短分数」と「最短以上の最長分数」で指定してください。",
+                ephemeral=True,
+            )
+            return
+
+        previous_minimum_minutes = self.unanswered_question_minimum_wait_minutes
+        previous_maximum_minutes = self.unanswered_question_maximum_wait_minutes
+        self.unanswered_question_minimum_wait_minutes = minimum_minutes
+        self.unanswered_question_maximum_wait_minutes = maximum_minutes
+        await self.env_manager.set_env(UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY, str(minimum_minutes))
+        await self.env_manager.set_env(UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY, str(maximum_minutes))
+        await interaction.response.send_message(
+            "宛先のない質問への回答待機時間を "
+            f"{previous_minimum_minutes}〜{previous_maximum_minutes}分から "
+            f"{minimum_minutes}〜{maximum_minutes}分に変更しました。"
         )
 
     @app_commands.command(name="set_chatbot_role", description="このチャンネルでのChatbotの役割を変更します")
@@ -302,6 +395,20 @@ class ChatBot(commands.Cog):
         mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
         replied_to_bot = await self._is_reply_to_bot(message)
         is_explicit_call = mentioned_bot or replied_to_bot
+
+        await self._cancel_unanswered_question_wait(state)
+        if (
+            role is ChannelRole.CHAT
+            and not is_explicit_call
+            and is_unaddressed_question(
+                content=message.clean_content,
+                is_reply=message.type == discord.MessageType.reply,
+                mentioned_user_ids=[user.id for user in message.mentions],
+            )
+        ):
+            await self._schedule_unanswered_question_wait(message, state)
+            return
+
         response_required = should_respond(
             role,
             mentioned_bot=mentioned_bot,
@@ -312,6 +419,7 @@ class ChatBot(commands.Cog):
             state,
             role,
             is_explicit_call=is_explicit_call,
+            is_unanswered_question=False,
         )
 
     async def _update_response_schedule(
@@ -321,17 +429,24 @@ class ChatBot(commands.Cog):
         role: ChannelRole,
         *,
         is_explicit_call: bool,
+        is_unanswered_question: bool,
     ) -> None:
         """返信対象を更新し、最後の人間投稿から一定時間後に生成を開始します。"""
         async with state.lock:
             if state.generating:
                 if response_message is not None:
-                    claim_response_slot(state, response_message, is_explicit_call=is_explicit_call)
+                    claim_response_slot(
+                        state,
+                        response_message,
+                        is_explicit_call=is_explicit_call,
+                        is_unanswered_question=is_unanswered_question,
+                    )
                 return
 
             if response_message is not None:
                 state.debounced_response_message = response_message
                 state.debounced_response_is_explicit_call = is_explicit_call
+                state.debounced_response_is_unanswered_question = is_unanswered_question
             if state.debounced_response_message is None:
                 return
 
@@ -362,13 +477,105 @@ class ChatBot(commands.Cog):
 
             message = state.debounced_response_message
             is_explicit_call = state.debounced_response_is_explicit_call
+            is_unanswered_question = state.debounced_response_is_unanswered_question
             state.debounce_task = None
             state.debounced_response_message = None
             state.debounced_response_is_explicit_call = False
-            if message is None or not claim_response_slot(state, message, is_explicit_call=is_explicit_call):
+            state.debounced_response_is_unanswered_question = False
+            if message is None or not claim_response_slot(
+                state,
+                message,
+                is_explicit_call=is_explicit_call,
+                is_unanswered_question=is_unanswered_question,
+            ):
                 return
 
-        await self._process_response_queue(message, state, is_explicit_call=is_explicit_call)
+        await self._process_response_queue(
+            message,
+            state,
+            is_explicit_call=is_explicit_call,
+            is_unanswered_question=is_unanswered_question,
+        )
+
+    async def _schedule_unanswered_question_wait(self, message: Message, state: ChannelProcessingState) -> None:
+        """宛先のない質問への回答を、人間の反応を優先して遅延させます。"""
+        async with state.lock:
+            if state.debounce_task is not None and not state.debounced_response_is_explicit_call:
+                state.debounce_task.cancel()
+                state.debounce_task = None
+                state.debounced_response_message = None
+                state.debounced_response_is_unanswered_question = False
+
+            wait_minutes = get_unanswered_question_wait_minutes(
+                self.unanswered_question_minimum_wait_minutes,
+                self.unanswered_question_maximum_wait_minutes,
+            )
+            task = asyncio.create_task(self._answer_unanswered_question_after_wait(message, state, wait_minutes))
+            state.unanswered_question_task = task
+            state.unanswered_question_message_id = message.id
+
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _cancel_unanswered_question_wait(self, state: ChannelProcessingState) -> None:
+        """新しい人間投稿を受けたため、待機中の宛先のない質問への回答を取り消します。"""
+        async with state.lock:
+            if state.unanswered_question_task is not None:
+                state.unanswered_question_task.cancel()
+            state.unanswered_question_task = None
+            state.unanswered_question_message_id = None
+
+    async def _answer_unanswered_question_after_wait(
+        self,
+        message: Message,
+        state: ChannelProcessingState,
+        wait_minutes: int,
+    ) -> None:
+        """待機後も質問が有効なら、短く答えられる場合だけ回答を生成します。"""
+        try:
+            await asyncio.sleep(datetime.timedelta(minutes=wait_minutes).total_seconds())
+        except asyncio.CancelledError:
+            return
+
+        parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
+        role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
+        if role is not ChannelRole.CHAT:
+            return
+
+        async with state.lock:
+            if state.unanswered_question_task is not asyncio.current_task():
+                return
+            state.unanswered_question_task = None
+            state.unanswered_question_message_id = None
+            if not claim_response_slot(
+                state,
+                message,
+                is_explicit_call=False,
+                is_unanswered_question=True,
+            ):
+                return
+
+        await self._process_response_queue(
+            message,
+            state,
+            is_explicit_call=False,
+            is_unanswered_question=True,
+        )
+
+    @commands.Cog.listener()
+    async def on_message_delete(self, message: Message) -> None:
+        """待機中の質問が削除された場合は、遅延した回答を取り消します。"""
+        state = self._channel_states.get(message.channel.id)
+        if state is None:
+            return
+
+        async with state.lock:
+            if state.unanswered_question_message_id != message.id:
+                return
+            if state.unanswered_question_task is not None:
+                state.unanswered_question_task.cancel()
+            state.unanswered_question_task = None
+            state.unanswered_question_message_id = None
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
         """受信したメッセージが、このボットの発言へのDiscord返信か判定します。
@@ -413,10 +620,12 @@ class ChatBot(commands.Cog):
         state: ChannelProcessingState,
         *,
         is_explicit_call: bool,
+        is_unanswered_question: bool,
     ) -> None:
         """同一チャンネルの返信要求を順番に生成し、保留メッセージを文脈へ反映します。"""
         current_message = message
         current_is_explicit_call = is_explicit_call
+        current_is_unanswered_question = is_unanswered_question
         completed_normally = False
         try:
             while True:
@@ -426,6 +635,7 @@ class ChatBot(commands.Cog):
                         current_message,
                         state,
                         is_explicit_call=current_is_explicit_call,
+                        is_unanswered_question=current_is_unanswered_question,
                     )
                 else:
                     logger.info(
@@ -437,20 +647,24 @@ class ChatBot(commands.Cog):
                     await self._flush_pending_messages(state)
                     next_message = state.queued_response_message
                     next_is_explicit_call = state.queued_response_is_explicit_call
+                    next_is_unanswered_question = state.queued_response_is_unanswered_question
                     state.queued_response_message = None
                     state.queued_response_is_explicit_call = False
+                    state.queued_response_is_unanswered_question = False
                     if next_message is None:
                         state.generating = False
                         completed_normally = True
                         return
                     current_message = next_message
                     current_is_explicit_call = next_is_explicit_call
+                    current_is_unanswered_question = next_is_unanswered_question
         finally:
             if not completed_normally:
                 async with state.lock:
                     await self._flush_pending_messages(state)
                     state.queued_response_message = None
                     state.queued_response_is_explicit_call = False
+                    state.queued_response_is_unanswered_question = False
                     state.generating = False
 
     async def _flush_pending_messages(self, state: ChannelProcessingState) -> None:
@@ -479,13 +693,17 @@ class ChatBot(commands.Cog):
         state: ChannelProcessingState,
         *,
         is_explicit_call: bool,
+        is_unanswered_question: bool,
     ) -> None:
         """短期記憶から回答を生成し、生成中に文脈が更新されていなければ送信します。"""
         generation_revision = state.generation_revision
         async with message.channel.typing():
             parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
             role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
-            generated_response = await self.response_pipelines[message.channel.id].generate_response(role)
+            generated_response = await self.response_pipelines[message.channel.id].generate_response(
+                role,
+                is_unanswered_question=is_unanswered_question,
+            )
 
         async with state.lock:
             if not is_generation_current(state, generation_revision):
