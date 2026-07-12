@@ -1,10 +1,13 @@
 from discord import Interaction, Member, StageChannel, TextChannel, Thread, User, VoiceChannel, VoiceClient, VoiceState
 from discord.ext import commands
 
-def parse_channel_ids(raw: str | None) -> list[int]:
+
+def parse_comma_separated_values(raw: str | None) -> list[str]:
+    """カンマ区切りの設定値を空白と空要素を除いて分割する。"""
     if not raw:
         return []
-    return [int(part.strip()) for part in raw.split(",") if part.strip()]
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
 
 async def fetch_text_channel(bot: commands.Bot, channel_id: int):
     channel = await bot.fetch_channel(channel_id)

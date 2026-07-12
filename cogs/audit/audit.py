@@ -8,7 +8,7 @@ import discord
 from discord import Message, TextChannel, Thread
 from discord.ext import commands
 
-from core.tools.utils import parse_channel_ids
+from core.tools.utils import parse_comma_separated_values
 from core.tools.webhook import fetch_webhook
 
 logger = getLogger(__name__)
@@ -119,7 +119,7 @@ class Audit(commands.Cog):
         self.hook: discord.Webhook | None = None
         self.server_id: int = int(os.environ["SERVER_ID"])
         self.log_thread: int = int(os.environ["LOG_THREAD"])
-        self.audit_immunity: list[int] = parse_channel_ids(os.environ.get("AUDIT_IMMUNITY"))
+        self.audit_immunity = [int(channel_id) for channel_id in parse_comma_separated_values(os.environ.get("AUDIT_IMMUNITY"))]
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
