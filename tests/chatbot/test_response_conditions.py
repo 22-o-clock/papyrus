@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock
@@ -20,6 +21,7 @@ from cogs.chatbot.chatbot_cog import (
     get_available_referenced_author_id,
     get_response_debounce_seconds,
     is_generation_current,
+    should_reset_conversation,
     should_respond,
 )
 from cogs.chatbot.responses_api import ResponseAction
@@ -195,6 +197,30 @@ class SpontaneousGenerationTest(unittest.TestCase):
 
         if not can_start:
             self.fail("リアクションが可能な時点で自発生成を開始しません")
+
+
+class ConversationResetTest(unittest.TestCase):
+    def test_resets_after_configured_interval_from_last_human_message(self) -> None:
+        last_human_message_timestamp = datetime(2026, 7, 12, 9, 0, tzinfo=UTC)
+
+        should_reset = should_reset_conversation(
+            last_human_message_timestamp,
+            last_human_message_timestamp + timedelta(minutes=720),
+            reset_minutes=720,
+        )
+
+        if not should_reset:
+            self.fail("設定時間が経過しても会話をリセットしません")
+
+    def test_does_not_reset_without_a_previous_human_message(self) -> None:
+        should_reset = should_reset_conversation(
+            None,
+            datetime(2026, 7, 12, 9, 0, tzinfo=UTC),
+            reset_minutes=720,
+        )
+
+        if should_reset:
+            self.fail("過去の人間投稿がないチャンネルで会話をリセットします")
 
 
 class ReferencedAuthorTest(unittest.TestCase):

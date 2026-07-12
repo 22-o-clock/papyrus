@@ -91,6 +91,20 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
         if memory.get_author_id(999) is not None:
             self.fail("未保存メッセージに発言者IDを返しています")
 
+    async def test_reset_keeps_only_last_message_as_stale_context(self) -> None:
+        memory = ShortTermMemory()
+        await memory.append(make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者A", content="古い話題")))
+        await memory.append(make_message(MessageSpec(message_id=2, author_id=20, author_name="発言者B", content="最後の投稿")))
+
+        memory.reset_for_new_conversation()
+
+        if [message.message_id for message in memory.memory] != [2]:
+            self.fail("会話リセット後に最後の投稿以外が残っています")
+        if not memory.memory[0].is_stale_context:
+            self.fail("会話リセット後の最後の投稿が参考情報として扱われていません")
+        if memory.can_target_message(2):
+            self.fail("参考情報の投稿を返信またはリアクションの対象にできます")
+
 
 class LLMMessageTest(unittest.TestCase):
     def test_serializes_reply_target_as_message_id(self) -> None:

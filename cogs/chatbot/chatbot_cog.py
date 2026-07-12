@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import random
 from dataclasses import dataclass, field
 from logging import getLogger
@@ -20,6 +21,9 @@ CHAT_DEBOUNCE_MIN_SECONDS = 5.0
 CHAT_DEBOUNCE_MAX_SECONDS = 15.0
 CHAT_TEXT_COOLDOWN_SECONDS = 15 * 60
 CHAT_REACTION_COOLDOWN_SECONDS = 2 * 60
+DEFAULT_CONVERSATION_RESET_MINUTES = 12 * 60
+MINIMUM_CONVERSATION_RESET_MINUTES = 1
+CONVERSATION_RESET_MINUTES_KEY = "CHATBOT_CONVERSATION_RESET_MINUTES"
 
 
 @dataclass
@@ -36,6 +40,7 @@ class ChannelProcessingState:
     debounced_response_is_explicit_call: bool = False
     generation_revision: int = 0
     last_spontaneous_action_at: float | None = None
+    last_human_message_timestamp: datetime.datetime | None = None
 
 
 def claim_response_slot(
@@ -87,6 +92,17 @@ def can_start_spontaneous_generation(last_action_at: float | None, now: float) -
     return now - last_action_at >= CHAT_REACTION_COOLDOWN_SECONDS
 
 
+def should_reset_conversation(
+    last_human_message_timestamp: datetime.datetime | None,
+    current_message_timestamp: datetime.datetime,
+    reset_minutes: int,
+) -> bool:
+    """最後の人間投稿から設定時間以上空いたときに会話文脈をリセットするか判定します。"""
+    if last_human_message_timestamp is None:
+        return False
+    return current_message_timestamp - last_human_message_timestamp >= datetime.timedelta(minutes=reset_minutes)
+
+
 def can_change_channel_role(*, is_thread: bool, manage_channels: bool) -> bool:
     """スレッドでは全員、通常チャンネルでは管理権限を持つ人だけに変更を許可します。"""
     return is_thread or manage_channels
@@ -122,6 +138,7 @@ class ChatBot(commands.Cog):
         self._initialization_lock = asyncio.Lock()
         self._channel_states: dict[int, ChannelProcessingState] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self.conversation_reset_minutes = DEFAULT_CONVERSATION_RESET_MINUTES
 
     async def initialize_response_pipeline_for_channel(self, channel_id: int) -> None:
         if self.bot.user:
@@ -141,6 +158,25 @@ class ChatBot(commands.Cog):
                     self._channel_states[channel_id] = ChannelProcessingState()
         return self._channel_states[channel_id]
 
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """会話リセット時間のサーバー設定を読み込みます。"""
+        configured_minutes = await self.env_manager.get_env(CONVERSATION_RESET_MINUTES_KEY)
+        if configured_minutes is None:
+            return
+
+        try:
+            minutes = int(configured_minutes)
+        except ValueError:
+            logger.warning("Invalid chatbot conversation reset minutes: %r", configured_minutes)
+            return
+
+        if minutes < MINIMUM_CONVERSATION_RESET_MINUTES:
+            logger.warning("Chatbot conversation reset minutes is too small: %s", minutes)
+            return
+
+        self.conversation_reset_minutes = minutes
+
     @app_commands.command(name="show_chatbot_role", description="このチャンネルでのChatbotの役割を表示します")
     async def show_chatbot_role(self, interaction: discord.Interaction) -> None:
         channel_id = interaction.channel_id
@@ -158,6 +194,31 @@ class ChatBot(commands.Cog):
         await interaction.response.send_message(
             f"このチャンネルのChatbotの役割は `{role.value}` です。設定元: {source}。",
             ephemeral=True,
+        )
+
+    @app_commands.command(name="set_chatbot_reset_minutes", description="Chatbotの会話リセット時間を変更します")
+    @app_commands.describe(minutes="最後の人間投稿から会話をリセットするまでの分数 (1以上)")
+    async def set_chatbot_conversation_reset_minutes(
+        self,
+        interaction: discord.Interaction,
+        minutes: int,
+    ) -> None:
+        """サーバー全体の会話リセット時間を保存します。"""
+        if not interaction.permissions.manage_guild:
+            await interaction.response.send_message(
+                "会話リセット時間の変更には「サーバー管理」権限が必要です。",
+                ephemeral=True,
+            )
+            return
+        if minutes < MINIMUM_CONVERSATION_RESET_MINUTES:
+            await interaction.response.send_message("会話リセット時間は1分以上で指定してください。", ephemeral=True)
+            return
+
+        previous_minutes = self.conversation_reset_minutes
+        self.conversation_reset_minutes = minutes
+        await self.env_manager.set_env(CONVERSATION_RESET_MINUTES_KEY, str(minutes))
+        await interaction.response.send_message(
+            f"Chatbotの会話リセット時間を {previous_minutes}分から {minutes}分に変更しました。"
         )
 
     @app_commands.command(name="set_chatbot_role", description="このチャンネルでのChatbotの役割を変更します")
@@ -225,7 +286,7 @@ class ChatBot(commands.Cog):
             if state.generating:
                 state.pending_messages.append(message)
             else:
-                await self.response_pipelines[message.channel.id].short_term_memory.append(message)
+                await self._append_message_to_short_term_memory(message, state)
 
         # 3. 回答を行うかの判定
         # 3.1 ボットのメッセージについては返信しない
@@ -373,7 +434,7 @@ class ChatBot(commands.Cog):
                     )
 
                 async with state.lock:
-                    await self._flush_pending_messages(current_message.channel.id, state)
+                    await self._flush_pending_messages(state)
                     next_message = state.queued_response_message
                     next_is_explicit_call = state.queued_response_is_explicit_call
                     state.queued_response_message = None
@@ -387,16 +448,30 @@ class ChatBot(commands.Cog):
         finally:
             if not completed_normally:
                 async with state.lock:
-                    await self._flush_pending_messages(message.channel.id, state)
+                    await self._flush_pending_messages(state)
                     state.queued_response_message = None
                     state.queued_response_is_explicit_call = False
                     state.generating = False
 
-    async def _flush_pending_messages(self, channel_id: int, state: ChannelProcessingState) -> None:
+    async def _flush_pending_messages(self, state: ChannelProcessingState) -> None:
         """生成中に保留したメッセージを時系列順で短期記憶へ移します。"""
         for pending_message in sorted(state.pending_messages, key=lambda pending: pending.id):
-            await self.response_pipelines[channel_id].short_term_memory.append(pending_message)
+            await self._append_message_to_short_term_memory(pending_message, state)
         state.pending_messages.clear()
+
+    async def _append_message_to_short_term_memory(self, message: Message, state: ChannelProcessingState) -> None:
+        """人間投稿の長時間の空白を検出し、必要に応じて短期文脈をリセットしてから保存します。"""
+        short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
+        if not message.author.bot and should_reset_conversation(
+            state.last_human_message_timestamp,
+            message.created_at,
+            self.conversation_reset_minutes,
+        ):
+            short_term_memory.reset_for_new_conversation()
+
+        await short_term_memory.append(message)
+        if not message.author.bot:
+            state.last_human_message_timestamp = message.created_at
 
     async def _generate_and_send_response(
         self,
@@ -457,7 +532,7 @@ class ChatBot(commands.Cog):
         short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
         if (
             reply_to_message_id is None
-            or not short_term_memory.contains_message(reply_to_message_id)
+            or not short_term_memory.can_target_message(reply_to_message_id)
             or not isinstance(message.channel, discord.TextChannel | discord.Thread)
         ):
             logger.warning(

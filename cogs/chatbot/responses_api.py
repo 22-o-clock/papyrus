@@ -34,6 +34,7 @@ class MessageInMemory:
         reply_to_message_id: 返信先のDiscordメッセージID
         mentioned_user_ids: メンションされたDiscordユーザーIDの一覧
         timestamp: メッセージが作成された日時
+        is_stale_context: 長時間前の参考情報としてのみ使うメッセージか
         image_url: メッセージに含まれる画像のURL (存在する場合)
         pdf_url: メッセージに含まれるPDFのURL (存在する場合)
 
@@ -46,6 +47,7 @@ class MessageInMemory:
     reply_to_message_id: int | None
     mentioned_user_ids: list[int]
     timestamp: datetime.datetime
+    is_stale_context: bool = False
     image_url: str | None = None
     pdf_url: str | None = None
 
@@ -64,6 +66,7 @@ class MessageInMemory:
             "reply_to_message_id": self.reply_to_message_id,
             "mentioned_user_ids": self.mentioned_user_ids,
             "timestamp": self.timestamp.astimezone(LOCAL_TIMEZONE).isoformat(),
+            "is_stale_context": self.is_stale_context,
         }
 
 
@@ -199,6 +202,19 @@ class ShortTermMemory:
             if message.message_id == message_id:
                 return message.author_id
         return None
+
+    def can_target_message(self, message_id: int) -> bool:
+        """返信またはリアクションの対象にできる現在の会話内メッセージか判定します。"""
+        return any(message.message_id == message_id and not message.is_stale_context for message in self.memory)
+
+    def reset_for_new_conversation(self) -> None:
+        """直前の投稿だけを古い参考情報として残し、現在の会話文脈をリセットします。"""
+        if not self.memory:
+            return
+
+        last_message = self.memory[-1]
+        last_message.is_stale_context = True
+        self.memory = [last_message]
 
 
 class ResponseAction(StrEnum):
