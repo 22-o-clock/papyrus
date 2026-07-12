@@ -35,10 +35,8 @@ class DatabaseEnvManager:
 
         """
         async with self._session_factory() as session:
-            cursor_result = await session.execute(select(DatabaseEnvs.value).where(DatabaseEnvs.key == key))
-            result = cursor_result.all()
-
-        return result[0][0] if result else None
+            result = await session.execute(select(DatabaseEnvs.value).where(DatabaseEnvs.key == key))
+            return result.scalar_one_or_none()
 
     async def set_env(self, key: str, value: str) -> None:
         """指定したキーと値のペアをデータベースに保存します。

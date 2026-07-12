@@ -1,6 +1,4 @@
-from typing import Any
-
-from sqlalchemy import BigInteger, CursorResult, Integer, select
+from sqlalchemy import BigInteger, Integer, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
@@ -15,6 +13,7 @@ class VoiceVoxTable(Base):
     speaker_id = mapped_column(Integer)
 
     def __repr__(self) -> str:
+        """デバッグ用にメンバーIDと話者IDを表現する。"""
         return f"VoiceVoxTable(member_id={self.member_id!r}, speaker_id={self.speaker_id!r})"
 
 
@@ -22,12 +21,11 @@ class VoiceVoxDatabase:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def get_speakers(self):
+    async def get_speakers(self) -> dict[int, int]:
         """使用 speaker 情報の取得"""
         async with self._session_factory() as session:
-            cursor_result: CursorResult[Any] = await session.execute(select(VoiceVoxTable.member_id, VoiceVoxTable.speaker_id))
-            result = cursor_result.all()
-        return {member_id: speaker_id for member_id, speaker_id in result}
+            result = await session.execute(select(VoiceVoxTable.member_id, VoiceVoxTable.speaker_id))
+        return {int(member_id): int(speaker_id) for member_id, speaker_id in result.tuples()}
 
     async def set_speaker(self, member_id: int, speaker_id: int) -> None:
         """使用 speaker 情報の保存"""
