@@ -14,6 +14,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, model_validator
 
 from .channel_roles import ChannelRole
+from .observability import log_chatbot_api_call
 from .prompt import draft_generator_prompt, memory_extraction_prompt, memory_reconciliation_prompt, response_styler_prompt
 
 logger = getLogger(__name__)
@@ -425,6 +426,7 @@ class LongTermMemoryReconciler:
         """明確な矛盾だけを構造化された関係として返します。"""
         if not existing_memories:
             return MemoryReconciliation(action="keep")
+        log_chatbot_api_call("memory_reconciliation", MEMORY_EXTRACTION_MODEL)
         response = await self.client.responses.parse(
             model=MEMORY_EXTRACTION_MODEL,
             instructions=memory_reconciliation_prompt.MEMORY_RECONCILIATION_INSTRUCTIONS,
@@ -453,6 +455,7 @@ class LongTermMemoryExtractor:
         member_references: list[dict[str, object]],
     ) -> LongTermMemoryExtraction:
         """投稿一覧から、根拠付きの長期記憶候補を返します。"""
+        log_chatbot_api_call("memory_extraction", MEMORY_EXTRACTION_MODEL, item_count=len(messages))
         api_response = await self.client.responses.parse(
             model=MEMORY_EXTRACTION_MODEL,
             instructions=memory_extraction_prompt.MEMORY_EXTRACTION_INSTRUCTIONS,
@@ -525,6 +528,7 @@ class DraftGenerator:
         if short_term_memory.memory[-1].pdf_url:
             llm_input[0]["content"].append({"type": "input_file", "file_url": short_term_memory.memory[-1].pdf_url})
 
+        log_chatbot_api_call("draft_generation", DRAFT_GENERATOR_MODEL)
         api_response = await self.client.responses.parse(
             input=llm_input,  # type: ignore
             instructions=draft_generator_prompt.DRAFT_INSTRUCTIONS.format(
@@ -591,6 +595,7 @@ class ResponseStyler:
             スタイリングされた回答を含むLLMMessageオブジェクト
 
         """
+        log_chatbot_api_call("response_styling", STYLER_MODEL)
         api_response = await self.client.responses.parse(
             instructions=response_styler_prompt.STYLE_INSTRUCTIONS.format(
                 bot_name=self.bot_name,

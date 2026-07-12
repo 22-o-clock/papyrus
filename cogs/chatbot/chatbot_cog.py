@@ -50,6 +50,7 @@ from .database import (
     normalize_member_alias,
 )
 from .database_envs import DatabaseEnvManager
+from .observability import log_chatbot_api_call
 from .responses_api import (
     AttachmentInMemory,
     LLMMessage,
@@ -517,6 +518,12 @@ class ChatBot(commands.Cog):
                     evidence_message_ids=[],
                 ),
                 new_memory_id=memory.id,
+            )
+            logger.info(
+                "Reconciled existing chatbot memories (action=%s, new_memory_id=%s, existing_memory_ids=%s)",
+                reconciliation.action,
+                memory.id,
+                reconciliation_ids,
             )
         await self.env_manager.set_env(MEMORY_RECONCILIATION_VERSION_KEY, MEMORY_RECONCILIATION_VERSION)
 
@@ -1043,6 +1050,12 @@ class ChatBot(commands.Cog):
             updates = self._parse_long_term_memory_workbook(workbook, interaction.guild, records)
             await self._create_updated_memory_embeddings(updates, records)
             changed_count = await self.long_term_memory_store.apply_admin_updates(updates, interaction.user.id)
+            logger.info(
+                "Applied chatbot memory admin updates (administrator_user_id=%s, changed_count=%s, checked_count=%s)",
+                interaction.user.id,
+                changed_count,
+                len(updates),
+            )
         except (
             BadZipFile,
             InvalidFileException,
@@ -1292,6 +1305,7 @@ class ChatBot(commands.Cog):
         changed = [item for item in updates if item.content != current_contents[item.memory_id]]
         if not changed:
             return
+        log_chatbot_api_call("memory_admin_embedding", "text-embedding-3-large", item_count=len(changed))
         response = await AsyncOpenAI().embeddings.create(
             model="text-embedding-3-large", input=[item.content for item in changed]
         )
@@ -1616,6 +1630,7 @@ class ChatBot(commands.Cog):
         if target_user_id is None and candidate.external_entity_name:
             target_user_id = active_aliases.get(normalize_member_alias(candidate.external_entity_name))
         external_entity_name = candidate.external_entity_name if target_user_id is None else None
+        log_chatbot_api_call("memory_embedding", "text-embedding-3-large")
         embedding_response = await AsyncOpenAI().embeddings.create(model="text-embedding-3-large", input=candidate.content)
         existing_memories = await self.long_term_memory_store.get_active_for_target(target_user_id, external_entity_name)
         reconciliation = await self.long_term_memory_reconciler.reconcile(
@@ -1644,6 +1659,13 @@ class ChatBot(commands.Cog):
                 observed_at=min(message.timestamp for message in evidence),
             )
         )
+        logger.info(
+            "Saved chatbot long-term memory (memory_id=%s, target_user_id=%s, target_resolution=%s, source_type=%s)",
+            stored_memory_id,
+            target_user_id,
+            self._normalize_memory_target_resolution(target_user_id, external_entity_name),
+            candidate.source_type,
+        )
         await self.long_term_memory_store.apply_reconciliation(
             MemoryReconciliationInput(
                 action=reconciliation.action,
@@ -1652,6 +1674,13 @@ class ChatBot(commands.Cog):
             ),
             new_memory_id=stored_memory_id,
         )
+        if reconciliation.action != "keep" and reconciliation_ids:
+            logger.info(
+                "Reconciled chatbot memories (action=%s, new_memory_id=%s, existing_memory_ids=%s)",
+                reconciliation.action,
+                stored_memory_id,
+                reconciliation_ids,
+            )
 
     def _memory_candidate_for_reconciliation(self, candidate: LongTermMemoryCandidate) -> dict[str, object]:
         """新規記憶候補を訂正判定モデルの入力へ整形します。"""
@@ -1701,6 +1730,12 @@ class ChatBot(commands.Cog):
             ),
             new_memory_id=None,
         )
+        if reconciliation_ids:
+            logger.info(
+                "Invalidated chatbot memories from explicit correction (existing_memory_ids=%s, evidence_message_ids=%s)",
+                reconciliation_ids,
+                [message.message_id for message in evidence],
+            )
 
     def _normalize_memory_target_resolution(
         self,
@@ -2102,6 +2137,7 @@ class ChatBot(commands.Cog):
             ],
         )
         try:
+            log_chatbot_api_call("attachment_analysis", "gpt-5.4-mini")
             response = await AsyncOpenAI().responses.parse(
                 model="gpt-5.4-mini",
                 input=analysis_input,
@@ -2216,6 +2252,7 @@ class ChatBot(commands.Cog):
             if len(search_messages) > 1:
                 # 短い質問の意味が周辺会話に埋もれないよう、最新投稿と会話全体を別々に検索します。
                 search_queries.append(search_context)
+            log_chatbot_api_call("memory_search_embedding", "text-embedding-3-large", item_count=len(search_queries))
             embedding_response = await AsyncOpenAI().embeddings.create(
                 model="text-embedding-3-large",
                 input=search_queries,
