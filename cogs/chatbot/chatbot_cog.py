@@ -6,6 +6,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from logging import getLogger
+from typing import Any, cast
 
 import discord
 from discord import Message, MessageReference, app_commands
@@ -17,6 +18,7 @@ from openpyxl.cell.text import InlineFont
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .channel_roles import ChannelRole, ChannelRoleManager
@@ -25,6 +27,7 @@ from .database import (
     ChatbotShortTermMessageStore,
     ShadowCandidateInput,
     ShadowEvaluationInput,
+    StoredAttachmentInput,
     StoredMessageInput,
 )
 from .database_envs import DatabaseEnvManager
@@ -92,6 +95,13 @@ SHADOW_REASON_LABELS = {
     "identity_uncertain": "発言者を区別できない",
     "cooldown": "クールダウン中",
 }
+
+
+class AttachmentAnalysis(BaseModel):
+    """短期文脈に保存する添付ファイルの要約です。"""
+
+    summary: str
+    important_text: str
 
 
 @dataclass
@@ -894,6 +904,22 @@ class ChatBot(commands.Cog):
                     is_bot=after.author.bot,
                 )
             )
+            await self.short_term_message_store.delete_attachments(after.id)
+            for attachment in after.attachments:
+                attachment_kind = self._get_attachment_kind(attachment.content_type)
+                if attachment_kind is None:
+                    continue
+                await self.short_term_message_store.save_attachment(
+                    StoredAttachmentInput(
+                        id=attachment.id,
+                        message_id=after.id,
+                        url=attachment.url,
+                        filename=attachment.filename,
+                        content_type=attachment.content_type,
+                        kind=attachment_kind,
+                    )
+                )
+                self._schedule_attachment_analysis(attachment.id, attachment.url, attachment_kind)
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
         """受信したメッセージが、このボットの発言へのDiscord返信か判定します。
@@ -1025,8 +1051,91 @@ class ChatBot(commands.Cog):
                     is_bot=message.author.bot,
                 )
             )
+            for attachment in message.attachments:
+                attachment_kind = self._get_attachment_kind(attachment.content_type)
+                if attachment_kind is None:
+                    continue
+                await self.short_term_message_store.save_attachment(
+                    StoredAttachmentInput(
+                        id=attachment.id,
+                        message_id=message.id,
+                        url=attachment.url,
+                        filename=attachment.filename,
+                        content_type=attachment.content_type,
+                        kind=attachment_kind,
+                    )
+                )
+                self._schedule_attachment_analysis(attachment.id, attachment.url, attachment_kind)
         if not message.author.bot:
             state.last_human_message_timestamp = message.created_at
+
+    def _get_attachment_kind(self, content_type: str | None) -> str | None:
+        """短期文脈の解析対象にする添付種別を返します。"""
+        if content_type in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+            return "image"
+        if content_type == "application/pdf":
+            return "pdf"
+        return None
+
+    def _schedule_attachment_analysis(self, attachment_id: int, url: str, kind: str) -> None:
+        """添付内容の要約を、投稿処理を待たせずに生成します。"""
+        task = asyncio.create_task(self._analyze_attachment(attachment_id, url, kind))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _analyze_attachment(self, attachment_id: int, url: str, kind: str) -> None:
+        """画像またはPDFを解析し、短い説明と重要テキストを保存します。"""
+        content_type = "input_image" if kind == "image" else "input_file"
+        content_key = "image_url" if kind == "image" else "file_url"
+        analysis_input = cast(
+            "Any",
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "添付内容を短く要約してください。"
+                                "画像やPDF内で会話の理解に重要な文字情報があれば重要テキストに抜粋し、"
+                                "なければ空文字にしてください。"
+                            ),
+                        },
+                        {"type": content_type, content_key: url},
+                    ],
+                }
+            ],
+        )
+        try:
+            response = await AsyncOpenAI().responses.parse(
+                model="gpt-5.4-mini",
+                input=analysis_input,
+                text_format=AttachmentAnalysis,
+            )
+        except Exception:
+            logger.exception("Failed to analyze chatbot attachment (attachment_id=%s)", attachment_id)
+            await self.short_term_message_store.save_attachment_analysis(
+                attachment_id,
+                summary=None,
+                important_text=None,
+                status="failed",
+            )
+            return
+        if response.output_parsed is None:
+            logger.warning("Failed to parse chatbot attachment analysis (attachment_id=%s)", attachment_id)
+            await self.short_term_message_store.save_attachment_analysis(
+                attachment_id,
+                summary=None,
+                important_text=None,
+                status="failed",
+            )
+            return
+        await self.short_term_message_store.save_attachment_analysis(
+            attachment_id,
+            summary=response.output_parsed.summary,
+            important_text=response.output_parsed.important_text,
+            status="completed",
+        )
 
     async def _generate_and_send_response(
         self,

@@ -44,6 +44,23 @@ class ChatbotStoredMessage(Base):
     is_bot = mapped_column(Boolean, nullable=False)
 
 
+class ChatbotStoredAttachment(Base):
+    """短期文脈メッセージに付随する添付と解析結果。"""
+
+    __tablename__ = "chatbot_stored_attachments"
+
+    id = mapped_column(BigInteger, primary_key=True)
+    message_id = mapped_column(BigInteger, ForeignKey("chatbot_stored_messages.message_id"), nullable=False, index=True)
+    url = mapped_column(Text, nullable=False)
+    filename = mapped_column(Text, nullable=False)
+    content_type = mapped_column(Text, nullable=True)
+    kind = mapped_column(Text, nullable=False)
+    summary = mapped_column(Text, nullable=True)
+    important_text = mapped_column(Text, nullable=True)
+    analysis_status = mapped_column(Text, nullable=False)
+    analyzed_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
 class ChatbotShadowEvaluation(Base):
     """管理者がCSVから取り込んだシャドー候補の評価。"""
 
@@ -90,6 +107,18 @@ class StoredMessageInput:
     mentioned_user_ids: list[int]
     created_at: datetime.datetime
     is_bot: bool
+
+
+@dataclass
+class StoredAttachmentInput:
+    """短期文脈として保存する添付ファイル。"""
+
+    id: int
+    message_id: int
+    url: str
+    filename: str
+    content_type: str | None
+    kind: str
 
 
 @dataclass
@@ -220,7 +249,40 @@ class ChatbotShortTermMessageStore:
     async def delete(self, message_id: int) -> None:
         """削除されたDiscordメッセージを短期保存から除去します。"""
         async with self._session_factory.begin() as session:
+            # 添付の外部キーにDB側のCASCADE指定はしていないため、投稿削除時に明示的に消す。
+            await session.execute(delete(ChatbotStoredAttachment).where(ChatbotStoredAttachment.message_id == message_id))
             await session.execute(delete(ChatbotStoredMessage).where(ChatbotStoredMessage.message_id == message_id))
+
+    async def delete_attachments(self, message_id: int) -> None:
+        """編集前の添付解析結果を除去します。"""
+        async with self._session_factory.begin() as session:
+            await session.execute(delete(ChatbotStoredAttachment).where(ChatbotStoredAttachment.message_id == message_id))
+
+    async def save_attachment(self, attachment: StoredAttachmentInput) -> None:
+        """添付メタデータを保存し、未解析状態へ初期化します。"""
+        async with self._session_factory.begin() as session:
+            existing = await session.get(ChatbotStoredAttachment, attachment.id)
+            if existing is None:
+                session.add(
+                    ChatbotStoredAttachment(
+                        id=attachment.id,
+                        message_id=attachment.message_id,
+                        url=attachment.url,
+                        filename=attachment.filename,
+                        content_type=attachment.content_type,
+                        kind=attachment.kind,
+                        analysis_status="pending",
+                    )
+                )
+                return
+            existing.url = attachment.url
+            existing.filename = attachment.filename
+            existing.content_type = attachment.content_type
+            existing.kind = attachment.kind
+            existing.summary = None
+            existing.important_text = None
+            existing.analysis_status = "pending"
+            existing.analyzed_at = None
 
     async def get_for_channel(self, channel_id: int) -> list[ChatbotStoredMessage]:
         """指定チャンネルの保存済み短期文脈を時系列順で取得します。"""
@@ -232,3 +294,21 @@ class ChatbotShortTermMessageStore:
                 .order_by(ChatbotStoredMessage.created_at)
             )
             return list(result.scalars().all())
+
+    async def save_attachment_analysis(
+        self,
+        attachment_id: int,
+        *,
+        summary: str | None,
+        important_text: str | None,
+        status: str,
+    ) -> None:
+        """添付解析の結果または失敗状態を保存します。"""
+        async with self._session_factory.begin() as session:
+            attachment = await session.get(ChatbotStoredAttachment, attachment_id)
+            if attachment is None:
+                return
+            attachment.summary = summary
+            attachment.important_text = important_text
+            attachment.analysis_status = status
+            attachment.analyzed_at = datetime.datetime.now(datetime.UTC)
