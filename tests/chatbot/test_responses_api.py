@@ -3,12 +3,16 @@ import json
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import discord
 from discord import Message
 
-from cogs.chatbot.responses_api import AttachmentInMemory, LLMMessage, ResponseAction, ShortTermMemory
+from cogs.chatbot.channel_roles import ChannelRole
+from cogs.chatbot.responses_api import AttachmentInMemory, LLMMessage, ResponseAction, ResponsePipeline, ShortTermMemory
+
+if TYPE_CHECKING:
+    from openai import AsyncOpenAI
 
 
 @dataclass
@@ -190,3 +194,34 @@ class LLMMessageTest(unittest.TestCase):
 
         if response.reaction_emoji != "👍":
             self.fail("リアクション絵文字を保持できません")
+
+
+class FakeResponses:
+    """一段階生成のAPI呼び出し回数を記録します。"""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def parse(self, **kwargs: object) -> SimpleNamespace:
+        """最終回答を返し、呼び出し引数を保存します。"""
+        self.calls.append(kwargs)
+        return SimpleNamespace(output_parsed=LLMMessage(action=ResponseAction.MESSAGE, content="短い返答"))
+
+
+class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_generates_final_response_with_one_model_call(self) -> None:
+        responses = FakeResponses()
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        pipeline = ResponsePipeline(client, "Bot")
+        await pipeline.add_message_to_memory(
+            make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="起きた"))
+        )
+
+        generated = await pipeline.generate_response(ChannelRole.CHAT, is_unanswered_question=False)
+
+        if generated.content != "短い返答":
+            self.fail("一段階で生成した回答が最終結果になっていません")
+        if len(responses.calls) != 1:
+            self.fail("最終回答の生成でモデルが複数回呼び出されています")
+        if responses.calls[0]["model"] != "gpt-5.6-sol":
+            self.fail("最終回答がSolで生成されていません")

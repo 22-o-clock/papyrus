@@ -15,12 +15,11 @@ from pydantic import BaseModel, Field, model_validator
 
 from .channel_roles import ChannelRole
 from .observability import log_chatbot_api_call
-from .prompt import draft_generator_prompt, memory_extraction_prompt, memory_reconciliation_prompt, response_styler_prompt
+from .prompt import draft_generator_prompt, memory_extraction_prompt, memory_reconciliation_prompt
 
 logger = getLogger(__name__)
 
 DRAFT_GENERATOR_MODEL = "gpt-5.6-sol"
-STYLER_MODEL = "gpt-5.6-terra"
 MEMORY_EXTRACTION_MODEL = "gpt-5.4"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 
@@ -564,67 +563,8 @@ class DraftGenerator:
         return api_response.output_parsed
 
 
-class ResponseStyler:
-    """回答の形式面を調整するクラス。ドラフトを整形して最終回答を生成します。"""
-
-    def __init__(self, client: AsyncOpenAI, bot_name: str) -> None:
-        """クラスを初期化します。
-
-        Args:
-            client: OpenAIの非同期クライアント
-            bot_name: botの名前
-
-        """
-        self.client = client
-        self.bot_name = bot_name
-
-    async def style(
-        self,
-        short_term_memory: ShortTermMemory,
-        original_draft: LLMMessage,
-        channel_role: ChannelRole,
-    ) -> LLMMessage:
-        """ドラフトをスタイリングして最終回答を生成します。
-
-        Args:
-            short_term_memory: メッセージ履歴
-            original_draft: DraftGeneratorが生成した原案
-            channel_role: 対象チャンネルでのChatbotの役割
-
-        Returns:
-            スタイリングされた回答を含むLLMMessageオブジェクト
-
-        """
-        log_chatbot_api_call("response_styling", STYLER_MODEL)
-        api_response = await self.client.responses.parse(
-            instructions=response_styler_prompt.STYLE_INSTRUCTIONS.format(
-                bot_name=self.bot_name,
-                channel_role=channel_role.value,
-            ),
-            input=response_styler_prompt.STYLE_INPUT.format(
-                short_term_memory=short_term_memory.to_json(),
-                draft=original_draft.to_json(bot_name=self.bot_name),
-            ),
-            model=STYLER_MODEL,
-            reasoning={"effort": "low"},
-            text_format=LLMMessage,
-        )
-
-        if api_response.output_parsed is None:
-            logger.warning("Failed to parse LLM response into LLMMessage")
-            return original_draft
-
-        return LLMMessage(
-            action=original_draft.action,
-            content=api_response.output_parsed.content,
-            reply_to_message_id=original_draft.reply_to_message_id,
-            reaction_emoji=original_draft.reaction_emoji,
-            shadow_reason=original_draft.shadow_reason,
-        )
-
-
 class ResponsePipeline:
-    """ドラフト生成とスタイリングを一連の流れで実行するクラス。"""
+    """短期記憶から一段階で最終回答を生成するクラス。"""
 
     def __init__(self, client: AsyncOpenAI, bot_name: str) -> None:
         """クラスを初期化します。
@@ -635,7 +575,6 @@ class ResponsePipeline:
 
         """
         self.draft_generator = DraftGenerator(client, bot_name)
-        self.response_styler = ResponseStyler(client, bot_name)
         self.short_term_memory = ShortTermMemory()
         self.bot_name = bot_name
 
@@ -664,15 +603,12 @@ class ResponsePipeline:
             long_term_memory_context: 検索済みの長期記憶コンテキスト
 
         Returns:
-            スタイリングされた最終回答を含むLLMMessageオブジェクト
+            最終回答を含むLLMMessageオブジェクト
 
         """
-        draft = await self.draft_generator.draft(
+        return await self.draft_generator.draft(
             self.short_term_memory,
             channel_role,
             is_unanswered_question=is_unanswered_question,
             long_term_memory_context=long_term_memory_context,
         )
-        if draft.action in (ResponseAction.SILENCE, ResponseAction.REACTION):
-            return draft
-        return await self.response_styler.style(self.short_term_memory, draft, channel_role)
