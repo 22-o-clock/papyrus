@@ -3,22 +3,23 @@ import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from logging import getLogger
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import dateutil
 import discord
 import tiktoken
 from discord import Message
 from openai import AsyncOpenAI
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from .channel_roles import ChannelRole
-from .prompt import draft_generator_prompt, response_styler_prompt
+from .prompt import draft_generator_prompt, memory_extraction_prompt, response_styler_prompt
 
 logger = getLogger(__name__)
 
 DRAFT_GENERATOR_MODEL = "gpt-5.2"
 STYLER_MODEL = "gpt-5.4-mini"
+MEMORY_EXTRACTION_MODEL = "gpt-5.4"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 
 
@@ -361,6 +362,61 @@ class LLMMessage(BaseModel):
         )
 
 
+class LongTermMemoryCandidate(BaseModel):
+    """会話から抽出した根拠付き長期記憶候補。"""
+
+    target_user_id: int | None
+    external_entity_name: str | None = None
+    target_resolution: Literal["member", "external", "unresolved"]
+    kind: Literal["profile", "ongoing", "temporary", "shared"]
+    content: str
+    evidence_message_ids: list[int]
+    source_type: Literal["self_statement", "third_party", "inference"]
+    is_sensitive: bool
+
+
+class MemberAliasCandidate(BaseModel):
+    """明示的な根拠から抽出したサーバーメンバーの別名候補。"""
+
+    alias: str
+    target_user_id: int
+    evidence_message_ids: list[int]
+
+
+class LongTermMemoryExtraction(BaseModel):
+    """一括抽出した長期記憶候補の集合。"""
+
+    candidates: list[LongTermMemoryCandidate]
+    aliases: list[MemberAliasCandidate] = Field(default_factory=list)
+
+
+class LongTermMemoryExtractor:
+    """複数のDiscord投稿から長期記憶候補を抽出します。"""
+
+    def __init__(self, client: AsyncOpenAI) -> None:
+        self.client = client
+
+    async def extract(
+        self,
+        messages: list[MessageInMemory],
+        member_references: list[dict[str, object]],
+    ) -> LongTermMemoryExtraction:
+        """投稿一覧から、根拠付きの長期記憶候補を返します。"""
+        api_response = await self.client.responses.parse(
+            model=MEMORY_EXTRACTION_MODEL,
+            instructions=memory_extraction_prompt.MEMORY_EXTRACTION_INSTRUCTIONS,
+            input=json.dumps(
+                {"messages": [message.to_dict() for message in messages], "members": member_references},
+                ensure_ascii=False,
+            ),
+            text_format=LongTermMemoryExtraction,
+        )
+        if api_response.output_parsed is None:
+            logger.warning("Failed to parse long-term memory extraction response")
+            return LongTermMemoryExtraction(candidates=[])
+        return api_response.output_parsed
+
+
 class DraftGenerator:
     """回答のドラフト生成を担当するクラス。OpenAI APIを使用して回答のドラフトを生成します。"""
 
@@ -381,6 +437,7 @@ class DraftGenerator:
         channel_role: ChannelRole,
         *,
         is_unanswered_question: bool,
+        long_term_memory_context: str = "",
     ) -> LLMMessage:
         """メッセージのドラフト回答を生成します。
 
@@ -388,6 +445,7 @@ class DraftGenerator:
             short_term_memory: メッセージ履歴
             channel_role: 対象チャンネルでのChatbotの役割
             is_unanswered_question: 人間からの回答を待った宛先のない質問への回答か
+            long_term_memory_context: 検索済みの長期記憶コンテキスト
 
         Returns:
             生成されたドラフト回答を含むLLMMessageオブジェクト
@@ -401,7 +459,10 @@ class DraftGenerator:
                 "content": [
                     {
                         "type": "input_text",
-                        "text": short_term_memory.to_json(),
+                        "text": (
+                            short_term_memory.to_json()
+                            + (f"\n\n長期記憶:\n{long_term_memory_context}" if long_term_memory_context else "")
+                        ),
                     }
                 ],
             }
@@ -537,12 +598,14 @@ class ResponsePipeline:
         channel_role: ChannelRole,
         *,
         is_unanswered_question: bool,
+        long_term_memory_context: str = "",
     ) -> LLMMessage:
         """短期記憶から最終回答を生成します。
 
         Args:
             channel_role: 対象チャンネルでのChatbotの役割
             is_unanswered_question: 人間からの回答を待った宛先のない質問への回答か
+            long_term_memory_context: 検索済みの長期記憶コンテキスト
 
         Returns:
             スタイリングされた最終回答を含むLLMMessageオブジェクト
@@ -552,6 +615,7 @@ class ResponsePipeline:
             self.short_term_memory,
             channel_role,
             is_unanswered_question=is_unanswered_question,
+            long_term_memory_context=long_term_memory_context,
         )
         if draft.action in (ResponseAction.SILENCE, ResponseAction.REACTION):
             return draft

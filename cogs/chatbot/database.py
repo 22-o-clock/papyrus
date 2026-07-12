@@ -3,8 +3,8 @@ import uuid
 from dataclasses import dataclass
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import BigInteger, Boolean, ForeignKey, MetaData, Text, delete, select
-from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
+from sqlalchemy import BigInteger, Boolean, ForeignKey, MetaData, Text, UniqueConstraint, delete, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID, insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, mapped_column
 from sqlalchemy.sql import text
@@ -84,6 +84,8 @@ class ChatbotLongTermMemory(ChatbotBase):
 
     id = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     target_user_id = mapped_column(BigInteger, nullable=True, index=True)
+    external_entity_name = mapped_column(Text, nullable=True, index=True)
+    target_resolution = mapped_column(Text, nullable=False, default="unresolved")
     kind = mapped_column(Text, nullable=False)
     content = mapped_column(Text, nullable=False)
     source_type = mapped_column(Text, nullable=False)
@@ -106,6 +108,41 @@ class ChatbotLongTermMemoryEvidence(ChatbotBase):
     memory_id = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("chatbot.chatbot_long_term_memories.id"),
+        nullable=False,
+        index=True,
+    )
+    message_id = mapped_column(BigInteger, nullable=False, index=True)
+    author_id = mapped_column(BigInteger, nullable=False)
+    excerpt = mapped_column(Text, nullable=False)
+    created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class ChatbotMemberAlias(ChatbotBase):
+    """サーバーメンバーを会話中の呼称へ結び付けます。"""
+
+    __tablename__ = "chatbot_member_aliases"
+    __table_args__ = (UniqueConstraint("normalized_alias", "target_user_id"),)
+
+    id = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    alias = mapped_column(Text, nullable=False)
+    normalized_alias = mapped_column(Text, nullable=False, index=True)
+    target_user_id = mapped_column(BigInteger, nullable=False, index=True)
+    status = mapped_column(Text, nullable=False, index=True)
+    created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    updated_at = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    invalidated_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class ChatbotMemberAliasEvidence(ChatbotBase):
+    """メンバー別名の判断根拠となったDiscord投稿。"""
+
+    __tablename__ = "chatbot_member_alias_evidences"
+    __table_args__ = (UniqueConstraint("alias_id", "message_id"),)
+
+    id = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    alias_id = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chatbot.chatbot_member_aliases.id"),
         nullable=False,
         index=True,
     )
@@ -189,6 +226,34 @@ class StoredAttachmentInput:
     filename: str
     content_type: str | None
     kind: str
+
+
+@dataclass
+class LongTermMemoryInput:
+    """保存する根拠付き長期記憶。"""
+
+    target_user_id: int | None
+    external_entity_name: str | None
+    target_resolution: str
+    kind: str
+    content: str
+    source_type: str
+    is_sensitive: bool
+    evidence_message_ids: list[int]
+    evidence_author_ids: list[int]
+    evidence_excerpts: list[str]
+    embedding: list[float]
+
+
+@dataclass
+class MemberAliasInput:
+    """保存するメンバー別名と根拠投稿。"""
+
+    alias: str
+    target_user_id: int
+    evidence_message_ids: list[int]
+    evidence_author_ids: list[int]
+    evidence_excerpts: list[str]
 
 
 @dataclass
@@ -298,27 +363,24 @@ class ChatbotShortTermMessageStore:
                 delete(ChatbotStoredAttachment).where(ChatbotStoredAttachment.message_id.in_(expired_message_ids))
             )
             await session.execute(delete(ChatbotStoredMessage).where(ChatbotStoredMessage.created_at < expiration))
-            existing = await session.get(ChatbotStoredMessage, message.message_id)
-            if existing is None:
-                session.add(
-                    ChatbotStoredMessage(
-                        message_id=message.message_id,
-                        channel_id=message.channel_id,
-                        author_id=message.author_id,
-                        author_name=message.author_name,
-                        content=message.content,
-                        reply_to_message_id=message.reply_to_message_id,
-                        mentioned_user_ids=message.mentioned_user_ids,
-                        created_at=message.created_at,
-                        is_bot=message.is_bot,
-                    )
+            values = {
+                "message_id": message.message_id,
+                "channel_id": message.channel_id,
+                "author_id": message.author_id,
+                "author_name": message.author_name,
+                "content": message.content,
+                "reply_to_message_id": message.reply_to_message_id,
+                "mentioned_user_ids": message.mentioned_user_ids,
+                "created_at": message.created_at,
+                "is_bot": message.is_bot,
+            }
+            statement = insert(ChatbotStoredMessage).values(**values)
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[ChatbotStoredMessage.message_id],
+                    set_={key: value for key, value in values.items() if key not in {"message_id", "created_at"}},
                 )
-                return
-            existing.author_name = message.author_name
-            existing.content = message.content
-            existing.reply_to_message_id = message.reply_to_message_id
-            existing.mentioned_user_ids = message.mentioned_user_ids
-            existing.is_bot = message.is_bot
+            )
 
     async def delete(self, message_id: int) -> None:
         """削除されたDiscordメッセージを短期保存から除去します。"""
@@ -369,6 +431,18 @@ class ChatbotShortTermMessageStore:
             )
             return list(result.scalars().all())
 
+    async def get_by_ids(self, message_ids: list[int]) -> list[ChatbotStoredMessage]:
+        """指定IDの短期保存メッセージを時系列順に取得します。"""
+        if not message_ids:
+            return []
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ChatbotStoredMessage)
+                .where(ChatbotStoredMessage.message_id.in_(message_ids))
+                .order_by(ChatbotStoredMessage.created_at)
+            )
+            return list(result.scalars().all())
+
     async def get_attachments(self, message_ids: list[int]) -> list[ChatbotStoredAttachment]:
         """指定メッセージに紐づく保存済み添付を取得します。"""
         if not message_ids:
@@ -410,22 +484,15 @@ class ChatbotMemoryExtractionQueueStore:
         """人間投稿を未処理キューへ追加し、編集後の投稿は再処理対象へ戻します。"""
         now = datetime.datetime.now(datetime.UTC)
         async with self._session_factory.begin() as session:
-            queue_item = await session.get(ChatbotMemoryExtractionQueue, message_id)
-            if queue_item is None:
-                session.add(
-                    ChatbotMemoryExtractionQueue(
-                        message_id=message_id,
-                        channel_id=channel_id,
-                        queued_at=now,
-                        status="pending",
-                        attempt_count=0,
-                    )
+            statement = insert(ChatbotMemoryExtractionQueue).values(
+                message_id=message_id, channel_id=channel_id, queued_at=now, status="pending", attempt_count=0
+            )
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[ChatbotMemoryExtractionQueue.message_id],
+                    set_={"channel_id": channel_id, "queued_at": now, "status": "pending", "attempt_count": 0},
                 )
-                return
-            queue_item.channel_id = channel_id
-            queue_item.queued_at = now
-            queue_item.status = "pending"
-            queue_item.attempt_count = 0
+            )
 
     async def delete(self, message_id: int) -> None:
         """削除された投稿を抽出待ちキューから取り除きます。"""
@@ -433,6 +500,255 @@ class ChatbotMemoryExtractionQueueStore:
             await session.execute(
                 delete(ChatbotMemoryExtractionQueue).where(ChatbotMemoryExtractionQueue.message_id == message_id)
             )
+
+    async def count_pending(self) -> int:
+        """抽出待ち投稿の件数を返します。"""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ChatbotMemoryExtractionQueue.message_id).where(ChatbotMemoryExtractionQueue.status == "pending")
+            )
+            return len(result.scalars().all())
+
+    async def claim_pending(self, limit: int) -> list[ChatbotMemoryExtractionQueue]:
+        """未処理キューを古い順に取得し、処理中へ遷移させます。"""
+        async with self._session_factory.begin() as session:
+            result = await session.execute(
+                select(ChatbotMemoryExtractionQueue)
+                .where(ChatbotMemoryExtractionQueue.status == "pending")
+                .order_by(ChatbotMemoryExtractionQueue.queued_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            items = list(result.scalars().all())
+            for item in items:
+                item.status = "processing"
+                item.attempt_count += 1
+            return items
+
+    async def complete(self, message_ids: list[int]) -> None:
+        """抽出済み投稿をキューから除去します。"""
+        if not message_ids:
+            return
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                delete(ChatbotMemoryExtractionQueue).where(ChatbotMemoryExtractionQueue.message_id.in_(message_ids))
+            )
+
+    async def restore_pending(self, message_ids: list[int]) -> None:
+        """失敗した抽出対象を次回の再試行へ戻します。"""
+        if not message_ids:
+            return
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                update(ChatbotMemoryExtractionQueue)
+                .where(ChatbotMemoryExtractionQueue.message_id.in_(message_ids))
+                .values(status="pending")
+            )
+
+    async def recover_interrupted(self) -> None:
+        """前回終了時に処理中だった投稿を再試行対象へ戻します。"""
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                update(ChatbotMemoryExtractionQueue)
+                .where(ChatbotMemoryExtractionQueue.status == "processing")
+                .values(status="pending")
+            )
+
+
+class ChatbotLongTermMemoryStore:
+    """長期記憶と根拠投稿を保存します。"""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def save(self, memory: LongTermMemoryInput) -> None:
+        """長期記憶とその根拠投稿をまとめて保存します。"""
+        now = datetime.datetime.now(datetime.UTC)
+        expiration_days = {"ongoing": 90, "temporary": 7, "shared": 180}
+        expires_at = now + datetime.timedelta(days=expiration_days[memory.kind]) if memory.kind in expiration_days else None
+        async with self._session_factory.begin() as session:
+            stored_memory = ChatbotLongTermMemory(
+                target_user_id=memory.target_user_id,
+                external_entity_name=memory.external_entity_name,
+                target_resolution=memory.target_resolution,
+                kind=memory.kind,
+                content=memory.content,
+                source_type=memory.source_type,
+                status="active",
+                is_sensitive=memory.is_sensitive,
+                is_pinned=False,
+                created_at=now,
+                expires_at=expires_at,
+                embedding=memory.embedding,
+            )
+            session.add(stored_memory)
+            await session.flush()
+            for message_id, author_id, excerpt in zip(
+                memory.evidence_message_ids,
+                memory.evidence_author_ids,
+                memory.evidence_excerpts,
+                strict=True,
+            ):
+                session.add(
+                    ChatbotLongTermMemoryEvidence(
+                        memory_id=stored_memory.id,
+                        message_id=message_id,
+                        author_id=author_id,
+                        excerpt=excerpt,
+                        created_at=now,
+                    )
+                )
+
+    async def search(
+        self,
+        embedding: list[float],
+        target_user_ids: set[int],
+        maximum_cosine_distance: float,
+        limit: int,
+    ) -> list[ChatbotLongTermMemory]:
+        """有効期限内の記憶を意味的な近さ順で取得します。"""
+        now = datetime.datetime.now(datetime.UTC)
+        cosine_distance = ChatbotLongTermMemory.embedding.cosine_distance(embedding)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ChatbotLongTermMemory)
+                .where(
+                    ChatbotLongTermMemory.status == "active",
+                    ChatbotLongTermMemory.embedding.is_not(None),
+                    ChatbotLongTermMemory.is_sensitive.is_(False),
+                    (ChatbotLongTermMemory.expires_at.is_(None)) | (ChatbotLongTermMemory.expires_at > now),
+                    or_(
+                        ChatbotLongTermMemory.target_user_id.is_(None),
+                        ChatbotLongTermMemory.target_user_id.in_(target_user_ids),
+                    ),
+                    cosine_distance <= maximum_cosine_distance,
+                )
+                .order_by(cosine_distance)
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+
+def normalize_member_alias(alias: str) -> str:
+    """別名を比較・重複判定に使う表記へ揃えます。"""
+    normalized_alias = " ".join(alias.casefold().split())
+    for honorific in ("さん", "くん", "君", "ちゃん", "氏"):
+        if normalized_alias.endswith(honorific) and len(normalized_alias) > len(honorific):
+            return normalized_alias[: -len(honorific)].rstrip()
+    return normalized_alias
+
+
+def determine_member_alias_status(target_user_ids: set[int]) -> str:
+    """同じ別名が一人だけを指す場合に限り名前解決を許可します。"""
+    return "active" if len(target_user_ids) == 1 else "ambiguous"
+
+
+def find_user_ids_by_member_alias(text_value: str, active_aliases: dict[str, int]) -> set[int]:
+    """会話に含まれる有効な別名から対象メンバーIDを抽出します。"""
+    normalized_text = normalize_member_alias(text_value)
+    return {target_user_id for alias, target_user_id in active_aliases.items() if alias in normalized_text}
+
+
+class ChatbotMemberAliasStore:
+    """メンバー別名の確定状態と根拠を管理します。"""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def save(self, alias_input: MemberAliasInput) -> None:
+        """別名候補を保存し、衝突状態と既存の未解決記憶を更新します。"""
+        normalized_alias = normalize_member_alias(alias_input.alias)
+        if not normalized_alias:
+            return
+        now = datetime.datetime.now(datetime.UTC)
+        async with self._session_factory.begin() as session:
+            statement = (
+                insert(ChatbotMemberAlias)
+                .values(
+                    alias=alias_input.alias.strip(),
+                    normalized_alias=normalized_alias,
+                    target_user_id=alias_input.target_user_id,
+                    status="active",
+                    created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_update(
+                    index_elements=[
+                        ChatbotMemberAlias.normalized_alias,
+                        ChatbotMemberAlias.target_user_id,
+                    ],
+                    set_={"alias": alias_input.alias.strip(), "updated_at": now},
+                )
+                .returning(ChatbotMemberAlias.id)
+            )
+            alias_id = (await session.execute(statement)).scalar_one()
+            for message_id, author_id, excerpt in zip(
+                alias_input.evidence_message_ids,
+                alias_input.evidence_author_ids,
+                alias_input.evidence_excerpts,
+                strict=True,
+            ):
+                await session.execute(
+                    insert(ChatbotMemberAliasEvidence)
+                    .values(
+                        alias_id=alias_id,
+                        message_id=message_id,
+                        author_id=author_id,
+                        excerpt=excerpt,
+                        created_at=now,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            ChatbotMemberAliasEvidence.alias_id,
+                            ChatbotMemberAliasEvidence.message_id,
+                        ]
+                    )
+                )
+            await self._refresh_resolution(session, normalized_alias, now)
+
+    async def get_active_aliases(self) -> dict[str, int]:
+        """名前解決に利用できる一意な別名を返します。"""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ChatbotMemberAlias.normalized_alias, ChatbotMemberAlias.target_user_id).where(
+                    ChatbotMemberAlias.status == "active"
+                )
+            )
+            return dict(result.tuples().all())
+
+    async def _refresh_resolution(
+        self,
+        session: AsyncSession,
+        normalized_alias: str,
+        now: datetime.datetime,
+    ) -> None:
+        """同じ別名の衝突状態を揃え、一意なら未解決記憶も結び直します。"""
+        result = await session.execute(
+            select(ChatbotMemberAlias).where(
+                ChatbotMemberAlias.normalized_alias == normalized_alias,
+                ChatbotMemberAlias.status != "invalidated",
+            )
+        )
+        aliases = list(result.scalars().all())
+        target_user_ids = {alias.target_user_id for alias in aliases}
+        status = determine_member_alias_status(target_user_ids)
+        for alias in aliases:
+            alias.status = status
+            alias.updated_at = now
+        if status != "active":
+            return
+        target_user_id = next(iter(target_user_ids))
+        unresolved_result = await session.execute(
+            select(ChatbotLongTermMemory).where(
+                ChatbotLongTermMemory.target_resolution == "unresolved",
+                ChatbotLongTermMemory.external_entity_name.is_not(None),
+            )
+        )
+        for memory in unresolved_result.scalars():
+            if memory.external_entity_name and normalize_member_alias(memory.external_entity_name) == normalized_alias:
+                memory.target_user_id = target_user_id
+                memory.external_entity_name = None
+                memory.target_resolution = "member"
 
 
 async def create_chatbot_tables(engine: AsyncEngine) -> None:

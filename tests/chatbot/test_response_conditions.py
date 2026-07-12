@@ -19,6 +19,7 @@ from cogs.chatbot.chatbot_cog import (
     can_start_spontaneous_generation,
     claim_response_slot,
     get_available_referenced_author_id,
+    get_latest_memory_search_query,
     get_response_debounce_seconds,
     get_unanswered_question_wait_minutes,
     is_generation_current,
@@ -26,7 +27,7 @@ from cogs.chatbot.chatbot_cog import (
     should_reset_conversation,
     should_respond,
 )
-from cogs.chatbot.responses_api import ResponseAction
+from cogs.chatbot.responses_api import MessageInMemory, ResponseAction
 
 
 def make_discord_message(author_id: int) -> Message:
@@ -34,6 +35,24 @@ def make_discord_message(author_id: int) -> Message:
     message = Mock(spec=Message)
     message.author = SimpleNamespace(id=author_id)
     return cast("Message", message)
+
+
+class MemorySearchQueryTest(unittest.TestCase):
+    def test_uses_only_latest_message_content_when_available(self) -> None:
+        message = MessageInMemory(
+            message_id=123,
+            author_id=456,
+            author_name="test-user",
+            content="テストユーザーさんが得意なことは何でしょうか?",
+            reply_to_message_id=None,
+            mentioned_user_ids=[],
+            timestamp=datetime.now(UTC),
+        )
+
+        result = get_latest_memory_search_query(message)
+
+        if result != message.content:
+            self.fail("最新投稿の検索クエリにメッセージIDなどのメタデータが混入しています")
 
 
 class ShouldRespondTest(unittest.TestCase):
