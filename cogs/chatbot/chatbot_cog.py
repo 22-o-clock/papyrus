@@ -1,7 +1,9 @@
 import asyncio
 import datetime
+import io
 import random
 import re
+import uuid
 from dataclasses import dataclass, field
 from logging import getLogger
 
@@ -9,10 +11,16 @@ import discord
 from discord import Message, MessageReference, app_commands
 from discord.ext import commands
 from openai import AsyncOpenAI
+from openpyxl import Workbook, load_workbook
+from openpyxl.cell.rich_text import CellRichText, TextBlock
+from openpyxl.cell.text import InlineFont
+from openpyxl.formatting.rule import FormulaRule
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .channel_roles import ChannelRole, ChannelRoleManager
-from .database import ChatbotShadowCandidateStore, ShadowCandidateInput
+from .database import ChatbotShadowCandidateStore, ShadowCandidateInput, ShadowEvaluationInput
 from .database_envs import DatabaseEnvManager
 from .responses_api import LLMMessage, ResponseAction, ResponsePipeline, ShadowReason
 from .shadow_mode import ShadowModeManager
@@ -33,6 +41,51 @@ UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY = "CHATBOT_UNANSWERED_QUESTION_MINI
 UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY = "CHATBOT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES"
 
 QUESTION_ENDING_PATTERN = re.compile(r"(?:\?|ですか|ますか|でしょうか|かな|の\?|何\?|どう\?|誰\?|どこ\?|いつ\?)$")
+SHADOW_EVALUATION_FIELDS = (
+    "action_appropriate",
+    "context_understood",
+    "identity_correct",
+    "length_natural",
+    "non_intrusive",
+    "worth_posting",
+)
+SHADOW_EVALUATION_VALUES = {"◯", "\u00d7", "△"}
+SHADOW_REVIEW_HEADERS = {
+    "trigger_message": "反応元メッセージ",
+    "target_message": "反応対象メッセージ",
+    "conversation_context": "会話抜粋",
+    "action": "選択した行動",
+    "content": "生成文",
+    "reaction_emoji": "リアクション",
+    "reason": "判断理由",
+    "action_appropriate": "行動選択の適切さ",
+    "context_understood": "文脈の理解",
+    "identity_correct": "人物の区別",
+    "length_natural": "長さの自然さ",
+    "non_intrusive": "邪魔でない",
+    "worth_posting": "総合評価",
+    "comment": "コメント",
+    "created_at": "作成日時",
+    "candidate_id": "候補ID",
+    "channel_id": "チャンネルID",
+    "trigger_message_id": "反応元メッセージID",
+    "reply_to_message_id": "反応対象メッセージID",
+    "context_message_ids": "文脈メッセージID一覧",
+}
+SHADOW_ACTION_LABELS = {
+    "silence": "沈黙",
+    "reaction": "リアクション",
+    "reply": "返信",
+    "message": "通常投稿",
+}
+SHADOW_REASON_LABELS = {
+    "natural_contribution": "自然な会話",
+    "helpful_unanswered_question": "未回答質問への回答",
+    "avoid_interrupting_humans": "人間の会話を優先",
+    "no_helpful_contribution": "有益な回答ができない",
+    "identity_uncertain": "発言者を区別できない",
+    "cooldown": "クールダウン中",
+}
 
 
 @dataclass
@@ -360,6 +413,194 @@ class ChatBot(commands.Cog):
         await self.shadow_mode_manager.set_enabled(channel_id, enabled=enabled)
         state_text = "有効" if enabled else "無効"
         await interaction.response.send_message(f"このチャンネルのChatbotシャドーモードを{state_text}にしました。")
+
+    @app_commands.command(name="export_chatbot_shadow_candidates", description="未評価のChatbotシャドー候補をExcelで出力します")
+    async def export_chatbot_shadow_candidates(self, interaction: discord.Interaction) -> None:
+        """実行した管理者が未評価の候補を最大100件、評価用Excel添付で返します。"""
+        if not interaction.permissions.manage_guild:
+            await interaction.response.send_message("候補の出力には「サーバー管理」権限が必要です。", ephemeral=True)
+            return
+        candidates = await self.shadow_candidate_store.get_unreviewed_candidates(interaction.user.id, limit=100)
+        if not candidates:
+            await interaction.response.send_message("未評価のシャドー候補はありません。", ephemeral=True)
+            return
+        fieldnames = [
+            "trigger_message",
+            "target_message",
+            "conversation_context",
+            "action",
+            "content",
+            "reaction_emoji",
+            "reason",
+            *SHADOW_EVALUATION_FIELDS,
+            "comment",
+            "created_at",
+            "candidate_id",
+            "channel_id",
+            "trigger_message_id",
+            "reply_to_message_id",
+            "context_message_ids",
+        ]
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "候補評価"
+        worksheet.append([SHADOW_REVIEW_HEADERS[field_name] for field_name in fieldnames])
+        worksheet.freeze_panes = "A2"
+        header_fill = PatternFill("solid", fgColor="1F4E78")
+        for cell in worksheet[1]:
+            cell.font = Font(name="Meiryo UI", color="FFFFFF", bold=True)
+            cell.fill = header_fill
+            cell.alignment = Alignment(wrap_text=True, vertical="center")
+        for candidate in candidates:
+            row = {
+                "candidate_id": str(candidate.id),
+                "created_at": candidate.created_at.isoformat(),
+                "channel_id": candidate.channel_id,
+                "trigger_message_id": candidate.trigger_message_id,
+                "action": SHADOW_ACTION_LABELS.get(candidate.action, candidate.action),
+                "reply_to_message_id": candidate.reply_to_message_id or "",
+                "content": candidate.content,
+                "reaction_emoji": candidate.reaction_emoji or "",
+                "reason": SHADOW_REASON_LABELS.get(candidate.reason, candidate.reason),
+                "context_message_ids": ",".join(str(message_id) for message_id in candidate.context_message_ids),
+                "trigger_message": "",
+                "target_message": "",
+                "conversation_context": "",
+                **dict.fromkeys(SHADOW_EVALUATION_FIELDS, ""),
+                "comment": "",
+            }
+            worksheet.append([row[field] for field in fieldnames])
+            context_column = fieldnames.index("conversation_context") + 1
+            worksheet.cell(worksheet.max_row, context_column).value = self._format_shadow_conversation_context(
+                candidate.context_snapshot
+            )
+            trigger_column = fieldnames.index("trigger_message") + 1
+            worksheet.cell(worksheet.max_row, trigger_column).value = self._format_shadow_context_message_rich(
+                candidate.context_snapshot,
+                candidate.trigger_message_id,
+            )
+            target_column = fieldnames.index("target_message") + 1
+            worksheet.cell(worksheet.max_row, target_column).value = self._format_shadow_context_message_rich(
+                candidate.context_snapshot,
+                candidate.reply_to_message_id,
+            )
+        worksheet.auto_filter.ref = worksheet.dimensions
+        widths = {"A": 32, "B": 32, "C": 72, "D": 16, "E": 36, "F": 14, "G": 20, "N": 20, "O": 32}
+        for column, width in widths.items():
+            worksheet.column_dimensions[column].width = width
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.font = Font(name="Meiryo UI")
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+        evaluation_validation = DataValidation(type="list", formula1='"◯,\u00d7,△"', allow_blank=False)
+        worksheet.add_data_validation(evaluation_validation)
+        for index, field_name in enumerate(fieldnames, start=1):
+            if field_name in SHADOW_EVALUATION_FIELDS:
+                evaluation_validation.add(
+                    f"{worksheet.cell(1, index).column_letter}2:{worksheet.cell(1, index).column_letter}{len(candidates) + 1}"
+                )
+        worksheet.conditional_formatting.add(
+            f"H2:M{len(candidates) + 1}",
+            FormulaRule(formula=['H2="\u00d7"'], fill=PatternFill("solid", fgColor="F4CCCC")),
+        )
+        output = io.BytesIO()
+        workbook.save(output)
+        output.seek(0)
+        timestamp = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y%m%d_%H%M%S")
+        await interaction.response.send_message(
+            f"未評価のシャドー候補 {len(candidates)} 件を出力しました。",
+            ephemeral=True,
+            file=discord.File(output, filename=f"chatbot_shadow_candidates_{timestamp}.xlsx"),
+        )
+
+    @app_commands.command(
+        name="import_chatbot_shadow_reviews",
+        description="評価済みのChatbotシャドー候補Excelを取り込みます",
+    )
+    async def import_chatbot_shadow_evaluations(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment,
+    ) -> None:
+        """Excelの有効な評価行だけを保存し、同じ管理者の既存評価を上書きします。"""
+        if not interaction.permissions.manage_guild:
+            await interaction.response.send_message("評価の取込には「サーバー管理」権限が必要です。", ephemeral=True)
+            return
+        workbook = load_workbook(io.BytesIO(await attachment.read()), data_only=True)
+        worksheet = workbook["候補評価"]
+        headers = [cell.value for cell in worksheet[1]]
+        internal_headers = {display_name: field_name for field_name, display_name in SHADOW_REVIEW_HEADERS.items()}
+        imported_rows = 0
+        invalid_rows: list[int] = []
+        for row_number, values in enumerate(worksheet.iter_rows(min_row=2, values_only=True), start=2):
+            row = {
+                internal_headers.get(str(header), str(header)): "" if value is None else str(value)
+                for header, value in zip(headers, values, strict=True)
+            }
+            try:
+                evaluation = self._parse_shadow_evaluation_row(row)
+            except ValueError:
+                invalid_rows.append(row_number)
+                continue
+            await self.shadow_candidate_store.save_evaluation(interaction.user.id, evaluation)
+            imported_rows += 1
+        invalid_text = "" if not invalid_rows else f" 無効な行: {', '.join(map(str, invalid_rows))}。"
+        await interaction.response.send_message(f"評価を {imported_rows} 件取り込みました。{invalid_text}", ephemeral=True)
+
+    def _parse_shadow_evaluation_row(self, row: dict[str, str]) -> ShadowEvaluationInput:
+        """CSVの1行を検証し、保存用の評価データへ変換します。"""
+        if any(row.get(field) not in SHADOW_EVALUATION_VALUES for field in SHADOW_EVALUATION_FIELDS):
+            raise ValueError
+        try:
+            candidate_id = uuid.UUID(row["candidate_id"])
+        except (KeyError, ValueError) as error:
+            raise ValueError from error
+        return ShadowEvaluationInput(
+            candidate_id=candidate_id,
+            **{field: row[field] for field in SHADOW_EVALUATION_FIELDS},
+            issue_category="",
+            comment=row.get("comment", ""),
+        )
+
+    def _format_shadow_context_message(
+        self,
+        context_snapshot: list[dict[str, object]],
+        message_id: int | None,
+    ) -> str:
+        """保存済みの文脈から、CSV表示用の発言を整形します。"""
+        if message_id is None:
+            return ""
+        for message in context_snapshot:
+            if message["message_id"] == message_id:
+                return f"{message['author_name']}: {message['content']}"
+        return ""
+
+    def _format_shadow_context_message_rich(
+        self,
+        context_snapshot: list[dict[str, object]],
+        message_id: int | None,
+    ) -> CellRichText:
+        """反応元または反応対象を、発言者名を太字にしたExcel用リッチテキストへ変換します。"""
+        if message_id is None:
+            return CellRichText()
+        for message in context_snapshot:
+            if message["message_id"] == message_id:
+                return CellRichText(
+                    TextBlock(InlineFont(rFont="Meiryo UI", b=True), f"{message['author_name']}: "),
+                    TextBlock(InlineFont(rFont="Meiryo UI"), str(message["content"])),
+                )
+        return CellRichText()
+
+    def _format_shadow_conversation_context(self, context_snapshot: list[dict[str, object]]) -> CellRichText:
+        """会話抜粋を、発言者名を太字にしたExcel用リッチテキストへ変換します。"""
+        context = CellRichText()
+        for index, message in enumerate(context_snapshot):
+            author_font = InlineFont(rFont="Meiryo UI", b=True)
+            content_font = InlineFont(rFont="Meiryo UI")
+            context.append(TextBlock(author_font, f"{message['author_name']}: "))
+            suffix = "\n" if index < len(context_snapshot) - 1 else ""
+            context.append(TextBlock(content_font, f"{message['content']}{suffix}"))
+        return context
 
     @app_commands.command(name="reset_chatbot_role", description="このチャンネル固有のChatbot役割を解除します")
     async def reset_chatbot_role(self, interaction: discord.Interaction) -> None:
@@ -825,6 +1066,7 @@ class ChatBot(commands.Cog):
                 reaction_emoji=response.reaction_emoji,
                 reason=response.shadow_reason.value,
                 context_message_ids=[memory_message.message_id for memory_message in short_term_memory.memory],
+                context_snapshot=[memory_message.to_dict() for memory_message in short_term_memory.memory],
             )
         )
 

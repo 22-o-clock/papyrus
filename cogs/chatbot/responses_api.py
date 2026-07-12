@@ -229,11 +229,11 @@ class ResponseAction(StrEnum):
 class ShadowReason(StrEnum):
     """シャドー候補の行動判断を評価するための定型理由。"""
 
-    RELEVANT_CONTEXT = "relevant_context"
-    UNANSWERED_QUESTION = "unanswered_question"
-    HUMAN_CONVERSATION = "human_conversation"
-    NO_VALUE = "no_value"
-    UNCERTAIN_IDENTITY = "uncertain_identity"
+    NATURAL_CONTRIBUTION = "natural_contribution"
+    HELPFUL_UNANSWERED_QUESTION = "helpful_unanswered_question"
+    AVOID_INTERRUPTING_HUMANS = "avoid_interrupting_humans"
+    NO_HELPFUL_CONTRIBUTION = "no_helpful_contribution"
+    IDENTITY_UNCERTAIN = "identity_uncertain"
     COOLDOWN = "cooldown"
 
 
@@ -252,7 +252,7 @@ class LLMMessage(BaseModel):
     content: str = ""
     reply_to_message_id: int | None = None
     reaction_emoji: str | None = None
-    shadow_reason: ShadowReason = ShadowReason.NO_VALUE
+    shadow_reason: ShadowReason = ShadowReason.NATURAL_CONTRIBUTION
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> Self:
@@ -265,6 +265,18 @@ class LLMMessage(BaseModel):
             raise ValueError(msg)
         if self.action in (ResponseAction.REPLY, ResponseAction.MESSAGE) and not self.content.strip():
             msg = "text response action requires content"
+            raise ValueError(msg)
+        silence_reasons = {
+            ShadowReason.AVOID_INTERRUPTING_HUMANS,
+            ShadowReason.NO_HELPFUL_CONTRIBUTION,
+            ShadowReason.IDENTITY_UNCERTAIN,
+            ShadowReason.COOLDOWN,
+        }
+        if self.shadow_reason in silence_reasons and self.action is not ResponseAction.SILENCE:
+            msg = "the selected shadow_reason requires silence"
+            raise ValueError(msg)
+        if self.shadow_reason is ShadowReason.HELPFUL_UNANSWERED_QUESTION and self.action is ResponseAction.REACTION:
+            msg = "helpful_unanswered_question cannot use reaction"
             raise ValueError(msg)
         return self
 
@@ -374,7 +386,7 @@ class DraftGenerator:
 
         if api_response.output_parsed is None:
             logger.warning("Failed to parse LLM response into LLMMessage")
-            return LLMMessage(action=ResponseAction.SILENCE, shadow_reason=ShadowReason.NO_VALUE)
+            return LLMMessage(action=ResponseAction.SILENCE, shadow_reason=ShadowReason.NO_HELPFUL_CONTRIBUTION)
 
         return api_response.output_parsed
 
