@@ -31,7 +31,7 @@ from .database import (
     StoredMessageInput,
 )
 from .database_envs import DatabaseEnvManager
-from .responses_api import LLMMessage, MessageInMemory, ResponseAction, ResponsePipeline, ShadowReason
+from .responses_api import AttachmentInMemory, LLMMessage, MessageInMemory, ResponseAction, ResponsePipeline, ShadowReason
 from .shadow_mode import ShadowModeManager
 
 logger = getLogger(__name__)
@@ -48,6 +48,7 @@ DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES = 30
 DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES = 60
 UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY = "CHATBOT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES"
 UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY = "CHATBOT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES"
+ATTACHMENT_CONTEXT_MAX_CHARACTERS = 100
 
 QUESTION_ENDING_PATTERN = re.compile(r"(?:\?|ですか|ますか|でしょうか|かな|の\?|何\?|どう\?|誰\?|どこ\?|いつ\?)$")
 SHADOW_EVALUATION_FIELDS = (
@@ -263,6 +264,21 @@ class ChatBot(commands.Cog):
                 if channel_id not in self._channel_states:
                     await self.initialize_response_pipeline_for_channel(channel_id)
                     stored_messages = await self.short_term_message_store.get_for_channel(channel_id)
+                    stored_attachments = await self.short_term_message_store.get_attachments(
+                        [stored.message_id for stored in stored_messages]
+                    )
+                    attachments_by_message_id: dict[int, list[AttachmentInMemory]] = {}
+                    for attachment in stored_attachments:
+                        attachments_by_message_id.setdefault(attachment.message_id, []).append(
+                            AttachmentInMemory(
+                                attachment_id=attachment.id,
+                                filename=attachment.filename,
+                                kind=attachment.kind,
+                                analysis_status=attachment.analysis_status,
+                                summary=self._truncate_attachment_context(attachment.summary),
+                                important_text=self._truncate_attachment_context(attachment.important_text),
+                            )
+                        )
                     self.response_pipelines[channel_id].short_term_memory.restore(
                         [
                             MessageInMemory(
@@ -273,6 +289,7 @@ class ChatBot(commands.Cog):
                                 reply_to_message_id=stored.reply_to_message_id,
                                 mentioned_user_ids=stored.mentioned_user_ids,
                                 timestamp=stored.created_at,
+                                attachments=attachments_by_message_id.get(stored.message_id, []),
                             )
                             for stored in stored_messages
                         ]
@@ -904,22 +921,29 @@ class ChatBot(commands.Cog):
                     is_bot=after.author.bot,
                 )
             )
-            await self.short_term_message_store.delete_attachments(after.id)
-            for attachment in after.attachments:
-                attachment_kind = self._get_attachment_kind(attachment.content_type)
-                if attachment_kind is None:
-                    continue
-                await self.short_term_message_store.save_attachment(
-                    StoredAttachmentInput(
-                        id=attachment.id,
-                        message_id=after.id,
-                        url=attachment.url,
-                        filename=attachment.filename,
-                        content_type=attachment.content_type,
-                        kind=attachment_kind,
+            if not after.author.bot:
+                await self.short_term_message_store.delete_attachments(after.id)
+                for attachment in after.attachments:
+                    attachment_kind = self._get_attachment_kind(attachment.content_type)
+                    if attachment_kind is None:
+                        continue
+                    await self.short_term_message_store.save_attachment(
+                        StoredAttachmentInput(
+                            id=attachment.id,
+                            message_id=after.id,
+                            url=attachment.url,
+                            filename=attachment.filename,
+                            content_type=attachment.content_type,
+                            kind=attachment_kind,
+                        )
                     )
-                )
-                self._schedule_attachment_analysis(attachment.id, attachment.url, attachment_kind)
+                    self._schedule_attachment_analysis(
+                        after.id,
+                        attachment.id,
+                        attachment.filename,
+                        attachment.url,
+                        attachment_kind,
+                    )
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
         """受信したメッセージが、このボットの発言へのDiscord返信か判定します。
@@ -1051,21 +1075,28 @@ class ChatBot(commands.Cog):
                     is_bot=message.author.bot,
                 )
             )
-            for attachment in message.attachments:
-                attachment_kind = self._get_attachment_kind(attachment.content_type)
-                if attachment_kind is None:
-                    continue
-                await self.short_term_message_store.save_attachment(
-                    StoredAttachmentInput(
-                        id=attachment.id,
-                        message_id=message.id,
-                        url=attachment.url,
-                        filename=attachment.filename,
-                        content_type=attachment.content_type,
-                        kind=attachment_kind,
+            if not message.author.bot:
+                for attachment in message.attachments:
+                    attachment_kind = self._get_attachment_kind(attachment.content_type)
+                    if attachment_kind is None:
+                        continue
+                    await self.short_term_message_store.save_attachment(
+                        StoredAttachmentInput(
+                            id=attachment.id,
+                            message_id=message.id,
+                            url=attachment.url,
+                            filename=attachment.filename,
+                            content_type=attachment.content_type,
+                            kind=attachment_kind,
+                        )
                     )
-                )
-                self._schedule_attachment_analysis(attachment.id, attachment.url, attachment_kind)
+                    self._schedule_attachment_analysis(
+                        message.id,
+                        attachment.id,
+                        attachment.filename,
+                        attachment.url,
+                        attachment_kind,
+                    )
         if not message.author.bot:
             state.last_human_message_timestamp = message.created_at
 
@@ -1077,13 +1108,36 @@ class ChatBot(commands.Cog):
             return "pdf"
         return None
 
-    def _schedule_attachment_analysis(self, attachment_id: int, url: str, kind: str) -> None:
+    def _schedule_attachment_analysis(
+        self,
+        message_id: int,
+        attachment_id: int,
+        filename: str,
+        url: str,
+        kind: str,
+    ) -> None:
         """添付内容の要約を、投稿処理を待たせずに生成します。"""
-        task = asyncio.create_task(self._analyze_attachment(attachment_id, url, kind))
+        self._update_attachment_context(
+            message_id,
+            AttachmentInMemory(
+                attachment_id=attachment_id,
+                filename=filename,
+                kind=kind,
+                analysis_status="pending",
+            ),
+        )
+        task = asyncio.create_task(self._analyze_attachment(message_id, attachment_id, filename, url, kind))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    async def _analyze_attachment(self, attachment_id: int, url: str, kind: str) -> None:
+    async def _analyze_attachment(
+        self,
+        message_id: int,
+        attachment_id: int,
+        filename: str,
+        url: str,
+        kind: str,
+    ) -> None:
         """画像またはPDFを解析し、短い説明と重要テキストを保存します。"""
         content_type = "input_image" if kind == "image" else "input_file"
         content_key = "image_url" if kind == "image" else "file_url"
@@ -1096,7 +1150,7 @@ class ChatBot(commands.Cog):
                         {
                             "type": "input_text",
                             "text": (
-                                "添付内容を短く要約してください。"
+                                "添付内容をそれぞれ100文字以内で短く要約してください。"
                                 "画像やPDF内で会話の理解に重要な文字情報があれば重要テキストに抜粋し、"
                                 "なければ空文字にしてください。"
                             ),
@@ -1120,6 +1174,15 @@ class ChatBot(commands.Cog):
                 important_text=None,
                 status="failed",
             )
+            self._update_attachment_context(
+                message_id,
+                AttachmentInMemory(
+                    attachment_id=attachment_id,
+                    filename=filename,
+                    kind=kind,
+                    analysis_status="failed",
+                ),
+            )
             return
         if response.output_parsed is None:
             logger.warning("Failed to parse chatbot attachment analysis (attachment_id=%s)", attachment_id)
@@ -1129,13 +1192,44 @@ class ChatBot(commands.Cog):
                 important_text=None,
                 status="failed",
             )
+            self._update_attachment_context(
+                message_id,
+                AttachmentInMemory(
+                    attachment_id=attachment_id,
+                    filename=filename,
+                    kind=kind,
+                    analysis_status="failed",
+                ),
+            )
             return
         await self.short_term_message_store.save_attachment_analysis(
             attachment_id,
-            summary=response.output_parsed.summary,
-            important_text=response.output_parsed.important_text,
+            summary=self._truncate_attachment_context(response.output_parsed.summary),
+            important_text=self._truncate_attachment_context(response.output_parsed.important_text),
             status="completed",
         )
+        self._update_attachment_context(
+            message_id,
+            AttachmentInMemory(
+                attachment_id=attachment_id,
+                filename=filename,
+                kind=kind,
+                analysis_status="completed",
+                summary=self._truncate_attachment_context(response.output_parsed.summary),
+                important_text=self._truncate_attachment_context(response.output_parsed.important_text),
+            ),
+        )
+
+    def _truncate_attachment_context(self, text: str | None) -> str | None:
+        """添付の解析結果を会話文脈用の上限以内に収めます。"""
+        if text is None:
+            return None
+        return text[:ATTACHMENT_CONTEXT_MAX_CHARACTERS]
+
+    def _update_attachment_context(self, message_id: int, attachment: AttachmentInMemory) -> None:
+        """解析完了後、稼働中の短期記憶へ添付情報を反映します。"""
+        for response_pipeline in self.response_pipelines.values():
+            response_pipeline.short_term_memory.set_attachment_analysis(message_id, attachment)
 
     async def _generate_and_send_response(
         self,

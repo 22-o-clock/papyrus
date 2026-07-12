@@ -1,6 +1,6 @@
 import datetime
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from logging import getLogger
 from typing import Any, Self
@@ -23,6 +23,31 @@ LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 
 
 @dataclass
+class AttachmentInMemory:
+    """短期文脈で参照する添付ファイルの解析情報。"""
+
+    attachment_id: int
+    filename: str
+    kind: str
+    analysis_status: str
+    summary: str | None = None
+    important_text: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """プロンプトに渡す添付情報を辞書形式で返します。"""
+        result: dict[str, object] = {
+            "attachment_id": self.attachment_id,
+            "filename": self.filename,
+            "kind": self.kind,
+            "analysis_status": self.analysis_status,
+        }
+        if self.analysis_status == "completed":
+            result["summary"] = self.summary or ""
+            result["important_text"] = self.important_text or ""
+        return result
+
+
+@dataclass
 class MessageInMemory:
     """短期記憶内に保存されるメッセージを表すデータクラス。
 
@@ -37,6 +62,7 @@ class MessageInMemory:
         is_stale_context: 長時間前の参考情報としてのみ使うメッセージか
         image_url: メッセージに含まれる画像のURL (存在する場合)
         pdf_url: メッセージに含まれるPDFのURL (存在する場合)
+        attachments: 添付の解析状態と、完了済みの場合は要約・重要テキスト
 
     """
 
@@ -50,6 +76,7 @@ class MessageInMemory:
     is_stale_context: bool = False
     image_url: str | None = None
     pdf_url: str | None = None
+    attachments: list[AttachmentInMemory] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         """プロンプト作成に用いる要素のみを辞書形式で出力します。
@@ -67,6 +94,7 @@ class MessageInMemory:
             "mentioned_user_ids": self.mentioned_user_ids,
             "timestamp": self.timestamp.astimezone(LOCAL_TIMEZONE).isoformat(),
             "is_stale_context": self.is_stale_context,
+            "attachments": [attachment.to_dict() for attachment in self.attachments],
         }
 
 
@@ -210,6 +238,22 @@ class ShortTermMemory:
     def remove(self, message_id: int) -> None:
         """指定されたDiscordメッセージを短期記憶から除去します。"""
         self.memory = [message for message in self.memory if message.message_id != message_id]
+
+    def set_attachment_analysis(
+        self,
+        message_id: int,
+        attachment: AttachmentInMemory,
+    ) -> None:
+        """添付の解析状態を、対応するメッセージの文脈情報へ反映します。"""
+        message = self.get_message(message_id)
+        if message is None:
+            return
+        message.attachments = [
+            existing_attachment
+            for existing_attachment in message.attachments
+            if existing_attachment.attachment_id != attachment.attachment_id
+        ]
+        message.attachments.append(attachment)
 
     def can_target_message(self, message_id: int) -> bool:
         """返信またはリアクションの対象にできる現在の会話内メッセージか判定します。"""

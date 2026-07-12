@@ -8,7 +8,7 @@ from typing import cast
 import discord
 from discord import Message
 
-from cogs.chatbot.responses_api import LLMMessage, ResponseAction, ShortTermMemory
+from cogs.chatbot.responses_api import AttachmentInMemory, LLMMessage, ResponseAction, ShortTermMemory
 
 
 @dataclass
@@ -104,6 +104,59 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
             self.fail("会話リセット後の最後の投稿が参考情報として扱われていません")
         if memory.can_target_message(2):
             self.fail("参考情報の投稿を返信またはリアクションの対象にできます")
+
+    async def test_serializes_completed_attachment_analysis_within_message_context(self) -> None:
+        memory = ShortTermMemory()
+        await memory.append(make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="添付あり")))
+        memory.set_attachment_analysis(
+            1,
+            AttachmentInMemory(
+                attachment_id=100,
+                filename="poster.png",
+                kind="image",
+                analysis_status="completed",
+                summary="新入生歓迎会のポスター",
+                important_text="4/13 15:15 美術室",
+            ),
+        )
+
+        serialized = json.loads(memory.to_json())
+
+        if serialized[0]["attachments"] != [
+            {
+                "attachment_id": 100,
+                "filename": "poster.png",
+                "kind": "image",
+                "analysis_status": "completed",
+                "summary": "新入生歓迎会のポスター",
+                "important_text": "4/13 15:15 美術室",
+            }
+        ]:
+            self.fail("完了済みの添付解析結果が会話文脈に含まれていません")
+
+    async def test_serializes_pending_attachment_without_unfinished_analysis_text(self) -> None:
+        memory = ShortTermMemory()
+        await memory.append(make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="添付あり")))
+        memory.set_attachment_analysis(
+            1,
+            AttachmentInMemory(
+                attachment_id=100,
+                filename="poster.png",
+                kind="image",
+                analysis_status="pending",
+            ),
+        )
+
+        serialized = json.loads(memory.to_json())
+        attachment = serialized[0]["attachments"][0]
+
+        if attachment != {
+            "attachment_id": 100,
+            "filename": "poster.png",
+            "kind": "image",
+            "analysis_status": "pending",
+        }:
+            self.fail("解析中の添付に未完成の要約や重要テキストが含まれています")
 
 
 class LLMMessageTest(unittest.TestCase):

@@ -223,6 +223,10 @@ class ChatbotShortTermMessageStore:
         """メッセージを保存し、期限切れの本文を削除します。"""
         expiration = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=30)
         async with self._session_factory.begin() as session:
+            expired_message_ids = select(ChatbotStoredMessage.message_id).where(ChatbotStoredMessage.created_at < expiration)
+            await session.execute(
+                delete(ChatbotStoredAttachment).where(ChatbotStoredAttachment.message_id.in_(expired_message_ids))
+            )
             await session.execute(delete(ChatbotStoredMessage).where(ChatbotStoredMessage.created_at < expiration))
             existing = await session.get(ChatbotStoredMessage, message.message_id)
             if existing is None:
@@ -292,6 +296,18 @@ class ChatbotShortTermMessageStore:
                 select(ChatbotStoredMessage)
                 .where(ChatbotStoredMessage.channel_id == channel_id, ChatbotStoredMessage.created_at >= expiration)
                 .order_by(ChatbotStoredMessage.created_at)
+            )
+            return list(result.scalars().all())
+
+    async def get_attachments(self, message_ids: list[int]) -> list[ChatbotStoredAttachment]:
+        """指定メッセージに紐づく保存済み添付を取得します。"""
+        if not message_ids:
+            return []
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ChatbotStoredAttachment)
+                .where(ChatbotStoredAttachment.message_id.in_(message_ids))
+                .order_by(ChatbotStoredAttachment.id)
             )
             return list(result.scalars().all())
 
