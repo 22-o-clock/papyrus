@@ -1,3 +1,3 @@
-from .session import Base, dispose_engine, init_engine
+from .session import Base, create_tables, dispose_engine, init_engine
 
-__all__ = ["Base", "dispose_engine", "init_engine"]
+__all__ = ["Base", "create_tables", "dispose_engine", "init_engine"]

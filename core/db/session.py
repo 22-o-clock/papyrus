@@ -39,3 +39,11 @@ async def dispose_engine() -> None:
         await _engine.dispose()
         _engine = None
         logger.info("Database engine disposed")
+
+
+async def create_tables() -> None:
+    """未作成のORMテーブルだけを作成します。"""
+    if _engine is None:
+        raise RuntimeError("Database engine is not initialized")
+    async with _engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)

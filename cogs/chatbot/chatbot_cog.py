@@ -12,8 +12,10 @@ from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .channel_roles import ChannelRole, ChannelRoleManager
+from .database import ChatbotShadowCandidateStore, ShadowCandidateInput
 from .database_envs import DatabaseEnvManager
-from .responses_api import LLMMessage, ResponseAction, ResponsePipeline
+from .responses_api import LLMMessage, ResponseAction, ResponsePipeline, ShadowReason
+from .shadow_mode import ShadowModeManager
 
 logger = getLogger(__name__)
 
@@ -165,6 +167,8 @@ class ChatBot(commands.Cog):
         self.response_pipelines: dict[int, ResponsePipeline] = {}
         self.env_manager = DatabaseEnvManager(session_factory)
         self.channel_role_manager = ChannelRoleManager(self.env_manager)
+        self.shadow_mode_manager = ShadowModeManager(self.env_manager)
+        self.shadow_candidate_store = ChatbotShadowCandidateStore(session_factory)
 
         self._initialization_lock = asyncio.Lock()
         self._channel_states: dict[int, ChannelProcessingState] = {}
@@ -338,6 +342,24 @@ class ChatBot(commands.Cog):
         await interaction.response.send_message(
             f"{interaction.user.mention} がこの{target_name}のChatbotの役割を `{role.value}` に変更しました。"
         )
+
+    @app_commands.command(name="set_chatbot_shadow_mode", description="このチャンネルのChatbotシャドーモードを変更します")
+    async def set_chatbot_shadow_mode(self, interaction: discord.Interaction, *, enabled: bool) -> None:
+        """雑談の自発反応を投稿せず候補として保存する設定を変更します。"""
+        channel_id = interaction.channel_id
+        if channel_id is None:
+            await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
+            return
+        is_thread = isinstance(interaction.channel, discord.Thread)
+        if not can_change_channel_role(is_thread=is_thread, manage_channels=interaction.permissions.manage_channels):
+            await interaction.response.send_message(
+                "通常チャンネルのシャドーモード変更には「チャンネルの管理」権限が必要です。",
+                ephemeral=True,
+            )
+            return
+        await self.shadow_mode_manager.set_enabled(channel_id, enabled=enabled)
+        state_text = "有効" if enabled else "無効"
+        await interaction.response.send_message(f"このチャンネルのChatbotシャドーモードを{state_text}にしました。")
 
     @app_commands.command(name="reset_chatbot_role", description="このチャンネル固有のChatbot役割を解除します")
     async def reset_chatbot_role(self, interaction: discord.Interaction) -> None:
@@ -638,6 +660,14 @@ class ChatBot(commands.Cog):
                         is_unanswered_question=current_is_unanswered_question,
                     )
                 else:
+                    if await self._is_shadow_mode_for_message(
+                        current_message,
+                        is_explicit_call=current_is_explicit_call,
+                    ):
+                        await self._save_shadow_candidate(
+                            current_message,
+                            LLMMessage(action=ResponseAction.SILENCE, shadow_reason=ShadowReason.COOLDOWN),
+                        )
                     logger.info(
                         "Skipped spontaneous chatbot generation due to cooldown (channel_id=%s)",
                         current_message.channel.id,
@@ -708,12 +738,10 @@ class ChatBot(commands.Cog):
         async with state.lock:
             if not is_generation_current(state, generation_revision):
                 return
-            await self._execute_response_action(
-                message,
-                generated_response,
-                state,
-                is_explicit_call=is_explicit_call,
-            )
+            if await self._is_shadow_mode_for_message(message, is_explicit_call=is_explicit_call):
+                await self._save_shadow_candidate(message, generated_response)
+                return
+            await self._execute_response_action(message, generated_response, state, is_explicit_call=is_explicit_call)
 
     async def _execute_response_action(
         self,
@@ -775,6 +803,30 @@ class ChatBot(commands.Cog):
         await target_message.reply(response.content)
         if not is_explicit_call:
             state.last_spontaneous_action_at = now
+
+    async def _is_shadow_mode_for_message(self, message: Message, *, is_explicit_call: bool) -> bool:
+        """明示依頼以外のchat役割でシャドーモードを適用するか判定します。"""
+        if is_explicit_call:
+            return False
+        parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
+        role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
+        return role is ChannelRole.CHAT and await self.shadow_mode_manager.is_enabled(message.channel.id)
+
+    async def _save_shadow_candidate(self, message: Message, response: LLMMessage) -> None:
+        """モデルが選んだ自発反応を、投稿せず評価用候補として保存します。"""
+        short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
+        await self.shadow_candidate_store.save(
+            ShadowCandidateInput(
+                channel_id=message.channel.id,
+                trigger_message_id=message.id,
+                action=response.action.value,
+                reply_to_message_id=response.reply_to_message_id,
+                content=response.content,
+                reaction_emoji=response.reaction_emoji,
+                reason=response.shadow_reason.value,
+                context_message_ids=[memory_message.message_id for memory_message in short_term_memory.memory],
+            )
+        )
 
 
 async def setup(bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:

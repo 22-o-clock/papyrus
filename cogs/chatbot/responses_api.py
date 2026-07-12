@@ -226,6 +226,17 @@ class ResponseAction(StrEnum):
     MESSAGE = "message"
 
 
+class ShadowReason(StrEnum):
+    """シャドー候補の行動判断を評価するための定型理由。"""
+
+    RELEVANT_CONTEXT = "relevant_context"
+    UNANSWERED_QUESTION = "unanswered_question"
+    HUMAN_CONVERSATION = "human_conversation"
+    NO_VALUE = "no_value"
+    UNCERTAIN_IDENTITY = "uncertain_identity"
+    COOLDOWN = "cooldown"
+
+
 class LLMMessage(BaseModel):
     """OpenAI APIによって生成されるメッセージのデータモデル。
 
@@ -241,6 +252,7 @@ class LLMMessage(BaseModel):
     content: str = ""
     reply_to_message_id: int | None = None
     reaction_emoji: str | None = None
+    shadow_reason: ShadowReason = ShadowReason.NO_VALUE
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> Self:
@@ -273,6 +285,7 @@ class LLMMessage(BaseModel):
                 "content": self.content,
                 "reply_to_message_id": self.reply_to_message_id,
                 "reaction_emoji": self.reaction_emoji,
+                "shadow_reason": self.shadow_reason.value,
             },
             ensure_ascii=False,
             indent=2,
@@ -361,7 +374,7 @@ class DraftGenerator:
 
         if api_response.output_parsed is None:
             logger.warning("Failed to parse LLM response into LLMMessage")
-            return LLMMessage(action=ResponseAction.SILENCE)
+            return LLMMessage(action=ResponseAction.SILENCE, shadow_reason=ShadowReason.NO_VALUE)
 
         return api_response.output_parsed
 
@@ -420,6 +433,7 @@ class ResponseStyler:
             content=api_response.output_parsed.content,
             reply_to_message_id=original_draft.reply_to_message_id,
             reaction_emoji=original_draft.reaction_emoji,
+            shadow_reason=original_draft.shadow_reason,
         )
 
 

@@ -9,7 +9,7 @@ from discord.ext import commands
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from cogs import admin, agree, chatbot, remind, speak, voicevox
-from core.db import dispose_engine, init_engine
+from core.db import create_tables, dispose_engine, init_engine
 
 
 async def load_all_cogs(bot: commands.Bot, session_factory: async_sessionmaker) -> None:
@@ -25,6 +25,7 @@ class MyBot(commands.Bot):
     async def setup_hook(self) -> None:
         session_factory = init_engine()
         await load_all_cogs(self, session_factory)
+        await create_tables()
         my_server = await self.fetch_guild(int(os.environ["SERVER_ID"]))
         self.tree.copy_global_to(guild=my_server)
         await self.tree.sync(guild=my_server)
