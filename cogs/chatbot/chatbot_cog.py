@@ -18,6 +18,8 @@ logger = getLogger(__name__)
 ASSISTANT_DEBOUNCE_SECONDS = 2.0
 CHAT_DEBOUNCE_MIN_SECONDS = 5.0
 CHAT_DEBOUNCE_MAX_SECONDS = 15.0
+CHAT_TEXT_COOLDOWN_SECONDS = 15 * 60
+CHAT_REACTION_COOLDOWN_SECONDS = 2 * 60
 
 
 @dataclass
@@ -28,15 +30,24 @@ class ChannelProcessingState:
     generating: bool = False
     pending_messages: list[Message] = field(default_factory=list)
     queued_response_message: Message | None = None
+    queued_response_is_explicit_call: bool = False
     debounce_task: asyncio.Task[None] | None = None
     debounced_response_message: Message | None = None
+    debounced_response_is_explicit_call: bool = False
     generation_revision: int = 0
+    last_spontaneous_action_at: float | None = None
 
 
-def claim_response_slot(state: ChannelProcessingState, message: Message) -> bool:
+def claim_response_slot(
+    state: ChannelProcessingState,
+    message: Message,
+    *,
+    is_explicit_call: bool,
+) -> bool:
     """生成枠を確保し、使用中の場合は次の返信対象としてメッセージを保持します。"""
     if state.generating:
         state.queued_response_message = message
+        state.queued_response_is_explicit_call = is_explicit_call
         state.generation_revision += 1
         return False
 
@@ -54,6 +65,26 @@ def get_response_debounce_seconds(role: ChannelRole) -> float:
 def is_generation_current(state: ChannelProcessingState, revision: int) -> bool:
     """生成開始後に、回答を作り直す必要がある返信要求が追加されていないか確認します。"""
     return state.generation_revision == revision
+
+
+def can_execute_spontaneous_action(
+    action: ResponseAction,
+    last_action_at: float | None,
+    now: float,
+) -> bool:
+    """自発反応が行動別のクールダウンを過ぎているか判定します。"""
+    if action is ResponseAction.SILENCE or last_action_at is None:
+        return True
+
+    cooldown_seconds = CHAT_REACTION_COOLDOWN_SECONDS if action is ResponseAction.REACTION else CHAT_TEXT_COOLDOWN_SECONDS
+    return now - last_action_at >= cooldown_seconds
+
+
+def can_start_spontaneous_generation(last_action_at: float | None, now: float) -> bool:
+    """全ての自発行動が抑制される期間を避けて生成を始めるか判定します。"""
+    if last_action_at is None:
+        return True
+    return now - last_action_at >= CHAT_REACTION_COOLDOWN_SECONDS
 
 
 def can_change_channel_role(*, is_thread: bool, manage_channels: bool) -> bool:
@@ -209,28 +240,37 @@ class ChatBot(commands.Cog):
         role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
         mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
         replied_to_bot = await self._is_reply_to_bot(message)
+        is_explicit_call = mentioned_bot or replied_to_bot
         response_required = should_respond(
             role,
             mentioned_bot=mentioned_bot,
             replied_to_bot=replied_to_bot,
         )
-        await self._update_response_schedule(message if response_required else None, state, role)
+        await self._update_response_schedule(
+            message if response_required else None,
+            state,
+            role,
+            is_explicit_call=is_explicit_call,
+        )
 
     async def _update_response_schedule(
         self,
         response_message: Message | None,
         state: ChannelProcessingState,
         role: ChannelRole,
+        *,
+        is_explicit_call: bool,
     ) -> None:
         """返信対象を更新し、最後の人間投稿から一定時間後に生成を開始します。"""
         async with state.lock:
             if state.generating:
                 if response_message is not None:
-                    claim_response_slot(state, response_message)
+                    claim_response_slot(state, response_message, is_explicit_call=is_explicit_call)
                 return
 
             if response_message is not None:
                 state.debounced_response_message = response_message
+                state.debounced_response_is_explicit_call = is_explicit_call
             if state.debounced_response_message is None:
                 return
 
@@ -260,12 +300,14 @@ class ChatBot(commands.Cog):
                 return
 
             message = state.debounced_response_message
+            is_explicit_call = state.debounced_response_is_explicit_call
             state.debounce_task = None
             state.debounced_response_message = None
-            if message is None or not claim_response_slot(state, message):
+            state.debounced_response_is_explicit_call = False
+            if message is None or not claim_response_slot(state, message, is_explicit_call=is_explicit_call):
                 return
 
-        await self._process_response_queue(message, state)
+        await self._process_response_queue(message, state, is_explicit_call=is_explicit_call)
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
         """受信したメッセージが、このボットの発言へのDiscord返信か判定します。
@@ -304,28 +346,50 @@ class ChatBot(commands.Cog):
 
         return referenced_message.author.id == bot_user.id
 
-    async def _process_response_queue(self, message: Message, state: ChannelProcessingState) -> None:
+    async def _process_response_queue(
+        self,
+        message: Message,
+        state: ChannelProcessingState,
+        *,
+        is_explicit_call: bool,
+    ) -> None:
         """同一チャンネルの返信要求を順番に生成し、保留メッセージを文脈へ反映します。"""
         current_message = message
+        current_is_explicit_call = is_explicit_call
         completed_normally = False
         try:
             while True:
-                await self._generate_and_send_response(current_message, state)
+                now = asyncio.get_running_loop().time()
+                if current_is_explicit_call or can_start_spontaneous_generation(state.last_spontaneous_action_at, now):
+                    await self._generate_and_send_response(
+                        current_message,
+                        state,
+                        is_explicit_call=current_is_explicit_call,
+                    )
+                else:
+                    logger.info(
+                        "Skipped spontaneous chatbot generation due to cooldown (channel_id=%s)",
+                        current_message.channel.id,
+                    )
 
                 async with state.lock:
                     await self._flush_pending_messages(current_message.channel.id, state)
                     next_message = state.queued_response_message
+                    next_is_explicit_call = state.queued_response_is_explicit_call
                     state.queued_response_message = None
+                    state.queued_response_is_explicit_call = False
                     if next_message is None:
                         state.generating = False
                         completed_normally = True
                         return
                     current_message = next_message
+                    current_is_explicit_call = next_is_explicit_call
         finally:
             if not completed_normally:
                 async with state.lock:
                     await self._flush_pending_messages(message.channel.id, state)
                     state.queued_response_message = None
+                    state.queued_response_is_explicit_call = False
                     state.generating = False
 
     async def _flush_pending_messages(self, channel_id: int, state: ChannelProcessingState) -> None:
@@ -334,7 +398,13 @@ class ChatBot(commands.Cog):
             await self.response_pipelines[channel_id].short_term_memory.append(pending_message)
         state.pending_messages.clear()
 
-    async def _generate_and_send_response(self, message: Message, state: ChannelProcessingState) -> None:
+    async def _generate_and_send_response(
+        self,
+        message: Message,
+        state: ChannelProcessingState,
+        *,
+        is_explicit_call: bool,
+    ) -> None:
         """短期記憶から回答を生成し、生成中に文脈が更新されていなければ送信します。"""
         generation_revision = state.generation_revision
         async with message.channel.typing():
@@ -342,18 +412,45 @@ class ChatBot(commands.Cog):
             role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
             generated_response = await self.response_pipelines[message.channel.id].generate_response(role)
 
-            async with state.lock:
-                if not is_generation_current(state, generation_revision):
-                    return
-                await self._execute_response_action(message, generated_response)
+        async with state.lock:
+            if not is_generation_current(state, generation_revision):
+                return
+            await self._execute_response_action(
+                message,
+                generated_response,
+                state,
+                is_explicit_call=is_explicit_call,
+            )
 
-    async def _execute_response_action(self, message: Message, response: LLMMessage) -> None:
+    async def _execute_response_action(
+        self,
+        message: Message,
+        response: LLMMessage,
+        state: ChannelProcessingState,
+        *,
+        is_explicit_call: bool,
+    ) -> None:
         """構造化された応答行動をDiscord上で実行します。"""
         if response.action is ResponseAction.SILENCE:
             return
 
+        now = asyncio.get_running_loop().time()
+        if not is_explicit_call and not can_execute_spontaneous_action(
+            response.action,
+            state.last_spontaneous_action_at,
+            now,
+        ):
+            logger.info(
+                "Skipped spontaneous chatbot action due to cooldown (action=%s, channel_id=%s)",
+                response.action.value,
+                message.channel.id,
+            )
+            return
+
         if response.action is ResponseAction.MESSAGE:
             await message.channel.send(response.content)
+            if not is_explicit_call:
+                state.last_spontaneous_action_at = now
             return
 
         reply_to_message_id = response.reply_to_message_id
@@ -378,9 +475,13 @@ class ChatBot(commands.Cog):
                 logger.warning("Generated reaction has no emoji (message_id=%s)", reply_to_message_id)
                 return
             await target_message.add_reaction(reaction_emoji)
+            if not is_explicit_call:
+                state.last_spontaneous_action_at = now
             return
 
         await target_message.reply(response.content)
+        if not is_explicit_call:
+            state.last_spontaneous_action_at = now
 
 
 async def setup(bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:

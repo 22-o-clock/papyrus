@@ -10,14 +10,19 @@ from cogs.chatbot.chatbot_cog import (
     ASSISTANT_DEBOUNCE_SECONDS,
     CHAT_DEBOUNCE_MAX_SECONDS,
     CHAT_DEBOUNCE_MIN_SECONDS,
+    CHAT_REACTION_COOLDOWN_SECONDS,
+    CHAT_TEXT_COOLDOWN_SECONDS,
     ChannelProcessingState,
     can_change_channel_role,
+    can_execute_spontaneous_action,
+    can_start_spontaneous_generation,
     claim_response_slot,
     get_available_referenced_author_id,
     get_response_debounce_seconds,
     is_generation_current,
     should_respond,
 )
+from cogs.chatbot.responses_api import ResponseAction
 
 
 def make_discord_message(author_id: int) -> Message:
@@ -88,8 +93,8 @@ class ChannelProcessingStateTest(unittest.TestCase):
         first_message = make_discord_message(author_id=100)
         second_message = make_discord_message(author_id=200)
 
-        first_claimed = claim_response_slot(first_state, first_message)
-        second_claimed = claim_response_slot(second_state, second_message)
+        first_claimed = claim_response_slot(first_state, first_message, is_explicit_call=False)
+        second_claimed = claim_response_slot(second_state, second_message, is_explicit_call=False)
 
         if not first_claimed or not second_claimed:
             self.fail("別チャンネルの生成枠が互いに干渉しています")
@@ -99,8 +104,8 @@ class ChannelProcessingStateTest(unittest.TestCase):
         first_message = make_discord_message(author_id=100)
         second_message = make_discord_message(author_id=200)
 
-        first_claimed = claim_response_slot(state, first_message)
-        second_claimed = claim_response_slot(state, second_message)
+        first_claimed = claim_response_slot(state, first_message, is_explicit_call=False)
+        second_claimed = claim_response_slot(state, second_message, is_explicit_call=True)
 
         if not first_claimed:
             self.fail("最初の返信要求が生成枠を確保できません")
@@ -108,6 +113,8 @@ class ChannelProcessingStateTest(unittest.TestCase):
             self.fail("同じチャンネルで生成枠を二重に確保しています")
         if state.queued_response_message is not second_message:
             self.fail("生成中に受けた返信要求を次回処理へ保持していません")
+        if not state.queued_response_is_explicit_call:
+            self.fail("生成中に受けた明示的な呼びかけを保持していません")
         if is_generation_current(state, revision=0):
             self.fail("追加の返信要求を受けても生成リビジョンが更新されていません")
 
@@ -132,6 +139,62 @@ class ResponseDebounceTest(unittest.TestCase):
 
         if not CHAT_DEBOUNCE_MIN_SECONDS <= delay_seconds <= CHAT_DEBOUNCE_MAX_SECONDS:
             self.fail("chatの待機時間が設定範囲を外れています")
+
+
+class SpontaneousActionCooldownTest(unittest.TestCase):
+    def test_text_action_waits_for_text_cooldown(self) -> None:
+        now = 1_000.0
+
+        allowed = can_execute_spontaneous_action(
+            ResponseAction.REPLY,
+            last_action_at=now - CHAT_TEXT_COOLDOWN_SECONDS + 1,
+            now=now,
+        )
+
+        if allowed:
+            self.fail("自発テキスト投稿がクールダウン中にも実行されます")
+
+    def test_reaction_uses_shorter_cooldown(self) -> None:
+        now = 1_000.0
+
+        allowed = can_execute_spontaneous_action(
+            ResponseAction.REACTION,
+            last_action_at=now - CHAT_REACTION_COOLDOWN_SECONDS,
+            now=now,
+        )
+
+        if not allowed:
+            self.fail("リアクションが短いクールダウン後にも実行されません")
+
+    def test_silence_is_not_limited_by_cooldown(self) -> None:
+        allowed = can_execute_spontaneous_action(
+            ResponseAction.SILENCE,
+            last_action_at=999.0,
+            now=1_000.0,
+        )
+
+        if not allowed:
+            self.fail("沈黙がクールダウンによって妨げられています")
+
+
+class SpontaneousGenerationTest(unittest.TestCase):
+    def test_skips_generation_while_reaction_is_on_cooldown(self) -> None:
+        can_start = can_start_spontaneous_generation(
+            last_action_at=999.0,
+            now=1_000.0,
+        )
+
+        if can_start:
+            self.fail("リアクションも抑制される期間に自発生成を開始します")
+
+    def test_starts_generation_after_reaction_cooldown(self) -> None:
+        can_start = can_start_spontaneous_generation(
+            last_action_at=1_000.0 - CHAT_REACTION_COOLDOWN_SECONDS,
+            now=1_000.0,
+        )
+
+        if not can_start:
+            self.fail("リアクションが可能な時点で自発生成を開始しません")
 
 
 class ReferencedAuthorTest(unittest.TestCase):
