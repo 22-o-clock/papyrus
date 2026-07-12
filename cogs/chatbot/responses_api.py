@@ -265,7 +265,7 @@ class DraftGenerator:
             llm_input[0]["content"].append({"type": "input_file", "file_url": short_term_memory.memory[-1].pdf_url})
 
         api_response = await self.client.responses.parse(
-            input=llm_input,  # type: ignore
+            input=llm_input,
             instructions=draft_generator_prompt.DRAFT_INSTRUCTIONS.format(bot_name=self.bot_name),
             model=DRAFT_GENERATOR_MODEL,
             reasoning={"effort": "medium"},

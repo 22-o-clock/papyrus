@@ -49,12 +49,15 @@ class Voicevox(commands.Cog):
         logger.info("Voicevox cog is ready.")
 
     @commands.Cog.listener()
-    async def on_message(self, message: Message) -> None:
+    async def on_message(self, message: Message) -> None:  # noqa: PLR0911  # 読み上げ対象外の早期リターンが多く、規模上やむを得ない
         if message.author.bot:
             return
         if str(message.channel.id) != self.message_channel:
             return
         if self.does_include_url(message):
+            return
+
+        if message.guild is None or message.guild.voice_client is None:
             return
 
         try:

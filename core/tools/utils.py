@@ -1,6 +1,10 @@
 from discord import Interaction, Member, StageChannel, TextChannel, Thread, User, VoiceChannel, VoiceClient, VoiceState
 from discord.ext import commands
 
+def parse_channel_ids(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    return [int(part.strip()) for part in raw.split(",") if part.strip()]
 
 async def fetch_text_channel(bot: commands.Bot, channel_id: int):
     channel = await bot.fetch_channel(channel_id)
