@@ -19,8 +19,8 @@ from .prompt import draft_generator_prompt, memory_extraction_prompt, memory_rec
 
 logger = getLogger(__name__)
 
-DRAFT_GENERATOR_MODEL = "gpt-5.2"
-STYLER_MODEL = "gpt-5.4-mini"
+DRAFT_GENERATOR_MODEL = "gpt-5.6-sol"
+STYLER_MODEL = "gpt-5.6-terra"
 MEMORY_EXTRACTION_MODEL = "gpt-5.4"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 
