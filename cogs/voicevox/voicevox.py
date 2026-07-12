@@ -27,6 +27,7 @@ logger = getLogger(__name__)
 
 DEFAULT_SPEAKER = 8
 MESSAGE_READ_MAX_LENGTH = 50
+HTTP_OK = 200
 
 URL_PATTERN: Pattern[str] = re.compile(r"https?://")
 
@@ -49,7 +50,7 @@ class Voicevox(commands.Cog):
         logger.info("Voicevox cog is ready.")
 
     @commands.Cog.listener()
-    async def on_message(self, message: Message) -> None:
+    async def on_message(self, message: Message) -> None:  # noqa: PLR0911  # 読み上げ対象外の早期リターンが多く、規模上やむを得ない
         if message.author.bot:
             return
         if str(message.channel.id) != self.message_channel:
@@ -57,10 +58,13 @@ class Voicevox(commands.Cog):
         if self.does_include_url(message):
             return
 
+        if message.guild is None or message.guild.voice_client is None:
+            return
+
         try:
             vc: VoiceClient = get_voice_client_from_author(message.author)
-        except TypeError as e:
-            logger.error(f"Error occurred while connecting to voice channel: {e}")
+        except TypeError as error:
+            logger.warning("Error occurred while connecting to voice channel: %s", error)
             return
 
         speaker_id = self.character_for_member.get(message.author.id, DEFAULT_SPEAKER)
@@ -70,8 +74,8 @@ class Voicevox(commands.Cog):
                 f"{self.voicevox_url}/audio_query",
                 params={"text": message.content, "speaker": speaker_id},
             ) as response:
-                if response.status != 200:
-                    logger.error(f"Failed to get audio query: {response.status}")
+                if response.status != HTTP_OK:
+                    logger.error("Failed to get audio query: %s", response.status)
                     return
                 audio_query = await response.json()
 
@@ -80,8 +84,8 @@ class Voicevox(commands.Cog):
                 params={"speaker": speaker_id},
                 json=audio_query,
             ) as response:
-                if response.status != 200:
-                    logger.error(f"Failed to synthesize audio: {response.status}")
+                if response.status != HTTP_OK:
+                    logger.error("Failed to synthesize audio: %s", response.status)
                     return
                 audio_data: bytes = await response.read()
 
@@ -151,12 +155,12 @@ class Voicevox(commands.Cog):
 
     async def get_speakers(self) -> dict[int, str]:
         async with ClientSession() as session, session.get(f"{self.voicevox_url}/speakers") as response:
-            if response.status != 200:
-                logger.error(f"Failed to get speakers: {response.status}")
+            if response.status != HTTP_OK:
+                logger.error("Failed to get speakers: %s", response.status)
                 return {}
             speakers = await response.json()
 
-        response = dict()
+        response = {}
 
         for speaker in speakers:
             name: str = speaker["name"]

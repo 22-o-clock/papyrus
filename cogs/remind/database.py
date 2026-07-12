@@ -24,6 +24,7 @@ class ReminderTable(Base):
     time: MappedColumn[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
     def __repr__(self) -> str:
+        """デバッグ用にリマインダーの全項目を表現する。"""
         return f"ReminderTable({self.id=}, {self.author=}, {self.channel=}, \
                 {self.content=}, {self.time=})"
 
@@ -65,6 +66,14 @@ class ReminderDatabase:
             )
             session.add(reminder)
             await session.flush()
+
+    async def get_reminder(self, reminder_id: uuid.UUID, author_id: int) -> ReminderTable | None:
+        """指定利用者が所有するリマインダーをIDで取得する。"""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ReminderTable).where(ReminderTable.id == reminder_id, ReminderTable.author == author_id)
+            )
+            return result.scalar_one_or_none()
 
     async def remove(self, reminder_id: uuid.UUID) -> None:
         """リマインダーの削除"""

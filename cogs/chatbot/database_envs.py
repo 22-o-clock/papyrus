@@ -1,7 +1,6 @@
 from logging import getLogger
-from typing import Any
 
-from sqlalchemy import CursorResult, Text, insert, select, update
+from sqlalchemy import Text, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
 
@@ -17,6 +16,7 @@ class DatabaseEnvs(Base):
     value = mapped_column(Text)
 
     def __repr__(self) -> str:
+        """デバッグ用にキーと値を表現する。"""
         return f"DatabaseEnvs(key={self.key!r}, value={self.value!r})"
 
 
@@ -35,10 +35,8 @@ class DatabaseEnvManager:
 
         """
         async with self._session_factory() as session:
-            cursor_result: CursorResult[Any] = await session.execute(select(DatabaseEnvs.value).where(DatabaseEnvs.key == key))
-            result = cursor_result.all()
-
-        return result[0][0] if result else None
+            result = await session.execute(select(DatabaseEnvs.value).where(DatabaseEnvs.key == key))
+            return result.scalar_one_or_none()
 
     async def set_env(self, key: str, value: str) -> None:
         """指定したキーと値のペアをデータベースに保存します。
@@ -53,7 +51,7 @@ class DatabaseEnvManager:
         """
         async with self._session_factory.begin() as session:
             # 既に存在するかチェック
-            result: CursorResult[Any] = await session.execute(select(DatabaseEnvs).where(DatabaseEnvs.key == key))
+            result = await session.execute(select(DatabaseEnvs).where(DatabaseEnvs.key == key))
 
             if result.first():
                 # UPDATE

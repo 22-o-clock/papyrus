@@ -60,4 +60,5 @@ jobs:
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.IMAGE }}"

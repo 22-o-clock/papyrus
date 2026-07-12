@@ -28,11 +28,11 @@ class Agree(commands.Cog):
 
         await interaction.response.send_message(response)
 
-    async def disagree(self, interaction: Interaction, message: Message):
+    async def disagree(self, interaction: Interaction, message: Message) -> None:
         """メッセージの末尾に「↑そんなことはないですね」を追加して返す。"""
         await interaction.response.send_message("> " + message.content + "\n↑そんなことはないですね")
 
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Agree(bot))
-    logger.debug(f"{__name__} is added to the bot.")
+    logger.debug("%s is added to the bot.", __name__)

@@ -1,6 +1,6 @@
 import re
 from logging import getLogger
-from random import choice
+from secrets import choice
 
 from discord import Interaction, app_commands
 from discord.ext import commands
@@ -51,12 +51,12 @@ SPEAK_TABLE = [
 
 
 class Speak(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        logger.info(f"{__name__}.on_ready() is called.")
+        logger.info("%s.on_ready() is called.", __name__)
 
     @app_commands.command(name="hi", description="ボットがあなたに挨拶します。")
     async def hi(self, interaction: Interaction) -> None:
@@ -69,7 +69,7 @@ class Speak(commands.Cog):
 
     @app_commands.command(name="choice", description="選択肢の中から1つをランダムに選びます。")
     @app_commands.describe(option="選択肢を空白区切りで入力")
-    async def choice_command(self, interaction: Interaction, option: str):
+    async def choice_command(self, interaction: Interaction, option: str) -> None:
         """指定した選択肢の中から、ボットが1つをランダムに選びます。"""
         match = re.findall(r"\S+", option)
         if len(match) == 1:
@@ -81,6 +81,6 @@ class Speak(commands.Cog):
             await interaction.response.send_message(f"じゃあ... {choice(match)} で決定！")
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Speak(bot))
-    logger.debug(f"{__name__} is added to the bot.")
+    logger.debug("%s is added to the bot.", __name__)

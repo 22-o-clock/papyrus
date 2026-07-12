@@ -6,12 +6,12 @@ from discord.ext import commands
 from discord.utils import escape_markdown
 
 
-def make_simple_embed(color: Colour, title: str = "", desc: str = ""):
+def make_simple_embed(color: Colour, title: str = "", desc: str = "", *, url: str | None = None) -> Embed:
     """基本的な`Embed`を作成します。`color`は`Colour.from_rgb()`で自由に指定することができます。"""
-    return Embed(title=title, color=color, description=desc)
+    return Embed(title=title, color=color, description=desc, url=url)
 
 
-def make_timestamped_embed(color: Colour, title: str = "", desc: str = ""):
+def make_timestamped_embed(color: Colour, title: str = "", desc: str = "") -> Embed:
     """タイムスタンプの付いた`Embed`を作成します。`color`は`Colour.from_rgb()`で自由に指定することができます。"""
     time = datetime.now(timezone(timedelta(hours=9)))
 
@@ -23,7 +23,8 @@ def add_timestamp_footer(bot: commands.Bot, embed: Embed) -> Embed:
     tz = timezone(timedelta(hours=9))
     stamp = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %z")
 
-    embed.set_footer(text=f"occured on {stamp}", icon_url=bot.user.display_avatar.url)
+    icon_url = bot.user.display_avatar.url if bot.user is not None else None
+    embed.set_footer(text=f"occured on {stamp}", icon_url=icon_url)
     return embed
 
 
