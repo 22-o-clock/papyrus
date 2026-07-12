@@ -1,6 +1,6 @@
 import asyncio
-import random
 from logging import getLogger
+from random import SystemRandom
 
 import discord
 from discord import Message, app_commands
@@ -12,6 +12,7 @@ from .database_envs import DatabaseEnvManager
 from .responses_api import ResponsePipeline
 
 logger = getLogger(__name__)
+RANDOM = SystemRandom()
 
 
 class ChatBot(commands.Cog):
@@ -127,7 +128,7 @@ class ChatBot(commands.Cog):
             return
 
         # 3.2.2 reply_probability に基づいて返信するかを決定
-        if random.random() < self.reply_probability and not self._generating:
+        if RANDOM.random() < self.reply_probability and not self._generating:
             task = asyncio.create_task(self.reply_to_message(message))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)

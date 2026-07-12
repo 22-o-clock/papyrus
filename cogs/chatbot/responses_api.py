@@ -1,19 +1,28 @@
-import datetime
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass
 from logging import getLogger
-from typing import Any
+from typing import TYPE_CHECKING
 
 import dateutil
 import discord
 import tiktoken
 from discord import Message
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from .prompt import draft_generator_prompt, response_styler_prompt
 
 logger = getLogger(__name__)
+
+if TYPE_CHECKING:
+    import datetime
+
+    from openai import AsyncOpenAI
+    from openai.types.responses.response_input_file_param import ResponseInputFileParam
+    from openai.types.responses.response_input_image_param import ResponseInputImageParam
+    from openai.types.responses.response_input_message_content_list_param import ResponseInputContentParam
+    from openai.types.responses.response_input_param import ResponseInputParam
 
 DRAFT_GENERATOR_MODEL = "gpt-5.2"
 STYLER_MODEL = "gpt-5.4-mini"
@@ -244,25 +253,30 @@ class DraftGenerator:
             生成されたドラフト回答を含むLLMMessageオブジェクト
 
         """
-        # TODO @se-Anthyme: 履歴にある画像とPDFを扱えるようにする (現状は直接の返信元に含まれる場合のみ渡している)
-
-        llm_input: list[dict[str, Any]] = [
+        # 現在は、画像とPDFを直接の返信元に含まれる場合のみ履歴へ渡している。
+        content: list[ResponseInputContentParam] = [
             {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": short_term_memory.to_json(),
-                    }
-                ],
+                "type": "input_text",
+                "text": short_term_memory.to_json(),
             }
         ]
 
         if short_term_memory.memory[-1].image_url:
-            llm_input[0]["content"].append({"type": "input_image", "image_url": short_term_memory.memory[-1].image_url})
+            image_content: ResponseInputImageParam = {
+                "type": "input_image",
+                "image_url": short_term_memory.memory[-1].image_url,
+                "detail": "auto",
+            }
+            content.append(image_content)
 
         if short_term_memory.memory[-1].pdf_url:
-            llm_input[0]["content"].append({"type": "input_file", "file_url": short_term_memory.memory[-1].pdf_url})
+            file_content: ResponseInputFileParam = {
+                "type": "input_file",
+                "file_url": short_term_memory.memory[-1].pdf_url,
+            }
+            content.append(file_content)
+
+        llm_input: ResponseInputParam = [{"role": "user", "content": content}]
 
         api_response = await self.client.responses.parse(
             input=llm_input,

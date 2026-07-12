@@ -9,7 +9,7 @@ import discord
 from discord import ForumChannel, Interaction, Member, Message, TextChannel, Thread, Webhook, app_commands
 from discord.ext import commands
 
-from core.exception.exception import ArgumentError, MissingRequiredRole
+from core.exception.exception import ArgumentError, MissingRequiredRoleError
 from core.tools.webhook import fetch_webhook
 
 WEBHOOK_NAME = "papyrus-moving"
@@ -189,7 +189,7 @@ class Moving(commands.Cog):
         if isinstance(interaction.user, Member) and any(role.id == self.admin_role_id for role in interaction.user.roles):
             return True
         error_message = "コマンドを実行するのに必要なロールがありません。"
-        raise MissingRequiredRole(error_message)
+        raise MissingRequiredRoleError(error_message)
 
     @app_commands.command(description="現在のチャンネルまたはスレッドを新しいスレッドへ複製します。")
     @app_commands.describe(channel="新規スレッドを作成するチャンネル", thread_name="新規スレッドの名称")

@@ -10,7 +10,7 @@ import regex
 from discord import Interaction, Member, Message, RawReactionActionEvent, TextChannel, Thread, app_commands
 from discord.ext import commands, tasks
 
-from core.exception.exception import ArgumentError, MissingRequiredRole
+from core.exception.exception import ArgumentError, MissingRequiredRoleError
 from core.tools.ebd import add_timestamp_footer, make_simple_embed
 from core.tools.utils import fetch_text_channel
 
@@ -357,7 +357,7 @@ class Monitor(commands.Cog):
         if isinstance(interaction.user, Member) and any(role.id == self.admin_role_id for role in interaction.user.roles):
             return
         error_message = "コマンドを実行するのに必要なロールがありません。"
-        raise MissingRequiredRole(error_message)
+        raise MissingRequiredRoleError(error_message)
 
     @staticmethod
     def _require_text_channel(channel: object) -> TextChannel | Thread:
