@@ -20,6 +20,7 @@ from cogs.chatbot.chatbot_cog import (
     can_start_spontaneous_generation,
     claim_response_slot,
     get_available_referenced_author_id,
+    get_history_sync_after,
     get_latest_memory_search_query,
     get_response_debounce_seconds,
     get_unanswered_question_wait_minutes,
@@ -57,6 +58,27 @@ class MemorySearchQueryTest(unittest.TestCase):
 
         if result != message.content:
             self.fail("最新投稿の検索クエリにメッセージIDなどのメタデータが混入しています")
+
+
+class HistorySyncRangeTest(unittest.TestCase):
+    def test_uses_latest_stored_message_for_existing_channel(self) -> None:
+        now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+        latest_stored_at = now - timedelta(hours=2)
+
+        if get_history_sync_after(latest_stored_at, now) != latest_stored_at:
+            self.fail("保存済みチャンネルの差分取得が最新投稿の後から始まりません")
+
+    def test_uses_twelve_hours_for_channel_without_stored_messages(self) -> None:
+        now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+
+        if get_history_sync_after(None, now) != now - timedelta(hours=12):
+            self.fail("未保存チャンネルの履歴取得範囲が12時間になっていません")
+
+    def test_limits_existing_channel_history_to_thirty_days(self) -> None:
+        now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+
+        if get_history_sync_after(now - timedelta(days=60), now) != now - timedelta(days=30):
+            self.fail("保存済みチャンネルの履歴取得が30日を超えています")
 
 
 class MemoryAdminInputTest(unittest.TestCase):

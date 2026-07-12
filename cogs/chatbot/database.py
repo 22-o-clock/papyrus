@@ -552,6 +552,16 @@ class ChatbotShortTermMessageStore:
             )
             return list(result.scalars().all())
 
+    async def get_latest_created_at(self, channel_id: int) -> datetime.datetime | None:
+        """履歴の差分取得に使う、指定チャンネルの最新保存日時を返します。"""
+        async with self._session_factory() as session:
+            return await session.scalar(
+                select(ChatbotStoredMessage.created_at)
+                .where(ChatbotStoredMessage.channel_id == channel_id)
+                .order_by(ChatbotStoredMessage.created_at.desc())
+                .limit(1)
+            )
+
     async def get_by_ids(self, message_ids: list[int]) -> list[ChatbotStoredMessage]:
         """指定IDの短期保存メッセージを時系列順に取得します。"""
         if not message_ids:

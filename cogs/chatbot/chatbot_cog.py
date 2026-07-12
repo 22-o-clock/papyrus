@@ -85,6 +85,8 @@ MEMORY_EXTRACTION_BATCH_SIZE = 5
 MEMORY_EXTRACTION_WAIT_SECONDS = 10 * 60
 MEMORY_SEARCH_CONTEXT_MESSAGE_COUNT = 10
 MEMORY_SEARCH_MAXIMUM_COSINE_DISTANCE = 0.70
+HISTORY_SYNC_INITIAL_LOOKBACK_HOURS = 12
+HISTORY_SYNC_MAXIMUM_LOOKBACK_DAYS = 30
 MEMORY_RECONCILIATION_VERSION_KEY = "CHATBOT_MEMORY_RECONCILIATION_VERSION"
 MEMORY_RECONCILIATION_VERSION = "2"
 
@@ -372,6 +374,17 @@ def validate_exported_memory_ids(seen_ids: set[uuid.UUID], exported_ids: set[uui
         raise ValueError(msg)
 
 
+def get_history_sync_after(
+    latest_stored_at: datetime.datetime | None,
+    now: datetime.datetime,
+) -> datetime.datetime:
+    """保存状況に応じて、起動時にDiscord履歴を取得する開始日時を返します。"""
+    maximum_lookback = now - datetime.timedelta(days=HISTORY_SYNC_MAXIMUM_LOOKBACK_DAYS)
+    if latest_stored_at is None:
+        return now - datetime.timedelta(hours=HISTORY_SYNC_INITIAL_LOOKBACK_HOURS)
+    return max(latest_stored_at, maximum_lookback)
+
+
 class ChatBot(commands.Cog):
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
@@ -389,6 +402,8 @@ class ChatBot(commands.Cog):
         self._memory_extraction_task: asyncio.Task[None] | None = None
         self._memory_queue_recovered = False
         self._memory_reconciliation_started = False
+        self._history_sync_complete = asyncio.Event()
+        self._history_sync_lock = asyncio.Lock()
 
         self._initialization_lock = asyncio.Lock()
         self._channel_states: dict[int, ChannelProcessingState] = {}
@@ -473,9 +488,17 @@ class ChatBot(commands.Cog):
                 minimum_minutes,
                 maximum_minutes,
             )
+            self._history_sync_complete.set()
             return
         self.unanswered_question_minimum_wait_minutes = minimum_minutes
         self.unanswered_question_maximum_wait_minutes = maximum_minutes
+        self._history_sync_complete.clear()
+        try:
+            async with self._history_sync_lock:
+                await self._synchronize_recent_discord_history()
+        finally:
+            # 一部チャンネルの失敗で、通常の応答まで永続的に停止させない。
+            self._history_sync_complete.set()
         if not self._memory_queue_recovered:
             await self.memory_extraction_queue.recover_interrupted()
             self._memory_queue_recovered = True
@@ -485,6 +508,44 @@ class ChatBot(commands.Cog):
             task = asyncio.create_task(self._reconcile_existing_memories_once())
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
+
+    async def _synchronize_recent_discord_history(self) -> None:
+        """停止中の投稿をDiscordから取得し、応答せず通常の保存経路へ流します。"""
+        now = datetime.datetime.now(datetime.UTC)
+        synchronized_message_count = 0
+        for guild in self.bot.guilds:
+            bot_member = guild.me
+            if bot_member is None:
+                logger.warning("Skipped chatbot history sync because bot member is unavailable (guild_id=%s)", guild.id)
+                continue
+            channels: list[discord.TextChannel | discord.Thread] = [*guild.text_channels, *guild.threads]
+            for channel in channels:
+                permissions = channel.permissions_for(bot_member)
+                if not permissions.view_channel or not permissions.read_message_history:
+                    continue
+                try:
+                    latest_stored_at = await self.short_term_message_store.get_latest_created_at(channel.id)
+                    after = get_history_sync_after(latest_stored_at, now)
+                    state = await self._ensure_channel_state(channel.id)
+                    channel_message_count = 0
+                    async for message in channel.history(after=after, oldest_first=True, limit=None):
+                        await self._append_message_to_short_term_memory(message, state)
+                        if not message.author.bot:
+                            await self.memory_extraction_queue.enqueue(message.id, channel.id)
+                        channel_message_count += 1
+                    synchronized_message_count += channel_message_count
+                    if channel_message_count:
+                        logger.info(
+                            "Synchronized chatbot Discord history (channel_id=%s, message_count=%s, after=%s)",
+                            channel.id,
+                            channel_message_count,
+                            after.isoformat(),
+                        )
+                except Exception:
+                    logger.exception("Failed to synchronize chatbot Discord history (channel_id=%s)", channel.id)
+        if synchronized_message_count:
+            await self._schedule_memory_extraction()
+        logger.info("Completed chatbot Discord history sync (message_count=%s)", synchronized_message_count)
 
     async def _reconcile_existing_memories_once(self) -> None:
         """導入前から存在する記憶を古い順に一度だけ訂正・競合判定します。"""
@@ -1406,6 +1467,8 @@ class ChatBot(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
+        # 起動直後の不完全な文脈で応答せず、履歴同期後に受信イベントを処理する。
+        await self._history_sync_complete.wait()
         # 1. 明示的に呼ばれる前の会話も保持するため、チャンネルごとにパイプラインを遅延初期化
         state = await self._ensure_channel_state(message.channel.id)
 
@@ -2028,6 +2091,8 @@ class ChatBot(commands.Cog):
     async def _append_message_to_short_term_memory(self, message: Message, state: ChannelProcessingState) -> None:
         """人間投稿の長時間の空白を検出し、必要に応じて短期文脈をリセットしてから保存します。"""
         short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
+        if short_term_memory.contains_message(message.id):
+            return
         if not message.author.bot and should_reset_conversation(
             state.last_human_message_timestamp,
             message.created_at,
