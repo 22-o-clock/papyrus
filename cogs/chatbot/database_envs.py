@@ -4,19 +4,19 @@ from sqlalchemy import Text, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
 
-from core.db import Base
+from .database import ChatbotBase
 
 logger = getLogger(__name__)
 
 
-class DatabaseEnvs(Base):
+class DatabaseEnvs(ChatbotBase):
     __tablename__ = "database_envs"
 
     key = mapped_column(Text, primary_key=True)
     value = mapped_column(Text)
 
     def __repr__(self) -> str:
-        """デバッグ用にキーと値を表現する。"""
+        """デバッグ用に設定キーと値を返します。"""
         return f"DatabaseEnvs(key={self.key!r}, value={self.value!r})"
 
 
