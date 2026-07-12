@@ -3,8 +3,9 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
+import discord
 from discord import Message, MessageReference
 
 from cogs.chatbot.channel_roles import ChannelRole
@@ -15,6 +16,7 @@ from cogs.chatbot.chatbot_cog import (
     CHAT_REACTION_COOLDOWN_SECONDS,
     CHAT_TEXT_COOLDOWN_SECONDS,
     ChannelProcessingState,
+    ChatBot,
     can_change_channel_role,
     can_execute_spontaneous_action,
     can_start_spontaneous_generation,
@@ -32,7 +34,7 @@ from cogs.chatbot.chatbot_cog import (
     should_respond,
     validate_exported_memory_ids,
 )
-from cogs.chatbot.responses_api import MessageInMemory, ResponseAction
+from cogs.chatbot.responses_api import LLMMessage, MessageInMemory, ResponseAction
 
 
 def make_discord_message(author_id: int) -> Message:
@@ -397,3 +399,45 @@ class ReferencedAuthorTest(unittest.TestCase):
 
         if author_id is not None:
             self.fail("返信元メッセージがない状態で発言者IDを返しています")
+
+
+class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_suppresses_embeds_for_channel_message(self) -> None:
+        cog = object.__new__(ChatBot)
+        channel = SimpleNamespace(id=100, send=AsyncMock())
+        message = cast("Message", SimpleNamespace(channel=channel))
+        state = ChannelProcessingState()
+
+        await cog.execute_response_action(
+            message,
+            LLMMessage(action=ResponseAction.MESSAGE, content="https://example.com"),
+            state,
+            is_explicit_call=True,
+        )
+
+        channel.send.assert_awaited_once_with("https://example.com", suppress_embeds=True)
+
+    async def test_suppresses_embeds_for_reply(self) -> None:
+        cog = object.__new__(ChatBot)
+        reply_to_message_id = 200
+        target_message = SimpleNamespace(reply=AsyncMock())
+        channel = Mock(spec=discord.TextChannel)
+        channel.id = 100
+        channel.get_partial_message.return_value = target_message
+        message = cast("Message", SimpleNamespace(channel=channel))
+        short_term_memory = SimpleNamespace(can_target_message=lambda message_id: message_id == reply_to_message_id)
+        cog.response_pipelines = {100: SimpleNamespace(short_term_memory=short_term_memory)}
+        state = ChannelProcessingState()
+
+        await cog.execute_response_action(
+            message,
+            LLMMessage(
+                action=ResponseAction.REPLY,
+                content="https://example.com",
+                reply_to_message_id=reply_to_message_id,
+            ),
+            state,
+            is_explicit_call=True,
+        )
+
+        target_message.reply.assert_awaited_once_with("https://example.com", suppress_embeds=True)

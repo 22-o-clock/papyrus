@@ -2299,7 +2299,7 @@ class ChatBot(commands.Cog):
             if await self._is_shadow_mode_for_message(message, is_explicit_call=is_explicit_call):
                 await self._save_shadow_candidate(message, generated_response)
                 return
-            await self._execute_response_action(message, generated_response, state, is_explicit_call=is_explicit_call)
+            await self.execute_response_action(message, generated_response, state, is_explicit_call=is_explicit_call)
 
     async def _get_long_term_memory_context(self, channel_id: int) -> str:
         """直近会話に意味的に近い有効記憶を応答用テキストへ整形します。"""
@@ -2360,7 +2360,7 @@ class ChatBot(commands.Cog):
             for memory in memories
         )
 
-    async def _execute_response_action(
+    async def execute_response_action(
         self,
         message: Message,
         response: LLMMessage,
@@ -2386,7 +2386,7 @@ class ChatBot(commands.Cog):
             return
 
         if response.action is ResponseAction.MESSAGE:
-            await message.channel.send(response.content)
+            await message.channel.send(response.content, suppress_embeds=True)
             if not is_explicit_call:
                 state.last_spontaneous_action_at = now
             return
@@ -2417,7 +2417,7 @@ class ChatBot(commands.Cog):
                 state.last_spontaneous_action_at = now
             return
 
-        await target_message.reply(response.content)
+        await target_message.reply(response.content, suppress_embeds=True)
         if not is_explicit_call:
             state.last_spontaneous_action_at = now
 
