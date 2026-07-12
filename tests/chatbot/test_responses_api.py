@@ -9,7 +9,15 @@ import discord
 from discord import Message
 
 from cogs.chatbot.channel_roles import ChannelRole
-from cogs.chatbot.responses_api import AttachmentInMemory, LLMMessage, ResponseAction, ResponsePipeline, ShortTermMemory
+from cogs.chatbot.responses_api import (
+    AttachmentInMemory,
+    LLMMessage,
+    LongTermMemoryExtractor,
+    LongTermMemoryReconciler,
+    ResponseAction,
+    ResponsePipeline,
+    ShortTermMemory,
+)
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
@@ -223,5 +231,42 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
             self.fail("一段階で生成した回答が最終結果になっていません")
         if len(responses.calls) != 1:
             self.fail("最終回答の生成でモデルが複数回呼び出されています")
-        if responses.calls[0]["model"] != "gpt-5.6-sol":
-            self.fail("最終回答がSolで生成されていません")
+        if responses.calls[0]["model"] != "gpt-5.6-terra":
+            self.fail("最終回答がTerraで生成されていません")
+
+
+class ConfigRecordingResponses:
+    """記憶処理のAPI設定を記録します。"""
+
+    def __init__(self, output_parsed: object) -> None:
+        self.output_parsed = output_parsed
+        self.calls: list[dict[str, object]] = []
+
+    async def parse(self, **kwargs: object) -> SimpleNamespace:
+        """呼び出し引数を保存して、指定された構造化結果を返します。"""
+        self.calls.append(kwargs)
+        return SimpleNamespace(output_parsed=self.output_parsed)
+
+
+class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
+    async def test_extracts_memories_with_terra_without_reasoning(self) -> None:
+        responses = ConfigRecordingResponses(SimpleNamespace(candidates=[]))
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+
+        await LongTermMemoryExtractor(client).extract([], [])
+
+        if responses.calls[0]["model"] != "gpt-5.6-terra":
+            self.fail("記憶抽出がTerraを使用していません")
+        if responses.calls[0]["reasoning"] != {"effort": "none"}:
+            self.fail("記憶抽出の推論強度がnoneになっていません")
+
+    async def test_reconciles_memories_with_terra_without_reasoning(self) -> None:
+        responses = ConfigRecordingResponses(SimpleNamespace(action="keep", existing_memory_ids=[]))
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+
+        await LongTermMemoryReconciler(client).reconcile({}, [{}], correction_only=False)
+
+        if responses.calls[0]["model"] != "gpt-5.6-terra":
+            self.fail("記憶の訂正・競合判定がTerraを使用していません")
+        if responses.calls[0]["reasoning"] != {"effort": "none"}:
+            self.fail("記憶の訂正・競合判定の推論強度がnoneになっていません")
