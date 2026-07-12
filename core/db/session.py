@@ -1,6 +1,7 @@
 import os
 from logging import getLogger
 
+from sqlalchemy import MetaData, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -22,14 +23,20 @@ def init_engine() -> async_sessionmaker[AsyncSession]:
     """Bot 起動時に1回だけ呼び出し、engine と sessionmaker を初期化して返す。"""
     global _engine
 
-    _engine = create_async_engine(
-        os.environ["SUPABASE_CONNECTION_STRING"],
+    _engine, session_factory = create_session_factory(os.environ["SUPABASE_CONNECTION_STRING"])
+    logger.info("Database engine initialized")
+    return session_factory
+
+
+def create_session_factory(connection_string: str) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+    """指定した接続先用の非同期エンジンとセッションファクトリを作成します。"""
+    engine = create_async_engine(
+        connection_string,
         pool_size=5,
         max_overflow=2,
         pool_recycle=300,
     )
-    logger.info("Database engine initialized")
-    return async_sessionmaker(_engine, expire_on_commit=False)
+    return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def dispose_engine() -> None:
@@ -44,6 +51,17 @@ async def dispose_engine() -> None:
 async def create_tables() -> None:
     """未作成のORMテーブルだけを作成します。"""
     if _engine is None:
-        raise RuntimeError("Database engine is not initialized")
-    async with _engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        message = "Database engine is not initialized"
+        raise RuntimeError(message)
+    await create_tables_for(_engine, Base.metadata)
+
+
+async def create_tables_for(engine: AsyncEngine, metadata: MetaData, *, schema: str | None = None) -> None:
+    """指定エンジンに、必要に応じてスキーマとORMテーブルを作成します。"""
+    async with engine.begin() as connection:
+        if schema is not None:
+            if not schema.isidentifier():
+                message = "Schema name must be a valid identifier"
+                raise ValueError(message)
+            await connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+        await connection.run_sync(metadata.create_all)

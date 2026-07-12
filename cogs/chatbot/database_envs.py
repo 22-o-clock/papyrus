@@ -1,22 +1,22 @@
 from logging import getLogger
-from typing import Any
 
-from sqlalchemy import CursorResult, Text, insert, select, update
+from sqlalchemy import Text, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
 
-from core.db import Base
+from .database import ChatbotBase
 
 logger = getLogger(__name__)
 
 
-class DatabaseEnvs(Base):
+class DatabaseEnvs(ChatbotBase):
     __tablename__ = "database_envs"
 
     key = mapped_column(Text, primary_key=True)
     value = mapped_column(Text)
 
     def __repr__(self) -> str:
+        """デバッグ用に設定キーと値を返します。"""
         return f"DatabaseEnvs(key={self.key!r}, value={self.value!r})"
 
 
@@ -35,7 +35,7 @@ class DatabaseEnvManager:
 
         """
         async with self._session_factory() as session:
-            cursor_result: CursorResult[Any] = await session.execute(select(DatabaseEnvs.value).where(DatabaseEnvs.key == key))
+            cursor_result = await session.execute(select(DatabaseEnvs.value).where(DatabaseEnvs.key == key))
             result = cursor_result.all()
 
         return result[0][0] if result else None
@@ -53,7 +53,7 @@ class DatabaseEnvManager:
         """
         async with self._session_factory.begin() as session:
             # 既に存在するかチェック
-            result: CursorResult[Any] = await session.execute(select(DatabaseEnvs).where(DatabaseEnvs.key == key))
+            result = await session.execute(select(DatabaseEnvs).where(DatabaseEnvs.key == key))
 
             if result.first():
                 # UPDATE

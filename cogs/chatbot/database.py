@@ -2,15 +2,21 @@ import datetime
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Text, delete, select
+from sqlalchemy import BigInteger, Boolean, ForeignKey, MetaData, Text, delete, select
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import mapped_column
+from sqlalchemy.orm import DeclarativeBase, mapped_column
 
-from core.db import Base
+CHATBOT_DATABASE_SCHEMA = "chatbot"
 
 
-class ChatbotShadowCandidate(Base):
+class ChatbotBase(DeclarativeBase):
+    """chatbot専用DBのテーブル定義の基底クラス。"""
+
+    metadata = MetaData(schema=CHATBOT_DATABASE_SCHEMA)
+
+
+class ChatbotShadowCandidate(ChatbotBase):
     """シャドーモードで保存する自発反応候補。"""
 
     __tablename__ = "chatbot_shadow_candidates"
@@ -28,7 +34,7 @@ class ChatbotShadowCandidate(Base):
     context_snapshot = mapped_column(JSONB, nullable=False)
 
 
-class ChatbotStoredMessage(Base):
+class ChatbotStoredMessage(ChatbotBase):
     """期限付きで保存する短期文脈メッセージ。"""
 
     __tablename__ = "chatbot_stored_messages"
@@ -44,13 +50,18 @@ class ChatbotStoredMessage(Base):
     is_bot = mapped_column(Boolean, nullable=False)
 
 
-class ChatbotStoredAttachment(Base):
+class ChatbotStoredAttachment(ChatbotBase):
     """短期文脈メッセージに付随する添付と解析結果。"""
 
     __tablename__ = "chatbot_stored_attachments"
 
     id = mapped_column(BigInteger, primary_key=True)
-    message_id = mapped_column(BigInteger, ForeignKey("chatbot_stored_messages.message_id"), nullable=False, index=True)
+    message_id = mapped_column(
+        BigInteger,
+        ForeignKey("chatbot.chatbot_stored_messages.message_id"),
+        nullable=False,
+        index=True,
+    )
     url = mapped_column(Text, nullable=False)
     filename = mapped_column(Text, nullable=False)
     content_type = mapped_column(Text, nullable=True)
@@ -61,13 +72,17 @@ class ChatbotStoredAttachment(Base):
     analyzed_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
-class ChatbotShadowEvaluation(Base):
+class ChatbotShadowEvaluation(ChatbotBase):
     """管理者がCSVから取り込んだシャドー候補の評価。"""
 
     __tablename__ = "chatbot_shadow_evaluations"
 
     id = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    candidate_id = mapped_column(UUID(as_uuid=True), ForeignKey("chatbot_shadow_candidates.id"), nullable=False)
+    candidate_id = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chatbot.chatbot_shadow_candidates.id"),
+        nullable=False,
+    )
     evaluator_user_id = mapped_column(BigInteger, nullable=False)
     action_appropriate = mapped_column(Text, nullable=False)
     context_understood = mapped_column(Text, nullable=False)
