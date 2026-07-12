@@ -8,13 +8,14 @@ from discord import Intents
 from discord.ext import commands
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from cogs import admin, agree, chatbot, remind, speak, voicevox
+from cogs import admin, agree, audit, chatbot, remind, speak, voicevox
 from core.db import dispose_engine, init_engine
 
 
 async def load_all_cogs(bot: commands.Bot, session_factory: async_sessionmaker) -> None:
     await admin.setup(bot)
     await agree.setup(bot)
+    await audit.setup(bot)
     await chatbot.setup(bot, session_factory)
     await remind.setup(bot, session_factory)
     await speak.setup(bot)
