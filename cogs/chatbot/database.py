@@ -12,6 +12,7 @@ from sqlalchemy.sql import text
 from core.db import create_tables_for
 
 CHATBOT_DATABASE_SCHEMA = "chatbot"
+EMBEDDING_DIMENSIONS = 3072
 
 
 class ChatbotBase(DeclarativeBase):
@@ -93,7 +94,7 @@ class ChatbotLongTermMemory(ChatbotBase):
     last_referenced_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     expires_at = mapped_column(TIMESTAMP(timezone=True), nullable=True, index=True)
     invalidated_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    embedding = mapped_column(Vector(1536), nullable=True)
+    embedding = mapped_column(Vector(EMBEDDING_DIMENSIONS), nullable=True)
 
 
 class ChatbotLongTermMemoryEvidence(ChatbotBase):
@@ -397,6 +398,41 @@ class ChatbotShortTermMessageStore:
             attachment.important_text = important_text
             attachment.analysis_status = status
             attachment.analyzed_at = datetime.datetime.now(datetime.UTC)
+
+
+class ChatbotMemoryExtractionQueueStore:
+    """長期記憶抽出の対象メッセージを永続化します。"""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def enqueue(self, message_id: int, channel_id: int) -> None:
+        """人間投稿を未処理キューへ追加し、編集後の投稿は再処理対象へ戻します。"""
+        now = datetime.datetime.now(datetime.UTC)
+        async with self._session_factory.begin() as session:
+            queue_item = await session.get(ChatbotMemoryExtractionQueue, message_id)
+            if queue_item is None:
+                session.add(
+                    ChatbotMemoryExtractionQueue(
+                        message_id=message_id,
+                        channel_id=channel_id,
+                        queued_at=now,
+                        status="pending",
+                        attempt_count=0,
+                    )
+                )
+                return
+            queue_item.channel_id = channel_id
+            queue_item.queued_at = now
+            queue_item.status = "pending"
+            queue_item.attempt_count = 0
+
+    async def delete(self, message_id: int) -> None:
+        """削除された投稿を抽出待ちキューから取り除きます。"""
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                delete(ChatbotMemoryExtractionQueue).where(ChatbotMemoryExtractionQueue.message_id == message_id)
+            )
 
 
 async def create_chatbot_tables(engine: AsyncEngine) -> None:

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .channel_roles import ChannelRole, ChannelRoleManager
 from .database import (
+    ChatbotMemoryExtractionQueueStore,
     ChatbotShadowCandidateStore,
     ChatbotShortTermMessageStore,
     ShadowCandidateInput,
@@ -240,6 +241,7 @@ class ChatBot(commands.Cog):
         self.shadow_mode_manager = ShadowModeManager(self.env_manager)
         self.shadow_candidate_store = ChatbotShadowCandidateStore(session_factory)
         self.short_term_message_store = ChatbotShortTermMessageStore(session_factory)
+        self.memory_extraction_queue = ChatbotMemoryExtractionQueueStore(session_factory)
 
         self._initialization_lock = asyncio.Lock()
         self._channel_states: dict[int, ChannelProcessingState] = {}
@@ -704,6 +706,8 @@ class ChatBot(commands.Cog):
         if message.author.bot:
             return
 
+        await self.memory_extraction_queue.enqueue(message.id, message.channel.id)
+
         bot_user = self.bot.user
         if bot_user is None:
             return
@@ -884,6 +888,7 @@ class ChatBot(commands.Cog):
     async def on_message_delete(self, message: Message) -> None:
         """待機中の質問が削除された場合は、遅延した回答を取り消します。"""
         await self.short_term_message_store.delete(message.id)
+        await self.memory_extraction_queue.delete(message.id)
         state = self._channel_states.get(message.channel.id)
         if state is None:
             return
@@ -944,6 +949,9 @@ class ChatBot(commands.Cog):
                         attachment.url,
                         attachment_kind,
                     )
+
+            if not after.author.bot:
+                await self.memory_extraction_queue.enqueue(after.id, after.channel.id)
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
         """受信したメッセージが、このボットの発言へのDiscord返信か判定します。
