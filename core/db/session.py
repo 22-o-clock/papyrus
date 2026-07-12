@@ -28,14 +28,20 @@ def init_engine() -> async_sessionmaker[AsyncSession]:
     return session_factory
 
 
-def create_session_factory(connection_string: str) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+def create_session_factory(
+    connection_string: str,
+    *,
+    search_path: str | None = None,
+) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
     """指定した接続先用の非同期エンジンとセッションファクトリを作成します。"""
-    engine = create_async_engine(
-        connection_string,
-        pool_size=5,
-        max_overflow=2,
-        pool_recycle=300,
-    )
+    engine_options: dict[str, object] = {
+        "pool_size": 5,
+        "max_overflow": 2,
+        "pool_recycle": 300,
+    }
+    if search_path is not None:
+        engine_options["connect_args"] = {"server_settings": {"search_path": search_path}}
+    engine = create_async_engine(connection_string, **engine_options)
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 

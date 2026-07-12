@@ -2,10 +2,14 @@ import datetime
 import uuid
 from dataclasses import dataclass
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import BigInteger, Boolean, ForeignKey, MetaData, Text, delete, select
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, mapped_column
+from sqlalchemy.sql import text
+
+from core.db import create_tables_for
 
 CHATBOT_DATABASE_SCHEMA = "chatbot"
 
@@ -70,6 +74,56 @@ class ChatbotStoredAttachment(ChatbotBase):
     important_text = mapped_column(Text, nullable=True)
     analysis_status = mapped_column(Text, nullable=False)
     analyzed_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class ChatbotLongTermMemory(ChatbotBase):
+    """根拠と状態を保持する長期記憶。"""
+
+    __tablename__ = "chatbot_long_term_memories"
+
+    id = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    target_user_id = mapped_column(BigInteger, nullable=True, index=True)
+    kind = mapped_column(Text, nullable=False)
+    content = mapped_column(Text, nullable=False)
+    source_type = mapped_column(Text, nullable=False)
+    status = mapped_column(Text, nullable=False, index=True)
+    is_sensitive = mapped_column(Boolean, nullable=False, default=False)
+    is_pinned = mapped_column(Boolean, nullable=False, default=False)
+    created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
+    last_referenced_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    expires_at = mapped_column(TIMESTAMP(timezone=True), nullable=True, index=True)
+    invalidated_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    embedding = mapped_column(Vector(1536), nullable=True)
+
+
+class ChatbotLongTermMemoryEvidence(ChatbotBase):
+    """長期記憶を裏付けるDiscord投稿。"""
+
+    __tablename__ = "chatbot_long_term_memory_evidences"
+
+    id = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    memory_id = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chatbot.chatbot_long_term_memories.id"),
+        nullable=False,
+        index=True,
+    )
+    message_id = mapped_column(BigInteger, nullable=False, index=True)
+    author_id = mapped_column(BigInteger, nullable=False)
+    excerpt = mapped_column(Text, nullable=False)
+    created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class ChatbotMemoryExtractionQueue(ChatbotBase):
+    """まとめて抽出する長期記憶候補のメッセージキュー。"""
+
+    __tablename__ = "chatbot_memory_extraction_queue"
+
+    message_id = mapped_column(BigInteger, primary_key=True)
+    channel_id = mapped_column(BigInteger, nullable=False, index=True)
+    queued_at = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    status = mapped_column(Text, nullable=False, index=True)
+    attempt_count = mapped_column(BigInteger, nullable=False, default=0)
 
 
 class ChatbotShadowEvaluation(ChatbotBase):
@@ -343,3 +397,10 @@ class ChatbotShortTermMessageStore:
             attachment.important_text = important_text
             attachment.analysis_status = status
             attachment.analyzed_at = datetime.datetime.now(datetime.UTC)
+
+
+async def create_chatbot_tables(engine: AsyncEngine) -> None:
+    """chatbotスキーマのテーブルと意味検索用拡張を作成します。"""
+    async with engine.begin() as connection:
+        await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions"))
+    await create_tables_for(engine, ChatbotBase.metadata, schema=CHATBOT_DATABASE_SCHEMA)
