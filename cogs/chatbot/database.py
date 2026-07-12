@@ -93,9 +93,12 @@ class ChatbotLongTermMemory(ChatbotBase):
     is_sensitive = mapped_column(Boolean, nullable=False, default=False)
     is_pinned = mapped_column(Boolean, nullable=False, default=False)
     created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
+    observed_at = mapped_column(TIMESTAMP(timezone=True), nullable=True, index=True)
     last_referenced_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     expires_at = mapped_column(TIMESTAMP(timezone=True), nullable=True, index=True)
     invalidated_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    superseded_by_memory_id = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    conflict_group_id = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     embedding = mapped_column(Vector(EMBEDDING_DIMENSIONS), nullable=True)
 
 
@@ -115,6 +118,19 @@ class ChatbotLongTermMemoryEvidence(ChatbotBase):
     author_id = mapped_column(BigInteger, nullable=False)
     excerpt = mapped_column(Text, nullable=False)
     created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class ChatbotLongTermMemoryChange(ChatbotBase):
+    """長期記憶の訂正・否定・競合の監査記録。"""
+
+    __tablename__ = "chatbot_long_term_memory_changes"
+
+    id = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    action = mapped_column(Text, nullable=False)
+    new_memory_id = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    existing_memory_ids = mapped_column(JSONB, nullable=False)
+    evidence_message_ids = mapped_column(JSONB, nullable=False)
+    created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
 
 
 class ChatbotMemberAlias(ChatbotBase):
@@ -256,6 +272,16 @@ class LongTermMemoryInput:
     evidence_author_ids: list[int]
     evidence_excerpts: list[str]
     embedding: list[float]
+    observed_at: datetime.datetime
+
+
+@dataclass
+class MemoryReconciliationInput:
+    """既存記憶へ適用する訂正・否定・競合関係。"""
+
+    action: str
+    existing_memory_ids: list[uuid.UUID]
+    evidence_message_ids: list[int]
 
 
 @dataclass
@@ -608,7 +634,7 @@ class ChatbotLongTermMemoryStore:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def save(self, memory: LongTermMemoryInput) -> None:
+    async def save(self, memory: LongTermMemoryInput) -> uuid.UUID:
         """長期記憶とその根拠投稿をまとめて保存します。"""
         now = datetime.datetime.now(datetime.UTC)
         expiration_days = {"ongoing": 90, "temporary": 7, "shared": 180}
@@ -625,6 +651,7 @@ class ChatbotLongTermMemoryStore:
                 is_sensitive=memory.is_sensitive,
                 is_pinned=False,
                 created_at=now,
+                observed_at=memory.observed_at,
                 expires_at=expires_at,
                 embedding=memory.embedding,
             )
@@ -645,6 +672,83 @@ class ChatbotLongTermMemoryStore:
                         created_at=now,
                     )
                 )
+            return stored_memory.id
+
+    async def get_active_for_target(
+        self,
+        target_user_id: int | None,
+        external_entity_name: str | None,
+    ) -> list[ChatbotLongTermMemory]:
+        """訂正判定の比較対象となる同一対象の有効記憶を返します。"""
+        async with self._session_factory() as session:
+            target_condition = (
+                ChatbotLongTermMemory.target_user_id == target_user_id
+                if target_user_id is not None
+                else ChatbotLongTermMemory.external_entity_name == external_entity_name
+            )
+            result = await session.execute(
+                select(ChatbotLongTermMemory)
+                .where(ChatbotLongTermMemory.status == "active", target_condition)
+                .order_by(ChatbotLongTermMemory.created_at.desc())
+                .limit(50)
+            )
+            return list(result.scalars().all())
+
+    async def get_all_active_ordered(self) -> list[ChatbotLongTermMemory]:
+        """既存記憶の一度限りの整理用に、有効記憶を古い順で返します。"""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ChatbotLongTermMemory)
+                .where(ChatbotLongTermMemory.status == "active")
+                .order_by(ChatbotLongTermMemory.observed_at, ChatbotLongTermMemory.created_at)
+            )
+            return list(result.scalars().all())
+
+    async def apply_reconciliation(
+        self,
+        reconciliation: MemoryReconciliationInput,
+        *,
+        new_memory_id: uuid.UUID | None,
+    ) -> None:
+        """モデルが選んだ既存記憶だけへ訂正・否定・競合状態を適用します。"""
+        if reconciliation.action == "keep" or not reconciliation.existing_memory_ids:
+            return
+        now = datetime.datetime.now(datetime.UTC)
+        async with self._session_factory.begin() as session:
+            result = await session.execute(
+                select(ChatbotLongTermMemory).where(
+                    ChatbotLongTermMemory.id.in_(reconciliation.existing_memory_ids),
+                    ChatbotLongTermMemory.status == "active",
+                )
+            )
+            memories = list(result.scalars().all())
+            if reconciliation.action == "supersede" and new_memory_id is not None:
+                for memory in memories:
+                    memory.status = "superseded"
+                    memory.superseded_by_memory_id = new_memory_id
+                    memory.invalidated_at = now
+            elif reconciliation.action == "invalidate":
+                for memory in memories:
+                    memory.status = "invalidated"
+                    memory.invalidated_at = now
+            elif reconciliation.action == "conflict" and new_memory_id is not None:
+                conflict_group_id = uuid.uuid4()
+                for memory in memories:
+                    memory.status = "conflicted"
+                    memory.conflict_group_id = conflict_group_id
+                new_memory = await session.get(ChatbotLongTermMemory, new_memory_id)
+                if new_memory is not None:
+                    new_memory.status = "conflicted"
+                    new_memory.conflict_group_id = conflict_group_id
+            session.add(
+                ChatbotLongTermMemoryChange(
+                    action=reconciliation.action,
+                    new_memory_id=new_memory_id,
+                    existing_memory_ids=[str(memory.id) for memory in memories],
+                    evidence_message_ids=reconciliation.evidence_message_ids,
+                    created_at=now,
+                )
+            )
 
     async def search(
         self,
@@ -913,4 +1017,26 @@ async def create_chatbot_tables(engine: AsyncEngine) -> None:
     """chatbotスキーマのテーブルと意味検索用拡張を作成します。"""
     async with engine.begin() as connection:
         await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions"))
+        await connection.execute(
+            text(
+                "ALTER TABLE IF EXISTS chatbot.chatbot_long_term_memories "
+                "ADD COLUMN IF NOT EXISTS superseded_by_memory_id UUID, "
+                "ADD COLUMN IF NOT EXISTS conflict_group_id UUID, "
+                "ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ"
+            )
+        )
     await create_tables_for(engine, ChatbotBase.metadata, schema=CHATBOT_DATABASE_SCHEMA)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE chatbot.chatbot_long_term_memories AS memory SET observed_at = source.observed_at "
+                "FROM (SELECT evidence.memory_id, MIN(message.created_at) AS observed_at "
+                "FROM chatbot.chatbot_long_term_memory_evidences AS evidence "
+                "JOIN chatbot.chatbot_stored_messages AS message ON message.message_id = evidence.message_id "
+                "GROUP BY evidence.memory_id) AS source "
+                "WHERE memory.id = source.memory_id AND memory.observed_at IS NULL"
+            )
+        )
+        await connection.execute(
+            text("UPDATE chatbot.chatbot_long_term_memories SET observed_at = created_at WHERE observed_at IS NULL")
+        )

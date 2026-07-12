@@ -1,5 +1,6 @@
 import datetime
 import json
+import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from logging import getLogger
@@ -13,7 +14,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, model_validator
 
 from .channel_roles import ChannelRole
-from .prompt import draft_generator_prompt, memory_extraction_prompt, response_styler_prompt
+from .prompt import draft_generator_prompt, memory_extraction_prompt, memory_reconciliation_prompt, response_styler_prompt
 
 logger = getLogger(__name__)
 
@@ -383,11 +384,61 @@ class MemberAliasCandidate(BaseModel):
     evidence_message_ids: list[int]
 
 
+class LongTermMemoryCorrectionCandidate(BaseModel):
+    """新しい事実を伴わない明示的な否定候補。"""
+
+    target_user_id: int | None
+    external_entity_name: str | None = None
+    statement: str
+    evidence_message_ids: list[int]
+    source_type: Literal["self_statement", "third_party", "inference"]
+
+
 class LongTermMemoryExtraction(BaseModel):
     """一括抽出した長期記憶候補の集合。"""
 
     candidates: list[LongTermMemoryCandidate]
     aliases: list[MemberAliasCandidate] = Field(default_factory=list)
+    corrections: list[LongTermMemoryCorrectionCandidate] = Field(default_factory=list)
+
+
+class MemoryReconciliation(BaseModel):
+    """新しい情報と既存記憶の関係判定。"""
+
+    action: Literal["keep", "supersede", "invalidate", "conflict"]
+    existing_memory_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class LongTermMemoryReconciler:
+    """新しい情報が既存記憶を訂正・否定するか判定します。"""
+
+    def __init__(self, client: AsyncOpenAI) -> None:
+        self.client = client
+
+    async def reconcile(
+        self,
+        new_information: dict[str, object],
+        existing_memories: list[dict[str, object]],
+        *,
+        correction_only: bool,
+    ) -> MemoryReconciliation:
+        """明確な矛盾だけを構造化された関係として返します。"""
+        if not existing_memories:
+            return MemoryReconciliation(action="keep")
+        response = await self.client.responses.parse(
+            model=MEMORY_EXTRACTION_MODEL,
+            instructions=memory_reconciliation_prompt.MEMORY_RECONCILIATION_INSTRUCTIONS,
+            input=json.dumps(
+                {
+                    "new_information": new_information,
+                    "existing_memories": existing_memories,
+                    "correction_only": correction_only,
+                },
+                ensure_ascii=False,
+            ),
+            text_format=MemoryReconciliation,
+        )
+        return response.output_parsed or MemoryReconciliation(action="keep")
 
 
 class LongTermMemoryExtractor:

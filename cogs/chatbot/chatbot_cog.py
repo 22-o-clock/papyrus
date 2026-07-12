@@ -35,6 +35,7 @@ from .database import (
     MemberAliasInput,
     MemberAliasReviewRecord,
     MemberAliasUpdateInput,
+    MemoryReconciliationInput,
     ShadowCandidateInput,
     ShadowEvaluationInput,
     StoredAttachmentInput,
@@ -46,7 +47,11 @@ from .database_envs import DatabaseEnvManager
 from .responses_api import (
     AttachmentInMemory,
     LLMMessage,
+    LongTermMemoryCandidate,
+    LongTermMemoryCorrectionCandidate,
     LongTermMemoryExtractor,
+    LongTermMemoryReconciler,
+    MemberAliasCandidate,
     MessageInMemory,
     ResponseAction,
     ResponsePipeline,
@@ -73,6 +78,8 @@ MEMORY_EXTRACTION_BATCH_SIZE = 5
 MEMORY_EXTRACTION_WAIT_SECONDS = 10 * 60
 MEMORY_SEARCH_CONTEXT_MESSAGE_COUNT = 10
 MEMORY_SEARCH_MAXIMUM_COSINE_DISTANCE = 0.70
+MEMORY_RECONCILIATION_VERSION_KEY = "CHATBOT_MEMORY_RECONCILIATION_VERSION"
+MEMORY_RECONCILIATION_VERSION = "2"
 
 QUESTION_ENDING_PATTERN = re.compile(r"(?:\?|ですか|ますか|でしょうか|かな|の\?|何\?|どう\?|誰\?|どこ\?|いつ\?)$")
 SHADOW_EVALUATION_FIELDS = (
@@ -300,8 +307,10 @@ class ChatBot(commands.Cog):
         self.long_term_memory_store = ChatbotLongTermMemoryStore(session_factory)
         self.member_alias_store = ChatbotMemberAliasStore(session_factory)
         self.long_term_memory_extractor = LongTermMemoryExtractor(AsyncOpenAI())
+        self.long_term_memory_reconciler = LongTermMemoryReconciler(AsyncOpenAI())
         self._memory_extraction_task: asyncio.Task[None] | None = None
         self._memory_queue_recovered = False
+        self._memory_reconciliation_started = False
 
         self._initialization_lock = asyncio.Lock()
         self._channel_states: dict[int, ChannelProcessingState] = {}
@@ -393,6 +402,46 @@ class ChatBot(commands.Cog):
             await self.memory_extraction_queue.recover_interrupted()
             self._memory_queue_recovered = True
         await self._schedule_memory_extraction()
+        if not self._memory_reconciliation_started:
+            self._memory_reconciliation_started = True
+            task = asyncio.create_task(self._reconcile_existing_memories_once())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
+    async def _reconcile_existing_memories_once(self) -> None:
+        """導入前から存在する記憶を古い順に一度だけ訂正・競合判定します。"""
+        if await self.env_manager.get_env(MEMORY_RECONCILIATION_VERSION_KEY) == MEMORY_RECONCILIATION_VERSION:
+            return
+        memories = await self.long_term_memory_store.get_all_active_ordered()
+        for memory in memories:
+            current_active = await self.long_term_memory_store.get_active_for_target(
+                memory.target_user_id,
+                memory.external_entity_name,
+            )
+            memory_time = memory.observed_at or memory.created_at
+            earlier_memories = [
+                candidate for candidate in current_active if (candidate.observed_at or candidate.created_at) < memory_time
+            ]
+            if not earlier_memories:
+                continue
+            reconciliation = await self.long_term_memory_reconciler.reconcile(
+                self._stored_memory_for_reconciliation(memory),
+                [self._stored_memory_for_reconciliation(candidate) for candidate in earlier_memories],
+                correction_only=False,
+            )
+            if reconciliation.action not in {"supersede", "conflict"}:
+                continue
+            allowed_ids = {candidate.id for candidate in earlier_memories}
+            reconciliation_ids = [memory_id for memory_id in reconciliation.existing_memory_ids if memory_id in allowed_ids]
+            await self.long_term_memory_store.apply_reconciliation(
+                MemoryReconciliationInput(
+                    action=reconciliation.action,
+                    existing_memory_ids=reconciliation_ids,
+                    evidence_message_ids=[],
+                ),
+                new_memory_id=memory.id,
+            )
+        await self.env_manager.set_env(MEMORY_RECONCILIATION_VERSION_KEY, MEMORY_RECONCILIATION_VERSION)
 
     async def _load_positive_minutes(self, key: str, default: int) -> int:
         """DBに保存した分単位の正の整数設定を読み込み、異常値は既定値へ戻します。"""
@@ -1111,19 +1160,39 @@ class ChatBot(commands.Cog):
                 }
                 for member in members
             }
-            for alias_candidate in extraction.aliases:
-                if alias_candidate.target_user_id not in member_ids:
-                    continue
-                normalized_alias = normalize_member_alias(alias_candidate.alias)
-                if not normalized_alias or normalized_alias in member_names[alias_candidate.target_user_id]:
-                    continue
-                evidence = [
-                    messages_by_id[message_id]
-                    for message_id in alias_candidate.evidence_message_ids
-                    if message_id in messages_by_id
-                ]
-                if not evidence:
-                    continue
+            await self._save_extracted_aliases(extraction.aliases, messages_by_id, member_ids, member_names)
+            active_aliases = await self.member_alias_store.get_active_aliases()
+            for candidate in extraction.candidates:
+                await self._save_extracted_memory(candidate, messages_by_id, member_ids, active_aliases)
+            for correction in extraction.corrections:
+                await self._apply_memory_correction(correction, messages_by_id, member_ids, active_aliases)
+        except Exception:
+            logger.exception("Failed to extract chatbot long-term memories (message_ids=%s)", message_ids)
+            await self.memory_extraction_queue.restore_pending(message_ids)
+            return False
+        await self.memory_extraction_queue.complete(message_ids)
+        return True
+
+    async def _save_extracted_aliases(
+        self,
+        alias_candidates: list[MemberAliasCandidate],
+        messages_by_id: dict[int, MessageInMemory],
+        member_ids: set[int],
+        member_names: dict[int, set[str]],
+    ) -> None:
+        """抽出された別名のうち、実在メンバーと根拠を確認できるものだけ保存します。"""
+        for alias_candidate in alias_candidates:
+            normalized_alias = normalize_member_alias(alias_candidate.alias)
+            if alias_candidate.target_user_id not in member_ids or not normalized_alias:
+                continue
+            if normalized_alias in member_names[alias_candidate.target_user_id]:
+                continue
+            evidence = [
+                messages_by_id[message_id]
+                for message_id in alias_candidate.evidence_message_ids
+                if message_id in messages_by_id
+            ]
+            if evidence:
                 await self.member_alias_store.save(
                     MemberAliasInput(
                         alias=alias_candidate.alias,
@@ -1133,46 +1202,107 @@ class ChatBot(commands.Cog):
                         evidence_excerpts=[message.content for message in evidence],
                     )
                 )
-            active_aliases = await self.member_alias_store.get_active_aliases()
-            for candidate in extraction.candidates:
-                evidence = [
-                    messages_by_id[message_id] for message_id in candidate.evidence_message_ids if message_id in messages_by_id
-                ]
-                if not evidence:
-                    continue
-                target_user_id = candidate.target_user_id if candidate.target_user_id in member_ids else None
-                if target_user_id is None and candidate.external_entity_name:
-                    target_user_id = active_aliases.get(normalize_member_alias(candidate.external_entity_name))
-                external_entity_name = candidate.external_entity_name if target_user_id is None else None
-                target_resolution = self._normalize_memory_target_resolution(
-                    target_user_id,
-                    external_entity_name,
-                )
-                embedding_response = await AsyncOpenAI().embeddings.create(
-                    model="text-embedding-3-large",
-                    input=candidate.content,
-                )
-                await self.long_term_memory_store.save(
-                    LongTermMemoryInput(
-                        target_user_id=target_user_id,
-                        external_entity_name=external_entity_name,
-                        target_resolution=target_resolution,
-                        kind=candidate.kind,
-                        content=candidate.content,
-                        source_type=candidate.source_type,
-                        is_sensitive=candidate.is_sensitive,
-                        evidence_message_ids=[message.message_id for message in evidence],
-                        evidence_author_ids=[message.author_id for message in evidence],
-                        evidence_excerpts=[message.content for message in evidence],
-                        embedding=embedding_response.data[0].embedding,
-                    )
-                )
-        except Exception:
-            logger.exception("Failed to extract chatbot long-term memories (message_ids=%s)", message_ids)
-            await self.memory_extraction_queue.restore_pending(message_ids)
-            return False
-        await self.memory_extraction_queue.complete(message_ids)
-        return True
+
+    async def _save_extracted_memory(
+        self,
+        candidate: LongTermMemoryCandidate,
+        messages_by_id: dict[int, MessageInMemory],
+        member_ids: set[int],
+        active_aliases: dict[str, int],
+    ) -> None:
+        """新規記憶を保存し、既存記憶との訂正・競合関係を適用します。"""
+        evidence = [messages_by_id[message_id] for message_id in candidate.evidence_message_ids if message_id in messages_by_id]
+        if not evidence:
+            return
+        target_user_id = candidate.target_user_id if candidate.target_user_id in member_ids else None
+        if target_user_id is None and candidate.external_entity_name:
+            target_user_id = active_aliases.get(normalize_member_alias(candidate.external_entity_name))
+        external_entity_name = candidate.external_entity_name if target_user_id is None else None
+        embedding_response = await AsyncOpenAI().embeddings.create(model="text-embedding-3-large", input=candidate.content)
+        existing_memories = await self.long_term_memory_store.get_active_for_target(target_user_id, external_entity_name)
+        reconciliation = await self.long_term_memory_reconciler.reconcile(
+            self._memory_candidate_for_reconciliation(candidate),
+            [self._stored_memory_for_reconciliation(memory) for memory in existing_memories],
+            correction_only=False,
+        )
+        allowed_ids = {memory.id for memory in existing_memories}
+        reconciliation_ids = [memory_id for memory_id in reconciliation.existing_memory_ids if memory_id in allowed_ids]
+        if reconciliation.action == "invalidate":
+            reconciliation.action = "keep"
+            reconciliation_ids = []
+        stored_memory_id = await self.long_term_memory_store.save(
+            LongTermMemoryInput(
+                target_user_id=target_user_id,
+                external_entity_name=external_entity_name,
+                target_resolution=self._normalize_memory_target_resolution(target_user_id, external_entity_name),
+                kind=candidate.kind,
+                content=candidate.content,
+                source_type=candidate.source_type,
+                is_sensitive=candidate.is_sensitive,
+                evidence_message_ids=[message.message_id for message in evidence],
+                evidence_author_ids=[message.author_id for message in evidence],
+                evidence_excerpts=[message.content for message in evidence],
+                embedding=embedding_response.data[0].embedding,
+                observed_at=min(message.timestamp for message in evidence),
+            )
+        )
+        await self.long_term_memory_store.apply_reconciliation(
+            MemoryReconciliationInput(
+                action=reconciliation.action,
+                existing_memory_ids=reconciliation_ids,
+                evidence_message_ids=[message.message_id for message in evidence],
+            ),
+            new_memory_id=stored_memory_id,
+        )
+
+    def _memory_candidate_for_reconciliation(self, candidate: LongTermMemoryCandidate) -> dict[str, object]:
+        """新規記憶候補を訂正判定モデルの入力へ整形します。"""
+        return {"content": candidate.content, "source_type": candidate.source_type}
+
+    def _stored_memory_for_reconciliation(self, memory: ChatbotLongTermMemory) -> dict[str, object]:
+        """既存記憶を訂正判定モデルの入力へ整形します。"""
+        return {
+            "id": str(memory.id),
+            "content": memory.content,
+            "source_type": memory.source_type,
+            "observed_at": (memory.observed_at or memory.created_at).isoformat(),
+        }
+
+    async def _apply_memory_correction(
+        self,
+        correction: LongTermMemoryCorrectionCandidate,
+        messages_by_id: dict[int, MessageInMemory],
+        member_ids: set[int],
+        active_aliases: dict[str, int],
+    ) -> None:
+        """新しい事実を伴わない明示的否定を、対象が明確な場合だけ適用します。"""
+        evidence = [
+            messages_by_id[message_id] for message_id in correction.evidence_message_ids if message_id in messages_by_id
+        ]
+        if not evidence:
+            return
+        target_user_id = correction.target_user_id if correction.target_user_id in member_ids else None
+        if target_user_id is None and correction.external_entity_name:
+            target_user_id = active_aliases.get(normalize_member_alias(correction.external_entity_name))
+        external_entity_name = correction.external_entity_name if target_user_id is None else None
+        existing_memories = await self.long_term_memory_store.get_active_for_target(target_user_id, external_entity_name)
+        reconciliation = await self.long_term_memory_reconciler.reconcile(
+            {"content": correction.statement, "source_type": correction.source_type},
+            [self._stored_memory_for_reconciliation(memory) for memory in existing_memories],
+            correction_only=True,
+        )
+        if reconciliation.action != "invalidate":
+            return
+        allowed_ids = {memory.id for memory in existing_memories}
+        reconciliation_ids = [memory_id for memory_id in reconciliation.existing_memory_ids if memory_id in allowed_ids]
+        await self.long_term_memory_store.apply_reconciliation(
+            MemoryReconciliationInput(
+                action="invalidate",
+                existing_memory_ids=reconciliation_ids,
+                evidence_message_ids=[message.message_id for message in evidence],
+            ),
+            new_memory_id=None,
+        )
 
     def _normalize_memory_target_resolution(
         self,
