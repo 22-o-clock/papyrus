@@ -75,11 +75,10 @@ def should_respond(
     *,
     mentioned_bot: bool,
     replied_to_bot: bool,
-    spontaneous_chat_reply: bool,
 ) -> bool:
-    """チャンネル役割と呼びかけ方法から返信の要否を決定します。"""
+    """チャンネル役割と呼びかけ方法から、応答判断を開始するか決定します。"""
     explicitly_called = mentioned_bot or replied_to_bot
-    return explicitly_called or (role is ChannelRole.CHAT and spontaneous_chat_reply)
+    return explicitly_called or role is ChannelRole.CHAT
 
 
 class ChatBot(commands.Cog):
@@ -92,8 +91,6 @@ class ChatBot(commands.Cog):
         self._initialization_lock = asyncio.Lock()
         self._channel_states: dict[int, ChannelProcessingState] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
-
-        self.reply_probability = 0.15
 
     async def initialize_response_pipeline_for_channel(self, channel_id: int) -> None:
         if self.bot.user:
@@ -112,25 +109,6 @@ class ChatBot(commands.Cog):
                     await self.initialize_response_pipeline_for_channel(channel_id)
                     self._channel_states[channel_id] = ChannelProcessingState()
         return self._channel_states[channel_id]
-
-    @commands.Cog.listener()
-    async def on_ready(self) -> None:
-        # chat役割のチャンネルで使用する自発返信確率を取得
-        self.reply_probability = float(await self.env_manager.get_env("REPLY_PROBABILITY") or 0.15)
-
-    @app_commands.command(
-        description="chat役割のチャンネルでボットが自発返信する確率を変更します (0から1の間)",
-    )
-    async def change_reply_probability(self, interaction: discord.Interaction, probability: float) -> None:
-        if not 0 <= probability <= 1:
-            await interaction.response.send_message("確率は0から1の間で指定してください。", ephemeral=True)
-            return
-
-        await interaction.response.send_message(
-            f"ボットの返信確率を {self.reply_probability:.2f} から {probability:.2f} に変更しました。"
-        )
-        self.reply_probability = probability
-        await self.env_manager.set_env("REPLY_PROBABILITY", str(probability))
 
     @app_commands.command(name="show_chatbot_role", description="このチャンネルでのChatbotの役割を表示します")
     async def show_chatbot_role(self, interaction: discord.Interaction) -> None:
@@ -231,13 +209,10 @@ class ChatBot(commands.Cog):
         role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
         mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
         replied_to_bot = await self._is_reply_to_bot(message)
-        spontaneous_chat_reply = role is ChannelRole.CHAT and random.SystemRandom().random() < self.reply_probability
-
         response_required = should_respond(
             role,
             mentioned_bot=mentioned_bot,
             replied_to_bot=replied_to_bot,
-            spontaneous_chat_reply=spontaneous_chat_reply,
         )
         await self._update_response_schedule(message if response_required else None, state, role)
 
