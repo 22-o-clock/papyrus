@@ -7,13 +7,8 @@ from typing import TYPE_CHECKING
 from openai import AsyncOpenAI
 
 from cogs.chatbot.constants import MEMORY_SEARCH_CONTEXT_MESSAGE_COUNT, MEMORY_SEARCH_MAXIMUM_COSINE_DISTANCE
-from cogs.chatbot.database import (
-    ChatbotLongTermMemory,
-    ChatbotLongTermMemoryStore,
-    ChatbotMemberAliasStore,
-    find_user_ids_by_member_alias,
-)
 from cogs.chatbot.observability import log_chatbot_api_call
+from cogs.chatbot.repositories.member_alias import find_user_ids_by_member_alias
 from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
 if TYPE_CHECKING:
@@ -21,6 +16,8 @@ if TYPE_CHECKING:
 
     from discord.ext import commands
 
+    from cogs.chatbot.repositories.long_term_memory import ChatbotLongTermMemory, ChatbotLongTermMemoryRepository
+    from cogs.chatbot.repositories.member_alias import ChatbotMemberAliasRepository
     from cogs.chatbot.responses_api import ResponsePipeline
 
 logger = getLogger(__name__)
@@ -33,13 +30,13 @@ class MemorySearchUseCases:
         self,
         bot: commands.Bot,
         response_pipelines: dict[int, ResponsePipeline],
-        memory_store: ChatbotLongTermMemoryStore,
-        alias_store: ChatbotMemberAliasStore,
+        memory_repository: ChatbotLongTermMemoryRepository,
+        alias_repository: ChatbotMemberAliasRepository,
     ) -> None:
         self._bot = bot
         self._response_pipelines = response_pipelines
-        self._memory_store = memory_store
-        self._alias_store = alias_store
+        self._memory_repository = memory_repository
+        self._alias_repository = alias_repository
 
     async def build_response_context(self, channel_id: int) -> str:
         """直近会話に意味的に近い有効記憶を応答用テキストへ整形する。"""
@@ -70,11 +67,11 @@ class MemorySearchUseCases:
                 known_names = {member.display_name.casefold(), member.name.casefold()}
                 if any(name and name in normalized_context for name in known_names):
                     target_user_ids.add(member.id)
-            active_aliases = await self._alias_store.get_active_aliases()
+            active_aliases = await self._alias_repository.get_active_aliases()
             target_user_ids.update(find_user_ids_by_member_alias(search_context, active_aliases))
             memories_by_id: dict[uuid.UUID, ChatbotLongTermMemory] = {}
             for embedding_data in embedding_response.data:
-                memories = await self._memory_store.search(
+                memories = await self._memory_repository.search(
                     embedding_data.embedding,
                     target_user_ids,
                     MEMORY_SEARCH_MAXIMUM_COSINE_DISTANCE,

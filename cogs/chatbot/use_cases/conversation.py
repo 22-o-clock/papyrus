@@ -9,17 +9,16 @@ from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cogs.chatbot.channel_roles import ChannelRole, ChannelRoleManager
-from cogs.chatbot.database import (
-    ChatbotLongTermMemoryStore,
-    ChatbotMemberAliasStore,
-    ChatbotShadowCandidateStore,
-    ChatbotShortTermMessageStore,
-    ShadowCandidateInput,
+from cogs.chatbot.models import ChannelProcessingState
+from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
+from cogs.chatbot.repositories.long_term_memory import ChatbotLongTermMemoryRepository
+from cogs.chatbot.repositories.member_alias import ChatbotMemberAliasRepository
+from cogs.chatbot.repositories.shadow_candidate import ChatbotShadowCandidateRepository, ShadowCandidateInput
+from cogs.chatbot.repositories.short_term_message import (
+    ChatbotShortTermMessageRepository,
     StoredAttachmentInput,
     StoredMessageInput,
 )
-from cogs.chatbot.database_envs import DatabaseEnvManager
-from cogs.chatbot.models import ChannelProcessingState
 from cogs.chatbot.responses_api import (
     AttachmentInMemory,
     LLMMessage,
@@ -56,18 +55,18 @@ class ConversationUseCases:
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
         self.response_pipelines: dict[int, ResponsePipeline] = {}
-        self.env_manager = DatabaseEnvManager(session_factory)
-        self.channel_role_manager = ChannelRoleManager(self.env_manager)
-        self.shadow_mode_manager = ShadowModeManager(self.env_manager)
+        self.environment_repository = DatabaseEnvironmentRepository(session_factory)
+        self.channel_role_manager = ChannelRoleManager(self.environment_repository)
+        self.shadow_mode_manager = ShadowModeManager(self.environment_repository)
         self.settings_use_cases = SettingsUseCases(
-            self.env_manager,
+            self.environment_repository,
             self.channel_role_manager,
             self.shadow_mode_manager,
         )
-        self.shadow_candidate_store = ChatbotShadowCandidateStore(session_factory)
-        self.short_term_message_store = ChatbotShortTermMessageStore(session_factory)
-        self.long_term_memory_store = ChatbotLongTermMemoryStore(session_factory)
-        self.member_alias_store = ChatbotMemberAliasStore(session_factory)
+        self.shadow_candidate_repository = ChatbotShadowCandidateRepository(session_factory)
+        self.short_term_message_repository = ChatbotShortTermMessageRepository(session_factory)
+        self.long_term_memory_repository = ChatbotLongTermMemoryRepository(session_factory)
+        self.member_alias_repository = ChatbotMemberAliasRepository(session_factory)
         self._history_sync_complete = asyncio.Event()
         self._history_sync_lock = asyncio.Lock()
 
@@ -76,20 +75,20 @@ class ConversationUseCases:
         self._background_tasks: set[asyncio.Task[None]] = set()
         self.long_term_memory_use_cases = LongTermMemoryUseCases(
             self.bot,
-            self.env_manager,
+            self.environment_repository,
             session_factory,
             self._background_tasks,
         )
         self.attachment_use_cases = AttachmentUseCases(
-            self.short_term_message_store,
+            self.short_term_message_repository,
             self.response_pipelines,
             self._background_tasks,
         )
         self.memory_search_use_cases = MemorySearchUseCases(
             self.bot,
             self.response_pipelines,
-            self.long_term_memory_store,
-            self.member_alias_store,
+            self.long_term_memory_repository,
+            self.member_alias_repository,
         )
 
     async def initialize_response_pipeline_for_channel(self, channel_id: int) -> None:
@@ -107,8 +106,8 @@ class ConversationUseCases:
             async with self._initialization_lock:
                 if channel_id not in self._channel_states:
                     await self.initialize_response_pipeline_for_channel(channel_id)
-                    stored_messages = await self.short_term_message_store.get_for_channel(channel_id)
-                    stored_attachments = await self.short_term_message_store.get_attachments(
+                    stored_messages = await self.short_term_message_repository.get_for_channel(channel_id)
+                    stored_attachments = await self.short_term_message_repository.get_attachments(
                         [stored.message_id for stored in stored_messages]
                     )
                     attachments_by_message_id: dict[int, list[AttachmentInMemory]] = {}
@@ -176,7 +175,7 @@ class ConversationUseCases:
                 if not permissions.view_channel or not permissions.read_message_history:
                     continue
                 try:
-                    latest_stored_at = await self.short_term_message_store.get_latest_created_at(channel.id)
+                    latest_stored_at = await self.short_term_message_repository.get_latest_created_at(channel.id)
                     after = get_history_sync_after(latest_stored_at, now)
                     state = await self._ensure_channel_state(channel.id)
                     channel_message_count = 0
@@ -395,7 +394,7 @@ class ConversationUseCases:
 
     async def on_message_delete(self, message: Message) -> None:
         """待機中の質問が削除された場合は、遅延した回答を取り消します。"""
-        await self.short_term_message_store.delete(message.id)
+        await self.short_term_message_repository.delete(message.id)
         await self.long_term_memory_use_cases.delete(message.id)
         state = self._channel_states.get(message.channel.id)
         if state is None:
@@ -420,7 +419,7 @@ class ConversationUseCases:
             stored_message = short_term_memory.get_message(after.id)
             if stored_message is None:
                 return
-            await self.short_term_message_store.save(
+            await self.short_term_message_repository.save(
                 StoredMessageInput(
                     message_id=stored_message.message_id,
                     channel_id=after.channel.id,
@@ -434,12 +433,12 @@ class ConversationUseCases:
                 )
             )
             if not after.author.bot:
-                await self.short_term_message_store.delete_attachments(after.id)
+                await self.short_term_message_repository.delete_attachments(after.id)
                 for attachment in after.attachments:
                     attachment_kind = self.attachment_use_cases.get_kind(attachment.content_type)
                     if attachment_kind is None:
                         continue
-                    await self.short_term_message_store.save_attachment(
+                    await self.short_term_message_repository.save_attachment(
                         StoredAttachmentInput(
                             id=attachment.id,
                             message_id=after.id,
@@ -579,7 +578,7 @@ class ConversationUseCases:
         await short_term_memory.append(message)
         stored_message = short_term_memory.get_message(message.id)
         if stored_message is not None:
-            await self.short_term_message_store.save(
+            await self.short_term_message_repository.save(
                 StoredMessageInput(
                     message_id=stored_message.message_id,
                     channel_id=message.channel.id,
@@ -597,7 +596,7 @@ class ConversationUseCases:
                     attachment_kind = self.attachment_use_cases.get_kind(attachment.content_type)
                     if attachment_kind is None:
                         continue
-                    await self.short_term_message_store.save_attachment(
+                    await self.short_term_message_repository.save_attachment(
                         StoredAttachmentInput(
                             id=attachment.id,
                             message_id=message.id,
@@ -717,7 +716,7 @@ class ConversationUseCases:
     async def _save_shadow_candidate(self, message: Message, response: LLMMessage) -> None:
         """モデルが選んだ自発反応を、投稿せず評価用候補として保存します。"""
         short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
-        await self.shadow_candidate_store.save(
+        await self.shadow_candidate_repository.save(
             ShadowCandidateInput(
                 channel_id=message.channel.id,
                 trigger_message_id=message.id,

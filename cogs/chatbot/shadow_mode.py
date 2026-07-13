@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from .channel_roles import DatabaseEnvStore
+from .channel_roles import DatabaseEnvironmentRepositoryProtocol
 
 SHADOW_MODE_CHANNELS_KEY = "CHATBOT_SHADOW_MODE_CHANNELS"
 
@@ -9,8 +9,8 @@ SHADOW_MODE_CHANNELS_KEY = "CHATBOT_SHADOW_MODE_CHANNELS"
 class ShadowModeManager:
     """チャンネルごとのシャドーモード設定を永続化します。"""
 
-    def __init__(self, env_manager: DatabaseEnvStore) -> None:
-        self._env_manager = env_manager
+    def __init__(self, environment_repository: DatabaseEnvironmentRepositoryProtocol) -> None:
+        self._environment_repository = environment_repository
         self._write_lock = asyncio.Lock()
 
     async def is_enabled(self, channel_id: int) -> bool:
@@ -25,11 +25,11 @@ class ShadowModeManager:
                 channel_ids.add(str(channel_id))
             else:
                 channel_ids.discard(str(channel_id))
-            await self._env_manager.set_env(SHADOW_MODE_CHANNELS_KEY, json.dumps(sorted(channel_ids)))
+            await self._environment_repository.set_env(SHADOW_MODE_CHANNELS_KEY, json.dumps(sorted(channel_ids)))
 
     async def _load_channel_ids(self) -> set[str]:
         """有効化済みチャンネルIDを読み込みます。"""
-        serialized_channel_ids = await self._env_manager.get_env(SHADOW_MODE_CHANNELS_KEY)
+        serialized_channel_ids = await self._environment_repository.get_env(SHADOW_MODE_CHANNELS_KEY)
         if serialized_channel_ids is None:
             return set()
         try:

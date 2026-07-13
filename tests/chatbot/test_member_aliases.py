@@ -1,6 +1,6 @@
 import unittest
 
-from cogs.chatbot.database import (
+from cogs.chatbot.repositories.member_alias import (
     determine_member_alias_status,
     find_user_ids_by_member_alias,
     normalize_member_alias,

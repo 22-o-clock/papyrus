@@ -5,9 +5,9 @@ from typing import Any, cast
 from openai import AsyncOpenAI
 
 from cogs.chatbot.constants import ATTACHMENT_CONTEXT_MAX_CHARACTERS
-from cogs.chatbot.database import ChatbotShortTermMessageStore
 from cogs.chatbot.models import AttachmentAnalysis
 from cogs.chatbot.observability import log_chatbot_api_call
+from cogs.chatbot.repositories.short_term_message import ChatbotShortTermMessageRepository
 from cogs.chatbot.responses_api import AttachmentInMemory, ResponsePipeline
 
 logger = getLogger(__name__)
@@ -18,11 +18,11 @@ class AttachmentUseCases:
 
     def __init__(
         self,
-        message_store: ChatbotShortTermMessageStore,
+        message_repository: ChatbotShortTermMessageRepository,
         response_pipelines: dict[int, ResponsePipeline],
         background_tasks: set[asyncio.Task[None]],
     ) -> None:
-        self._message_store = message_store
+        self._message_repository = message_repository
         self._response_pipelines = response_pipelines
         self._background_tasks = background_tasks
 
@@ -90,7 +90,7 @@ class AttachmentUseCases:
 
         summary = self.truncate_context(response.output_parsed.summary)
         important_text = self.truncate_context(response.output_parsed.important_text)
-        await self._message_store.save_attachment_analysis(
+        await self._message_repository.save_attachment_analysis(
             attachment_id,
             summary=summary,
             important_text=important_text,
@@ -110,7 +110,7 @@ class AttachmentUseCases:
 
     async def _save_failure(self, message_id: int, attachment_id: int, filename: str, kind: str) -> None:
         """解析失敗をDBと稼働中の短期文脈へ反映する。"""
-        await self._message_store.save_attachment_analysis(
+        await self._message_repository.save_attachment_analysis(
             attachment_id,
             summary=None,
             important_text=None,

@@ -11,19 +11,21 @@ from cogs.chatbot.constants import (
     MEMORY_RECONCILIATION_VERSION,
     MEMORY_RECONCILIATION_VERSION_KEY,
 )
-from cogs.chatbot.database import (
+from cogs.chatbot.observability import log_chatbot_api_call
+from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
+from cogs.chatbot.repositories.long_term_memory import (
     ChatbotLongTermMemory,
-    ChatbotLongTermMemoryStore,
-    ChatbotMemberAliasStore,
-    ChatbotMemoryExtractionQueueStore,
-    ChatbotShortTermMessageStore,
+    ChatbotLongTermMemoryRepository,
     LongTermMemoryInput,
-    MemberAliasInput,
     MemoryReconciliationInput,
+)
+from cogs.chatbot.repositories.member_alias import (
+    ChatbotMemberAliasRepository,
+    MemberAliasInput,
     normalize_member_alias,
 )
-from cogs.chatbot.database_envs import DatabaseEnvManager
-from cogs.chatbot.observability import log_chatbot_api_call
+from cogs.chatbot.repositories.memory_extraction_queue import ChatbotMemoryExtractionQueueRepository
+from cogs.chatbot.repositories.short_term_message import ChatbotShortTermMessageRepository
 from cogs.chatbot.responses_api import (
     LongTermMemoryCandidate,
     LongTermMemoryCorrectionCandidate,
@@ -42,16 +44,16 @@ class LongTermMemoryUseCases:
     def __init__(
         self,
         bot: commands.Bot,
-        env_manager: DatabaseEnvManager,
+        environment_repository: DatabaseEnvironmentRepository,
         session_factory: async_sessionmaker[AsyncSession],
         background_tasks: set[asyncio.Task[None]],
     ) -> None:
         self.bot = bot
-        self.env_manager = env_manager
-        self.short_term_message_store = ChatbotShortTermMessageStore(session_factory)
-        self.memory_extraction_queue = ChatbotMemoryExtractionQueueStore(session_factory)
-        self.long_term_memory_store = ChatbotLongTermMemoryStore(session_factory)
-        self.member_alias_store = ChatbotMemberAliasStore(session_factory)
+        self.environment_repository = environment_repository
+        self.short_term_message_repository = ChatbotShortTermMessageRepository(session_factory)
+        self.memory_extraction_queue_repository = ChatbotMemoryExtractionQueueRepository(session_factory)
+        self.long_term_memory_repository = ChatbotLongTermMemoryRepository(session_factory)
+        self.member_alias_repository = ChatbotMemberAliasRepository(session_factory)
         self.long_term_memory_extractor = LongTermMemoryExtractor(AsyncOpenAI())
         self.long_term_memory_reconciler = LongTermMemoryReconciler(AsyncOpenAI())
         self._background_tasks = background_tasks
@@ -62,7 +64,7 @@ class LongTermMemoryUseCases:
     async def initialize(self) -> None:
         """中断された抽出を復旧し、既存記憶の一度きりの照合を開始します。"""
         if not self._memory_queue_recovered:
-            await self.memory_extraction_queue.recover_interrupted()
+            await self.memory_extraction_queue_repository.recover_interrupted()
             self._memory_queue_recovered = True
         await self._schedule_memory_extraction()
         if self._memory_reconciliation_started:
@@ -74,20 +76,20 @@ class LongTermMemoryUseCases:
 
     async def enqueue(self, message_id: int, channel_id: int) -> None:
         """人間の投稿を抽出待ちへ追加し、処理を予約します。"""
-        await self.memory_extraction_queue.enqueue(message_id, channel_id)
+        await self.memory_extraction_queue_repository.enqueue(message_id, channel_id)
         await self._schedule_memory_extraction()
 
     async def delete(self, message_id: int) -> None:
         """削除された投稿を抽出対象から除外します。"""
-        await self.memory_extraction_queue.delete(message_id)
+        await self.memory_extraction_queue_repository.delete(message_id)
 
     async def _reconcile_existing_memories_once(self) -> None:
         """導入前から存在する記憶を古い順に一度だけ訂正・競合判定します。"""
-        if await self.env_manager.get_env(MEMORY_RECONCILIATION_VERSION_KEY) == MEMORY_RECONCILIATION_VERSION:
+        if await self.environment_repository.get_env(MEMORY_RECONCILIATION_VERSION_KEY) == MEMORY_RECONCILIATION_VERSION:
             return
-        memories = await self.long_term_memory_store.get_all_active_ordered()
+        memories = await self.long_term_memory_repository.get_all_active_ordered()
         for memory in memories:
-            current_active = await self.long_term_memory_store.get_active_for_target(
+            current_active = await self.long_term_memory_repository.get_active_for_target(
                 memory.target_user_id,
                 memory.external_entity_name,
             )
@@ -106,7 +108,7 @@ class LongTermMemoryUseCases:
                 continue
             allowed_ids = {candidate.id for candidate in earlier_memories}
             reconciliation_ids = [memory_id for memory_id in reconciliation.existing_memory_ids if memory_id in allowed_ids]
-            await self.long_term_memory_store.apply_reconciliation(
+            await self.long_term_memory_repository.apply_reconciliation(
                 MemoryReconciliationInput(
                     action=reconciliation.action,
                     existing_memory_ids=reconciliation_ids,
@@ -120,13 +122,13 @@ class LongTermMemoryUseCases:
                 memory.id,
                 reconciliation_ids,
             )
-        await self.env_manager.set_env(MEMORY_RECONCILIATION_VERSION_KEY, MEMORY_RECONCILIATION_VERSION)
+        await self.environment_repository.set_env(MEMORY_RECONCILIATION_VERSION_KEY, MEMORY_RECONCILIATION_VERSION)
 
     async def _schedule_memory_extraction(self) -> None:
         """未処理投稿を一定時間まとめて長期記憶として抽出します。"""
         delay_seconds = (
             0
-            if await self.memory_extraction_queue.count_pending() >= MEMORY_EXTRACTION_BATCH_SIZE
+            if await self.memory_extraction_queue_repository.count_pending() >= MEMORY_EXTRACTION_BATCH_SIZE
             else MEMORY_EXTRACTION_WAIT_SECONDS
         )
         if self._memory_extraction_task is not None and not self._memory_extraction_task.done():
@@ -145,7 +147,7 @@ class LongTermMemoryUseCases:
         except asyncio.CancelledError:
             return
         while True:
-            queue_items = await self.memory_extraction_queue.claim_pending(MEMORY_EXTRACTION_BATCH_SIZE)
+            queue_items = await self.memory_extraction_queue_repository.claim_pending(MEMORY_EXTRACTION_BATCH_SIZE)
             message_ids = [item.message_id for item in queue_items]
             if not message_ids:
                 return
@@ -157,7 +159,7 @@ class LongTermMemoryUseCases:
     async def _extract_long_term_memory_batch(self, message_ids: list[int]) -> bool:
         """確保済みの投稿群から記憶を抽出し、処理結果をキューへ反映します。"""
         try:
-            stored_messages = await self.short_term_message_store.get_by_ids(message_ids)
+            stored_messages = await self.short_term_message_repository.get_by_ids(message_ids)
             messages = [
                 MessageInMemory(
                     message_id=message.message_id,
@@ -172,7 +174,7 @@ class LongTermMemoryUseCases:
             ]
             members = list(self.bot.get_all_members())
             member_ids = {member.id for member in members}
-            active_aliases = await self.member_alias_store.get_active_aliases()
+            active_aliases = await self.member_alias_repository.get_active_aliases()
             aliases_by_user_id: dict[int, list[str]] = {}
             for alias, target_user_id in active_aliases.items():
                 aliases_by_user_id.setdefault(target_user_id, []).append(alias)
@@ -197,16 +199,16 @@ class LongTermMemoryUseCases:
                 for member in members
             }
             await self._save_extracted_aliases(extraction.aliases, messages_by_id, member_ids, member_names)
-            active_aliases = await self.member_alias_store.get_active_aliases()
+            active_aliases = await self.member_alias_repository.get_active_aliases()
             for candidate in extraction.candidates:
                 await self._save_extracted_memory(candidate, messages_by_id, member_ids, active_aliases)
             for correction in extraction.corrections:
                 await self._apply_memory_correction(correction, messages_by_id, member_ids, active_aliases)
         except Exception:
             logger.exception("Failed to extract chatbot long-term memories (message_ids=%s)", message_ids)
-            await self.memory_extraction_queue.restore_pending(message_ids)
+            await self.memory_extraction_queue_repository.restore_pending(message_ids)
             return False
-        await self.memory_extraction_queue.complete(message_ids)
+        await self.memory_extraction_queue_repository.complete(message_ids)
         return True
 
     async def _save_extracted_aliases(
@@ -229,7 +231,7 @@ class LongTermMemoryUseCases:
                 if message_id in messages_by_id
             ]
             if evidence:
-                await self.member_alias_store.save(
+                await self.member_alias_repository.save(
                     MemberAliasInput(
                         alias=alias_candidate.alias,
                         target_user_id=alias_candidate.target_user_id,
@@ -256,7 +258,7 @@ class LongTermMemoryUseCases:
         external_entity_name = candidate.external_entity_name if target_user_id is None else None
         log_chatbot_api_call("memory_embedding", "text-embedding-3-large")
         embedding_response = await AsyncOpenAI().embeddings.create(model="text-embedding-3-large", input=candidate.content)
-        existing_memories = await self.long_term_memory_store.get_active_for_target(target_user_id, external_entity_name)
+        existing_memories = await self.long_term_memory_repository.get_active_for_target(target_user_id, external_entity_name)
         reconciliation = await self.long_term_memory_reconciler.reconcile(
             self._memory_candidate_for_reconciliation(candidate),
             [self._stored_memory_for_reconciliation(memory) for memory in existing_memories],
@@ -267,7 +269,7 @@ class LongTermMemoryUseCases:
         if reconciliation.action == "invalidate":
             reconciliation.action = "keep"
             reconciliation_ids = []
-        stored_memory_id = await self.long_term_memory_store.save(
+        stored_memory_id = await self.long_term_memory_repository.save(
             LongTermMemoryInput(
                 target_user_id=target_user_id,
                 external_entity_name=external_entity_name,
@@ -290,7 +292,7 @@ class LongTermMemoryUseCases:
             self._normalize_memory_target_resolution(target_user_id, external_entity_name),
             candidate.source_type,
         )
-        await self.long_term_memory_store.apply_reconciliation(
+        await self.long_term_memory_repository.apply_reconciliation(
             MemoryReconciliationInput(
                 action=reconciliation.action,
                 existing_memory_ids=reconciliation_ids,
@@ -336,7 +338,7 @@ class LongTermMemoryUseCases:
         if target_user_id is None and correction.external_entity_name:
             target_user_id = active_aliases.get(normalize_member_alias(correction.external_entity_name))
         external_entity_name = correction.external_entity_name if target_user_id is None else None
-        existing_memories = await self.long_term_memory_store.get_active_for_target(target_user_id, external_entity_name)
+        existing_memories = await self.long_term_memory_repository.get_active_for_target(target_user_id, external_entity_name)
         reconciliation = await self.long_term_memory_reconciler.reconcile(
             {"content": correction.statement, "source_type": correction.source_type},
             [self._stored_memory_for_reconciliation(memory) for memory in existing_memories],
@@ -346,7 +348,7 @@ class LongTermMemoryUseCases:
             return
         allowed_ids = {memory.id for memory in existing_memories}
         reconciliation_ids = [memory_id for memory_id in reconciliation.existing_memory_ids if memory_id in allowed_ids]
-        await self.long_term_memory_store.apply_reconciliation(
+        await self.long_term_memory_repository.apply_reconciliation(
             MemoryReconciliationInput(
                 action="invalidate",
                 existing_memory_ids=reconciliation_ids,

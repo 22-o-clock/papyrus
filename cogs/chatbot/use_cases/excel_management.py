@@ -39,18 +39,22 @@ from cogs.chatbot.constants import (
     SHADOW_REASON_LABELS,
     SHADOW_REVIEW_HEADERS,
 )
-from cogs.chatbot.database import (
+from cogs.chatbot.observability import log_chatbot_api_call
+from cogs.chatbot.repositories.long_term_memory import (
     ChatbotLongTermMemory,
-    ChatbotLongTermMemoryStore,
-    ChatbotMemberAliasStore,
-    ChatbotShadowCandidateStore,
+    ChatbotLongTermMemoryRepository,
     LongTermMemoryReviewRecord,
     LongTermMemoryUpdateInput,
+)
+from cogs.chatbot.repositories.member_alias import (
+    ChatbotMemberAliasRepository,
     MemberAliasReviewRecord,
     MemberAliasUpdateInput,
+)
+from cogs.chatbot.repositories.shadow_candidate import (
+    ChatbotShadowCandidateRepository,
     ShadowEvaluationInput,
 )
-from cogs.chatbot.observability import log_chatbot_api_call
 
 from .admin_validation import (
     parse_memory_admin_expiration,
@@ -68,16 +72,16 @@ class ExcelManagementUseCases:
         self,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        self.shadow_candidate_store = ChatbotShadowCandidateStore(session_factory)
-        self.member_alias_store = ChatbotMemberAliasStore(session_factory)
-        self.long_term_memory_store = ChatbotLongTermMemoryStore(session_factory)
+        self.shadow_candidate_repository = ChatbotShadowCandidateRepository(session_factory)
+        self.member_alias_repository = ChatbotMemberAliasRepository(session_factory)
+        self.long_term_memory_repository = ChatbotLongTermMemoryRepository(session_factory)
 
     async def export_chatbot_shadow_candidates(self, interaction: discord.Interaction) -> None:
         """実行した管理者が未評価の候補を最大100件、評価用Excel添付で返します。"""
         if not interaction.permissions.manage_guild:
             await interaction.response.send_message("候補の出力には「サーバー管理」権限が必要です。", ephemeral=True)
             return
-        candidates = await self.shadow_candidate_store.get_unreviewed_candidates(interaction.user.id, limit=100)
+        candidates = await self.shadow_candidate_repository.get_unreviewed_candidates(interaction.user.id, limit=100)
         if not candidates:
             await interaction.response.send_message("未評価のシャドー候補はありません。", ephemeral=True)
             return
@@ -195,7 +199,7 @@ class ExcelManagementUseCases:
             except ValueError:
                 invalid_rows.append(row_number)
                 continue
-            await self.shadow_candidate_store.save_evaluation(interaction.user.id, evaluation)
+            await self.shadow_candidate_repository.save_evaluation(interaction.user.id, evaluation)
             imported_rows += 1
         invalid_text = "" if not invalid_rows else f" 無効な行: {', '.join(map(str, invalid_rows))}。"
         await interaction.response.send_message(f"評価を {imported_rows} 件取り込みました。{invalid_text}", ephemeral=True)
@@ -223,7 +227,7 @@ class ExcelManagementUseCases:
         if interaction.guild is None:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
             return
-        records = await self.member_alias_store.get_review_records()
+        records = await self.member_alias_repository.get_review_records()
         if not records:
             await interaction.response.send_message("保存されているメンバー別名はありません。", ephemeral=True)
             return
@@ -257,7 +261,7 @@ class ExcelManagementUseCases:
         try:
             workbook = load_workbook(io.BytesIO(await attachment.read()), data_only=True)
             updates = self._parse_member_alias_workbook(workbook, interaction.guild)
-            await self.member_alias_store.apply_updates(updates, interaction.user.id)
+            await self.member_alias_repository.apply_updates(updates, interaction.user.id)
         except (
             BadZipFile,
             InvalidFileException,
@@ -417,7 +421,7 @@ class ExcelManagementUseCases:
         if not interaction.permissions.manage_guild or interaction.guild is None:
             await interaction.response.send_message("長期記憶の出力には「サーバー管理」権限が必要です。", ephemeral=True)
             return
-        records = await self.long_term_memory_store.get_review_records()
+        records = await self.long_term_memory_repository.get_review_records()
         workbook = self._build_long_term_memory_workbook(records, interaction.guild)
         output = io.BytesIO()
         workbook.save(output)
@@ -441,10 +445,10 @@ class ExcelManagementUseCases:
         await interaction.response.defer(ephemeral=True)
         try:
             workbook = load_workbook(io.BytesIO(await attachment.read()), data_only=True)
-            records = await self.long_term_memory_store.get_review_records()
+            records = await self.long_term_memory_repository.get_review_records()
             updates = self._parse_long_term_memory_workbook(workbook, interaction.guild, records)
             await self._create_updated_memory_embeddings(updates, records)
-            changed_count = await self.long_term_memory_store.apply_admin_updates(updates, interaction.user.id)
+            changed_count = await self.long_term_memory_repository.apply_admin_updates(updates, interaction.user.id)
             logger.info(
                 "Applied chatbot memory admin updates (administrator_user_id=%s, changed_count=%s, checked_count=%s)",
                 interaction.user.id,

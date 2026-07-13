@@ -12,7 +12,7 @@ from cogs.chatbot.constants import (
     UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY,
     UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY,
 )
-from cogs.chatbot.database_envs import DatabaseEnvManager
+from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
 from cogs.chatbot.services.response_policy import can_change_channel_role
 from cogs.chatbot.shadow_mode import ShadowModeManager
 
@@ -24,11 +24,11 @@ class SettingsUseCases:
 
     def __init__(
         self,
-        env_manager: DatabaseEnvManager,
+        environment_repository: DatabaseEnvironmentRepository,
         role_manager: ChannelRoleManager,
         shadow_mode_manager: ShadowModeManager,
     ) -> None:
-        self._env_manager = env_manager
+        self._environment_repository = environment_repository
         self._role_manager = role_manager
         self._shadow_mode_manager = shadow_mode_manager
         self.conversation_reset_minutes = DEFAULT_CONVERSATION_RESET_MINUTES
@@ -57,7 +57,7 @@ class SettingsUseCases:
         return True
 
     async def _load_positive_minutes(self, key: str, default: int) -> int:
-        configured = await self._env_manager.get_env(key)
+        configured = await self._environment_repository.get_env(key)
         if configured is None:
             return default
         try:
@@ -98,7 +98,7 @@ class SettingsUseCases:
             return
         previous = self.conversation_reset_minutes
         self.conversation_reset_minutes = minutes
-        await self._env_manager.set_env(CONVERSATION_RESET_MINUTES_KEY, str(minutes))
+        await self._environment_repository.set_env(CONVERSATION_RESET_MINUTES_KEY, str(minutes))
         await interaction.response.send_message(f"Chatbotの会話リセット時間を {previous}分から {minutes}分に変更しました。")
 
     async def set_question_wait(self, interaction: discord.Interaction, minimum: int, maximum: int) -> None:
@@ -116,8 +116,8 @@ class SettingsUseCases:
         previous_maximum = self.unanswered_question_maximum_wait_minutes
         self.unanswered_question_minimum_wait_minutes = minimum
         self.unanswered_question_maximum_wait_minutes = maximum
-        await self._env_manager.set_env(UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY, str(minimum))
-        await self._env_manager.set_env(UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY, str(maximum))
+        await self._environment_repository.set_env(UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY, str(minimum))
+        await self._environment_repository.set_env(UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY, str(maximum))
         await interaction.response.send_message(
             "宛先のない質問への回答待機時間を "
             f"{previous_minimum}〜{previous_maximum}分から {minimum}〜{maximum}分に変更しました。"
