@@ -4,14 +4,10 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, patch
 
-from cogs.api_usage.api_usage import (
-    ReportMeasurementState,
-    aggregate_feature_usages,
-    build_usage_embed,
-    should_run_daily_report,
-    validate_report_date,
-)
+from cogs.api_usage.models import ReportMeasurementState
 from cogs.api_usage.openai_usage import JST, UTC, OpenAIUsageSummary, _aggregate_costs, utc_report_period
+from cogs.api_usage.services.report_builder import aggregate_feature_usages, build_usage_embed
+from cogs.api_usage.use_cases.reporting import should_run_daily_report, validate_report_date
 from cogs.chatbot import observability
 from cogs.chatbot.repositories.api_usage import ChatbotApiUsageDaily, utc_usage_date
 from core.exception.exception import ArgumentError
