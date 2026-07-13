@@ -14,6 +14,7 @@ class ChatBot(commands.Cog):
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.conversation_use_cases = ConversationUseCases(bot, session_factory)
         self.settings_use_cases = self.conversation_use_cases.settings_use_cases
+        self.custom_profile_use_cases = self.conversation_use_cases.custom_profile_use_cases
         self.excel_management_use_cases = ExcelManagementUseCases(session_factory)
 
     @commands.Cog.listener()
@@ -66,6 +67,48 @@ class ChatBot(commands.Cog):
     @app_commands.command(name="reset_chatbot_role", description="このチャンネル固有のChatbot役割を解除します")
     async def reset_chatbot_role(self, interaction: discord.Interaction) -> None:
         await self.settings_use_cases.reset_role(interaction)
+
+    @app_commands.command(name="upsert_chatbot_profile", description="Chatbotのカスタムプロファイルを保存します")
+    @app_commands.describe(
+        profile_name="optionで指定する名前",
+        instructions="基本指示へ追加するプロファイル指示",
+        model="system_default、gpt-5.6-terra、gpt-5.6-lunaのいずれか",
+    )
+    async def upsert_chatbot_profile(
+        self,
+        interaction: discord.Interaction,
+        profile_name: str,
+        instructions: str,
+        model: str = "system_default",
+    ) -> None:
+        await self.custom_profile_use_cases.upsert(
+            interaction,
+            profile_name,
+            instructions,
+            model,
+        )
+
+    @app_commands.command(name="disable_chatbot_profile", description="Chatbotのカスタムプロファイルを無効化します")
+    @app_commands.describe(profile_name="無効化するプロファイル名")
+    async def disable_chatbot_profile(
+        self,
+        interaction: discord.Interaction,
+        profile_name: str,
+    ) -> None:
+        await self.custom_profile_use_cases.disable(interaction, profile_name)
+
+    @app_commands.command(name="show_chatbot_profile", description="Chatbotのカスタムプロファイルを表示します")
+    @app_commands.describe(profile_name="表示するプロファイル名")
+    async def show_chatbot_profile(
+        self,
+        interaction: discord.Interaction,
+        profile_name: str,
+    ) -> None:
+        await self.custom_profile_use_cases.show(interaction, profile_name)
+
+    @app_commands.command(name="list_chatbot_profiles", description="有効なChatbotカスタムプロファイルを一覧表示します")
+    async def list_chatbot_profiles(self, interaction: discord.Interaction) -> None:
+        await self.custom_profile_use_cases.list_enabled(interaction)
 
     @app_commands.command(name="set_chatbot_shadow_mode", description="このチャンネルのChatbotシャドーモードを変更します")
     async def set_chatbot_shadow_mode(self, interaction: discord.Interaction, *, enabled: bool) -> None:

@@ -4,6 +4,7 @@ from sqlalchemy.sql import text
 from core.db import create_tables_for
 
 from .base import CHATBOT_DATABASE_SCHEMA, ChatbotBase
+from .custom_profile import ChatbotCustomProfile
 from .environment import DatabaseEnvironment
 from .long_term_memory import (
     ChatbotLongTermMemory,
@@ -18,6 +19,7 @@ from .short_term_message import ChatbotStoredAttachment, ChatbotStoredMessage
 
 REGISTERED_MODELS: tuple[type[ChatbotBase], ...] = (
     DatabaseEnvironment,
+    ChatbotCustomProfile,
     ChatbotLongTermMemory,
     ChatbotLongTermMemoryAdminHistory,
     ChatbotLongTermMemoryChange,

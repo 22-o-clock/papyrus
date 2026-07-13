@@ -14,12 +14,14 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, model_validator
 
 from .channel_roles import ChannelRole
+from .models.custom_profile import CustomProfile
 from .observability import log_chatbot_api_call
 from .prompt import draft_generator_prompt, memory_extraction_prompt, memory_reconciliation_prompt
 
 logger = getLogger(__name__)
 
 DRAFT_GENERATOR_MODEL = "gpt-5.6-terra"
+CUSTOM_PROFILE_DEFAULT_MODEL = "gpt-5.6"
 MEMORY_EXTRACTION_MODEL = "gpt-5.6-terra"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 
@@ -180,14 +182,19 @@ class ShortTermMemory:
 
         logger.debug("Current messages in memory: %s", self.memory)
 
-    def to_json(self) -> str:
+    def to_json(self, *, content_overrides: dict[int, str] | None = None) -> str:
         """短期記憶内のメッセージをプロンプトに用いるJSON形式の文字列に変換します。
 
         Returns:
             人物と返信先をDiscord IDで識別できるJSON表現
 
         """
-        return json.dumps([m.to_dict() for m in self.memory], ensure_ascii=False, indent=2)
+        serialized_messages = [message.to_dict() for message in self.memory]
+        for serialized_message in serialized_messages:
+            message_id = serialized_message["message_id"]
+            if content_overrides is not None and isinstance(message_id, int) and message_id in content_overrides:
+                serialized_message["content"] = content_overrides[message_id]
+        return json.dumps(serialized_messages, ensure_ascii=False, indent=2)
 
     def forget(self, maximum_token: int = 5000) -> None:
         """メモリ内のメッセージを古い順に削除して、トークン数を制限以下に保ちます。
@@ -493,6 +500,7 @@ class DraftGenerator:
         *,
         is_unanswered_question: bool,
         long_term_memory_context: str = "",
+        custom_profile: CustomProfile | None = None,
     ) -> LLMMessage:
         """メッセージのドラフト回答を生成します。
 
@@ -501,6 +509,7 @@ class DraftGenerator:
             channel_role: 対象チャンネルでのChatbotの役割
             is_unanswered_question: 人間からの回答を待った宛先のない質問への回答か
             long_term_memory_context: 検索済みの長期記憶コンテキスト
+            custom_profile: 明示的なoption指定がある場合だけ適用するプロファイル
 
         Returns:
             生成されたドラフト回答を含むLLMMessageオブジェクト
@@ -508,6 +517,10 @@ class DraftGenerator:
         """
         # 履歴内の画像とPDFは、入力サイズを制御する方針が決まるまで直接の返信元だけを対象とする。
 
+        content_overrides = (
+            {custom_profile.request_message_id: custom_profile.request_content} if custom_profile is not None else None
+        )
+        serialized_memory = short_term_memory.to_json(content_overrides=content_overrides)
         llm_input: list[dict[str, Any]] = [
             {
                 "role": "user",
@@ -515,7 +528,7 @@ class DraftGenerator:
                     {
                         "type": "input_text",
                         "text": (
-                            short_term_memory.to_json()
+                            serialized_memory
                             + (f"\n\n長期記憶:\n{long_term_memory_context}" if long_term_memory_context else "")
                         ),
                     }
@@ -523,28 +536,52 @@ class DraftGenerator:
             }
         ]
 
-        if short_term_memory.memory[-1].image_url:
-            llm_input[0]["content"].append({"type": "input_image", "image_url": short_term_memory.memory[-1].image_url})
+        request_message = (
+            short_term_memory.get_message(custom_profile.request_message_id)
+            if custom_profile is not None
+            else short_term_memory.memory[-1]
+        )
+        if request_message is None:
+            request_message = short_term_memory.memory[-1]
 
-        if short_term_memory.memory[-1].pdf_url:
-            llm_input[0]["content"].append({"type": "input_file", "file_url": short_term_memory.memory[-1].pdf_url})
+        if request_message.image_url:
+            llm_input[0]["content"].append({"type": "input_image", "image_url": request_message.image_url})
 
-        log_chatbot_api_call("draft_generation", DRAFT_GENERATOR_MODEL)
+        if request_message.pdf_url:
+            llm_input[0]["content"].append({"type": "input_file", "file_url": request_message.pdf_url})
+
+        instructions = draft_generator_prompt.DRAFT_INSTRUCTIONS.format(
+            bot_name=self.bot_name,
+            channel_role=channel_role.value,
+            unanswered_question_instruction=(
+                "- この回答は、人間からの回答を待った宛先のない質問へのものです。"
+                "短く明確に答えられる場合だけ応答してください。"
+                "詳しい調査や長い説明が必要ならsilenceを選んでください。"
+                if is_unanswered_question
+                else ""
+            ),
+        )
+        model = DRAFT_GENERATOR_MODEL
+        reasoning_effort = "medium"
+        if custom_profile is not None:
+            model = CUSTOM_PROFILE_DEFAULT_MODEL if custom_profile.model == "system_default" else custom_profile.model
+            reasoning_effort = "low"
+            instructions += (
+                f"\n\nこのリクエストではカスタムプロファイル `{custom_profile.name}` が明示的に選択されています。"
+                "\n以下を基本指示と矛盾しない範囲で追加適用してください。"
+                f"\n\n{custom_profile.instructions}"
+            )
+
+        log_chatbot_api_call(
+            "draft_generation",
+            model,
+            custom_profile=(custom_profile.name if custom_profile is not None else None),
+        )
         api_response = await self.client.responses.parse(
             input=llm_input,  # type: ignore
-            instructions=draft_generator_prompt.DRAFT_INSTRUCTIONS.format(
-                bot_name=self.bot_name,
-                channel_role=channel_role.value,
-                unanswered_question_instruction=(
-                    "- この回答は、人間からの回答を待った宛先のない質問へのものです。"
-                    "短く明確に答えられる場合だけ応答してください。"
-                    "詳しい調査や長い説明が必要ならsilenceを選んでください。"
-                    if is_unanswered_question
-                    else ""
-                ),
-            ),
-            model=DRAFT_GENERATOR_MODEL,
-            reasoning={"effort": "medium"},
+            instructions=instructions,
+            model=model,
+            reasoning={"effort": reasoning_effort},
             tools=[
                 {
                     "type": "web_search",
@@ -596,6 +633,7 @@ class ResponsePipeline:
         *,
         is_unanswered_question: bool,
         long_term_memory_context: str = "",
+        custom_profile: CustomProfile | None = None,
     ) -> LLMMessage:
         """短期記憶から最終回答を生成します。
 
@@ -603,6 +641,7 @@ class ResponsePipeline:
             channel_role: 対象チャンネルでのChatbotの役割
             is_unanswered_question: 人間からの回答を待った宛先のない質問への回答か
             long_term_memory_context: 検索済みの長期記憶コンテキスト
+            custom_profile: 明示的なoption指定がある場合だけ適用するプロファイル
 
         Returns:
             最終回答を含むLLMMessageオブジェクト
@@ -613,4 +652,5 @@ class ResponsePipeline:
             channel_role,
             is_unanswered_question=is_unanswered_question,
             long_term_memory_context=long_term_memory_context,
+            custom_profile=custom_profile,
         )

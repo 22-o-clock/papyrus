@@ -9,7 +9,8 @@ from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cogs.chatbot.channel_roles import ChannelRole, ChannelRoleManager
-from cogs.chatbot.models import ChannelProcessingState
+from cogs.chatbot.models import ChannelProcessingState, CustomProfile, ResponseRequestOptions
+from cogs.chatbot.repositories.custom_profile import CustomProfileRepository
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
 from cogs.chatbot.repositories.long_term_memory import ChatbotLongTermMemoryRepository
 from cogs.chatbot.repositories.member_alias import ChatbotMemberAliasRepository
@@ -44,6 +45,11 @@ from cogs.chatbot.services.response_policy import (
 from cogs.chatbot.shadow_mode import ShadowModeManager
 
 from .attachment import AttachmentUseCases
+from .custom_profile import (
+    CustomProfileNotFoundError,
+    CustomProfileUseCases,
+    InvalidCustomProfileDirectiveError,
+)
 from .long_term_memory import LongTermMemoryUseCases
 from .memory_search import MemorySearchUseCases
 from .settings import SettingsUseCases
@@ -67,6 +73,7 @@ class ConversationUseCases:
         self.short_term_message_repository = ChatbotShortTermMessageRepository(session_factory)
         self.long_term_memory_repository = ChatbotLongTermMemoryRepository(session_factory)
         self.member_alias_repository = ChatbotMemberAliasRepository(session_factory)
+        self.custom_profile_use_cases = CustomProfileUseCases(CustomProfileRepository(session_factory))
         self._history_sync_complete = asyncio.Event()
         self._history_sync_lock = asyncio.Lock()
 
@@ -225,6 +232,29 @@ class ConversationUseCases:
         mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
         replied_to_bot = await self._is_reply_to_bot(message)
         is_explicit_call = mentioned_bot or replied_to_bot
+        custom_profile: CustomProfile | None = None
+        if mentioned_bot:
+            try:
+                custom_profile = await self.custom_profile_use_cases.resolve(
+                    message.content,
+                    message_id=message.id,
+                    bot_user_id=bot_user.id,
+                    directly_mentioned=True,
+                )
+            except InvalidCustomProfileDirectiveError as exc:
+                await message.reply(self._custom_profile_directive_error_message(exc))
+                return
+            except CustomProfileNotFoundError as exc:
+                await message.reply(f"カスタムプロファイル `{exc.args[0]}` は見つかりませんでした。")
+                return
+            except Exception:
+                logger.exception(
+                    "Failed to resolve chatbot custom profile (message_id=%s, channel_id=%s)",
+                    message.id,
+                    message.channel.id,
+                )
+                await message.reply("カスタムプロファイルを一時的に利用できません。しばらくしてから再度お試しください。")
+                return
 
         await self._cancel_unanswered_question_wait(state)
         if (
@@ -248,18 +278,29 @@ class ConversationUseCases:
             message if response_required else None,
             state,
             role,
-            is_explicit_call=is_explicit_call,
-            is_unanswered_question=False,
+            options=ResponseRequestOptions(
+                is_explicit_call=is_explicit_call,
+                is_unanswered_question=False,
+                custom_profile=custom_profile,
+            ),
         )
+
+    @staticmethod
+    def _custom_profile_directive_error_message(error: InvalidCustomProfileDirectiveError) -> str:
+        """option構文の検証結果を利用者向けメッセージへ変換します。"""
+        messages = {
+            "missing_name": "`option` の後にプロファイル名を指定してください。",
+            "invalid_name": "プロファイル名には英数字、`_`、`-`だけを使用できます。",
+            "missing_content": "プロファイル指定の次の行に、回答してほしい本文を入力してください。",
+        }
+        return messages[error.reason.value]
 
     async def _update_response_schedule(
         self,
         response_message: Message | None,
         state: ChannelProcessingState,
         role: ChannelRole,
-        *,
-        is_explicit_call: bool,
-        is_unanswered_question: bool,
+        options: ResponseRequestOptions,
     ) -> None:
         """返信対象を更新し、最後の人間投稿から一定時間後に生成を開始します。"""
         async with state.lock:
@@ -268,15 +309,17 @@ class ConversationUseCases:
                     claim_response_slot(
                         state,
                         response_message,
-                        is_explicit_call=is_explicit_call,
-                        is_unanswered_question=is_unanswered_question,
+                        is_explicit_call=options.is_explicit_call,
+                        is_unanswered_question=options.is_unanswered_question,
+                        custom_profile=options.custom_profile,
                     )
                 return
 
             if response_message is not None:
                 state.debounced_response_message = response_message
-                state.debounced_response_is_explicit_call = is_explicit_call
-                state.debounced_response_is_unanswered_question = is_unanswered_question
+                state.debounced_response_is_explicit_call = options.is_explicit_call
+                state.debounced_response_is_unanswered_question = options.is_unanswered_question
+                state.debounced_custom_profile = options.custom_profile
             if state.debounced_response_message is None:
                 return
 
@@ -308,15 +351,18 @@ class ConversationUseCases:
             message = state.debounced_response_message
             is_explicit_call = state.debounced_response_is_explicit_call
             is_unanswered_question = state.debounced_response_is_unanswered_question
+            custom_profile = state.debounced_custom_profile
             state.debounce_task = None
             state.debounced_response_message = None
             state.debounced_response_is_explicit_call = False
             state.debounced_response_is_unanswered_question = False
+            state.debounced_custom_profile = None
             if message is None or not claim_response_slot(
                 state,
                 message,
                 is_explicit_call=is_explicit_call,
                 is_unanswered_question=is_unanswered_question,
+                custom_profile=custom_profile,
             ):
                 return
 
@@ -325,6 +371,7 @@ class ConversationUseCases:
             state,
             is_explicit_call=is_explicit_call,
             is_unanswered_question=is_unanswered_question,
+            custom_profile=custom_profile,
         )
 
     async def _schedule_unanswered_question_wait(self, message: Message, state: ChannelProcessingState) -> None:
@@ -335,6 +382,7 @@ class ConversationUseCases:
                 state.debounce_task = None
                 state.debounced_response_message = None
                 state.debounced_response_is_unanswered_question = False
+                state.debounced_custom_profile = None
 
             wait_minutes = get_unanswered_question_wait_minutes(
                 self.settings_use_cases.unanswered_question_minimum_wait_minutes,
@@ -390,6 +438,7 @@ class ConversationUseCases:
             state,
             is_explicit_call=False,
             is_unanswered_question=True,
+            custom_profile=None,
         )
 
     async def on_message_delete(self, message: Message) -> None:
@@ -503,11 +552,13 @@ class ConversationUseCases:
         *,
         is_explicit_call: bool,
         is_unanswered_question: bool,
+        custom_profile: CustomProfile | None,
     ) -> None:
         """同一チャンネルの返信要求を順番に生成し、保留メッセージを文脈へ反映します。"""
         current_message = message
         current_is_explicit_call = is_explicit_call
         current_is_unanswered_question = is_unanswered_question
+        current_custom_profile = custom_profile
         completed_normally = False
         try:
             while True:
@@ -518,6 +569,7 @@ class ConversationUseCases:
                         state,
                         is_explicit_call=current_is_explicit_call,
                         is_unanswered_question=current_is_unanswered_question,
+                        custom_profile=current_custom_profile,
                     )
                 else:
                     if await self._is_shadow_mode_for_message(
@@ -538,9 +590,11 @@ class ConversationUseCases:
                     next_message = state.queued_response_message
                     next_is_explicit_call = state.queued_response_is_explicit_call
                     next_is_unanswered_question = state.queued_response_is_unanswered_question
+                    next_custom_profile = state.queued_custom_profile
                     state.queued_response_message = None
                     state.queued_response_is_explicit_call = False
                     state.queued_response_is_unanswered_question = False
+                    state.queued_custom_profile = None
                     if next_message is None:
                         state.generating = False
                         completed_normally = True
@@ -548,6 +602,7 @@ class ConversationUseCases:
                     current_message = next_message
                     current_is_explicit_call = next_is_explicit_call
                     current_is_unanswered_question = next_is_unanswered_question
+                    current_custom_profile = next_custom_profile
         finally:
             if not completed_normally:
                 async with state.lock:
@@ -555,6 +610,7 @@ class ConversationUseCases:
                     state.queued_response_message = None
                     state.queued_response_is_explicit_call = False
                     state.queued_response_is_unanswered_question = False
+                    state.queued_custom_profile = None
                     state.generating = False
 
     async def _flush_pending_messages(self, state: ChannelProcessingState) -> None:
@@ -623,6 +679,7 @@ class ConversationUseCases:
         *,
         is_explicit_call: bool,
         is_unanswered_question: bool,
+        custom_profile: CustomProfile | None,
     ) -> None:
         """短期記憶から回答を生成し、生成中に文脈が更新されていなければ送信します。"""
         generation_revision = state.generation_revision
@@ -634,6 +691,7 @@ class ConversationUseCases:
                 role,
                 is_unanswered_question=is_unanswered_question,
                 long_term_memory_context=long_term_memory_context,
+                custom_profile=custom_profile,
             )
 
         async with state.lock:

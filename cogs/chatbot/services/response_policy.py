@@ -13,6 +13,7 @@ from cogs.chatbot.constants import (
     QUESTION_ENDING_PATTERN,
 )
 from cogs.chatbot.models.conversation import ChannelProcessingState
+from cogs.chatbot.models.custom_profile import CustomProfile
 from cogs.chatbot.responses_api import ResponseAction
 
 
@@ -22,12 +23,14 @@ def claim_response_slot(
     *,
     is_explicit_call: bool,
     is_unanswered_question: bool,
+    custom_profile: CustomProfile | None = None,
 ) -> bool:
     """生成枠を確保し、使用中の場合は次の返信対象としてメッセージを保持します。"""
     if state.generating:
         state.queued_response_message = message
         state.queued_response_is_explicit_call = is_explicit_call
         state.queued_response_is_unanswered_question = is_unanswered_question
+        state.queued_custom_profile = custom_profile
         state.generation_revision += 1
         return False
     state.generating = True

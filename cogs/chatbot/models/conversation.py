@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 
 from discord import Message
 
+from .custom_profile import CustomProfile
+
 
 @dataclass
 class ChannelProcessingState:
@@ -24,3 +26,5 @@ class ChannelProcessingState:
     unanswered_question_message_id: int | None = None
     queued_response_is_unanswered_question: bool = False
     debounced_response_is_unanswered_question: bool = False
+    queued_custom_profile: CustomProfile | None = None
+    debounced_custom_profile: CustomProfile | None = None
