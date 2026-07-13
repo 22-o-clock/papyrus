@@ -26,16 +26,11 @@ MEMORY_EXTRACTION_MODEL = "gpt-5.6-terra"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 REACTION_CONTEXT_INSTRUCTIONS = """
 
-# メッセージのリアクション情報
+# リアクション
 
-- reactionsは各メッセージに付いたリアクションのスナップショットです。
-- 会話の温度感や流れを補う弱いシグナルとして参照してください。
-- リアクションだけを根拠に、発言内容への同意、事実の正しさ、問題の解決を断定しないでください。
-- リアクションから人物の恒久的な嗜好を断定しないでください。
-- reactors_truncatedまたはreactors_incompleteがtrueの場合、reactorsは全利用者の一覧ではありません。
-- countをリアクションの総数として扱ってください。
-- reaction_typeがburstのものはスーパーリアクションです。
-- スーパーリアクションも通常リアクションと同様に、補助情報として慎重に解釈してください。
+reactionsは会話の温度感を補う弱いシグナルです。内容への同意・正しさ・解決や、人物の恒久的な嗜好を断定する根拠にはしないでください。
+countは総数、reaction_type="burst"はスーパーリアクションです。
+reactors_truncatedまたはreactors_incompleteがtrueの場合、reactorsは一部のみです。
 """
 
 
