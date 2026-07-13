@@ -4,12 +4,12 @@ from sqlalchemy import Text, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
 
-from .database import ChatbotBase
+from .base import ChatbotBase
 
 logger = getLogger(__name__)
 
 
-class DatabaseEnvs(ChatbotBase):
+class DatabaseEnvironment(ChatbotBase):
     __tablename__ = "database_envs"
 
     key = mapped_column(Text, primary_key=True)
@@ -17,10 +17,10 @@ class DatabaseEnvs(ChatbotBase):
 
     def __repr__(self) -> str:
         """デバッグ用に設定キーと値を返します。"""
-        return f"DatabaseEnvs(key={self.key!r}, value={self.value!r})"
+        return f"DatabaseEnvironment(key={self.key!r}, value={self.value!r})"
 
 
-class DatabaseEnvManager:
+class DatabaseEnvironmentRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
@@ -35,7 +35,7 @@ class DatabaseEnvManager:
 
         """
         async with self._session_factory() as session:
-            result = await session.execute(select(DatabaseEnvs.value).where(DatabaseEnvs.key == key))
+            result = await session.execute(select(DatabaseEnvironment.value).where(DatabaseEnvironment.key == key))
             return result.scalar_one_or_none()
 
     async def set_env(self, key: str, value: str) -> None:
@@ -51,11 +51,11 @@ class DatabaseEnvManager:
         """
         async with self._session_factory.begin() as session:
             # 既に存在するかチェック
-            result = await session.execute(select(DatabaseEnvs).where(DatabaseEnvs.key == key))
+            result = await session.execute(select(DatabaseEnvironment).where(DatabaseEnvironment.key == key))
 
             if result.first():
                 # UPDATE
-                await session.execute(update(DatabaseEnvs).where(DatabaseEnvs.key == key).values(value=value))
+                await session.execute(update(DatabaseEnvironment).where(DatabaseEnvironment.key == key).values(value=value))
             else:
                 # INSERT
-                await session.execute(insert(DatabaseEnvs).values(key=key, value=value))
+                await session.execute(insert(DatabaseEnvironment).values(key=key, value=value))

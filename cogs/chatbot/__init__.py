@@ -1,3 +1,3 @@
-from .chatbot_cog import setup
+from .chatbot import setup
 
 __all__ = ["setup"]

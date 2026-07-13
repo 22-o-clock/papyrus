@@ -9,6 +9,7 @@ import discord
 from discord import Message
 
 from cogs.chatbot.channel_roles import ChannelRole
+from cogs.chatbot.models import CustomProfile
 from cogs.chatbot.responses_api import (
     AttachmentInMemory,
     LLMMessage,
@@ -233,6 +234,114 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
             self.fail("最終回答の生成でモデルが複数回呼び出されています")
         if responses.calls[0]["model"] != "gpt-5.6-terra":
             self.fail("最終回答がTerraで生成されていません")
+        if responses.calls[0]["reasoning"] != {"effort": "medium"}:
+            self.fail("通常会話の推論強度が既存のmediumから変更されています")
+
+    async def test_applies_system_default_profile_only_to_current_request(self) -> None:
+        responses = FakeResponses()
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        pipeline = ResponsePipeline(client, "Bot")
+        await pipeline.add_message_to_memory(
+            make_message(
+                MessageSpec(
+                    message_id=1,
+                    author_id=10,
+                    author_name="発言者",
+                    content="@Bot option poet\n詩にしてください",
+                )
+            )
+        )
+        profile = CustomProfile(
+            name="poet",
+            instructions="詩的な表現を使用する。",
+            model="system_default",
+            request_message_id=1,
+            request_content="詩にしてください",
+        )
+
+        await pipeline.generate_response(
+            ChannelRole.CHAT,
+            is_unanswered_question=False,
+            custom_profile=profile,
+        )
+
+        call = responses.calls[0]
+        if call["model"] != "gpt-5.6":
+            self.fail("optionのsystem_defaultがgpt-5.6へ解決されていません")
+        if call["reasoning"] != {"effort": "low"}:
+            self.fail("option指定時の推論強度がlowになっていません")
+        if "詩的な表現を使用する。" not in str(call["instructions"]):
+            self.fail("カスタムプロファイルの追加指示が基本指示へ追加されていません")
+        if "option poet" in str(call["input"]) or "詩にしてください" not in str(call["input"]):
+            self.fail("Responses APIへ渡す最新本文からoption行を分離できていません")
+
+    async def test_uses_explicit_profile_model_with_low_reasoning(self) -> None:
+        responses = FakeResponses()
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        pipeline = ResponsePipeline(client, "Bot")
+        await pipeline.add_message_to_memory(
+            make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="依頼"))
+        )
+
+        await pipeline.generate_response(
+            ChannelRole.CHAT,
+            is_unanswered_question=False,
+            custom_profile=CustomProfile(
+                name="jargon",
+                instructions="専門用語を使う。",
+                model="gpt-5.6-luna",
+                request_message_id=1,
+                request_content="依頼",
+            ),
+        )
+
+        if responses.calls[0]["model"] != "gpt-5.6-luna":
+            self.fail("optionに保存された明示モデルが使用されていません")
+        if responses.calls[0]["reasoning"] != {"effort": "low"}:
+            self.fail("明示モデルのoption指定で推論強度がlowになっていません")
+
+    async def test_profile_content_override_targets_directive_message(self) -> None:
+        responses = FakeResponses()
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        pipeline = ResponsePipeline(client, "Bot")
+        await pipeline.add_message_to_memory(
+            make_message(
+                MessageSpec(
+                    message_id=1,
+                    author_id=10,
+                    author_name="発言者",
+                    content="@Bot option poet\n詩にしてください",
+                )
+            )
+        )
+        await pipeline.add_message_to_memory(
+            make_message(
+                MessageSpec(
+                    message_id=2,
+                    author_id=20,
+                    author_name="別の発言者",
+                    content="後から届いた通常投稿",
+                )
+            )
+        )
+
+        await pipeline.generate_response(
+            ChannelRole.CHAT,
+            is_unanswered_question=False,
+            custom_profile=CustomProfile(
+                name="poet",
+                instructions="詩的な表現を使用する。",
+                model="system_default",
+                request_message_id=1,
+                request_content="詩にしてください",
+            ),
+        )
+
+        api_input = str(responses.calls[0]["input"])
+        if "option poet" in api_input:
+            self.fail("プロファイル指定元の投稿からoption行を除去できていません")
+        if "詩にしてください" not in api_input or "後から届いた通常投稿" not in api_input:
+            self.fail("指定元以外の会話内容を変更しています")
 
 
 class ConfigRecordingResponses:

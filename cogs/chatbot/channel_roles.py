@@ -16,7 +16,7 @@ class ChannelRole(StrEnum):
     CHAT = "chat"
 
 
-class DatabaseEnvStore(Protocol):
+class DatabaseEnvironmentRepositoryProtocol(Protocol):
     """チャンネル役割の保存に必要な設定ストアの操作。"""
 
     async def get_env(self, key: str) -> str | None: ...
@@ -27,8 +27,8 @@ class DatabaseEnvStore(Protocol):
 class ChannelRoleManager:
     """チャンネルごとのChatbot役割を永続化します。"""
 
-    def __init__(self, env_manager: DatabaseEnvStore) -> None:
-        self._env_manager = env_manager
+    def __init__(self, environment_repository: DatabaseEnvironmentRepositoryProtocol) -> None:
+        self._environment_repository = environment_repository
         self._write_lock = asyncio.Lock()
 
     async def get_role(self, channel_id: int, parent_channel_id: int | None = None) -> ChannelRole:
@@ -70,18 +70,24 @@ class ChannelRoleManager:
         async with self._write_lock:
             roles = await self._load_roles()
             roles[str(channel_id)] = role.value
-            await self._env_manager.set_env(CHANNEL_ROLES_KEY, json.dumps(roles, ensure_ascii=False, sort_keys=True))
+            await self._environment_repository.set_env(
+                CHANNEL_ROLES_KEY,
+                json.dumps(roles, ensure_ascii=False, sort_keys=True),
+            )
 
     async def clear_role(self, channel_id: int) -> None:
         """チャンネル固有の役割を削除し、既定値または親チャンネルの継承へ戻します。"""
         async with self._write_lock:
             roles = await self._load_roles()
             roles.pop(str(channel_id), None)
-            await self._env_manager.set_env(CHANNEL_ROLES_KEY, json.dumps(roles, ensure_ascii=False, sort_keys=True))
+            await self._environment_repository.set_env(
+                CHANNEL_ROLES_KEY,
+                json.dumps(roles, ensure_ascii=False, sort_keys=True),
+            )
 
     async def _load_roles(self) -> dict[str, str]:
         """保存済み設定を読み込み、壊れている場合は空の設定として扱います。"""
-        serialized_roles = await self._env_manager.get_env(CHANNEL_ROLES_KEY)
+        serialized_roles = await self._environment_repository.get_env(CHANNEL_ROLES_KEY)
         if serialized_roles is None:
             return {}
 
