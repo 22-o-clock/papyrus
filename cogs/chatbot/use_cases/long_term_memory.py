@@ -11,7 +11,7 @@ from cogs.chatbot.constants import (
     MEMORY_RECONCILIATION_VERSION,
     MEMORY_RECONCILIATION_VERSION_KEY,
 )
-from cogs.chatbot.observability import log_chatbot_api_call
+from cogs.chatbot.observability import observe_chatbot_api_call
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
 from cogs.chatbot.repositories.long_term_memory import (
     ChatbotLongTermMemory,
@@ -256,8 +256,11 @@ class LongTermMemoryUseCases:
         if target_user_id is None and candidate.external_entity_name:
             target_user_id = active_aliases.get(normalize_member_alias(candidate.external_entity_name))
         external_entity_name = candidate.external_entity_name if target_user_id is None else None
-        log_chatbot_api_call("memory_embedding", "text-embedding-3-large")
-        embedding_response = await AsyncOpenAI().embeddings.create(model="text-embedding-3-large", input=candidate.content)
+        embedding_response = await observe_chatbot_api_call(
+            "memory_embedding",
+            "text-embedding-3-large",
+            AsyncOpenAI().embeddings.create(model="text-embedding-3-large", input=candidate.content),
+        )
         existing_memories = await self.long_term_memory_repository.get_active_for_target(target_user_id, external_entity_name)
         reconciliation = await self.long_term_memory_reconciler.reconcile(
             self._memory_candidate_for_reconciliation(candidate),

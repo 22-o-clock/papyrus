@@ -3,6 +3,8 @@ from sqlalchemy.sql import text
 
 from core.db import create_tables_for
 
+from .api_usage import ChatbotApiUsageDaily, ChatbotApiUsageMeasurementState
+from .api_usage_report import ApiUsageReportConfiguration, ApiUsageReportDelivery
 from .base import CHATBOT_DATABASE_SCHEMA, ChatbotBase
 from .custom_profile import ChatbotCustomProfile
 from .environment import DatabaseEnvironment
@@ -18,6 +20,8 @@ from .shadow_candidate import ChatbotShadowCandidate, ChatbotShadowEvaluation
 from .short_term_message import ChatbotStoredAttachment, ChatbotStoredMessage
 
 REGISTERED_MODELS: tuple[type[ChatbotBase], ...] = (
+    ChatbotApiUsageDaily,
+    ChatbotApiUsageMeasurementState,
     DatabaseEnvironment,
     ChatbotCustomProfile,
     ChatbotLongTermMemory,
@@ -32,6 +36,8 @@ REGISTERED_MODELS: tuple[type[ChatbotBase], ...] = (
     ChatbotShadowEvaluation,
     ChatbotStoredAttachment,
     ChatbotStoredMessage,
+    ApiUsageReportConfiguration,
+    ApiUsageReportDelivery,
 )
 
 __all__ = ["CHATBOT_DATABASE_SCHEMA", "create_chatbot_tables"]

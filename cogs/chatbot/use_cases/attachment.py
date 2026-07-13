@@ -6,7 +6,7 @@ from openai import AsyncOpenAI
 
 from cogs.chatbot.constants import ATTACHMENT_CONTEXT_MAX_CHARACTERS
 from cogs.chatbot.models import AttachmentAnalysis
-from cogs.chatbot.observability import log_chatbot_api_call
+from cogs.chatbot.observability import observe_chatbot_api_call
 from cogs.chatbot.repositories.short_term_message import ChatbotShortTermMessageRepository
 from cogs.chatbot.responses_api import AttachmentInMemory, ResponsePipeline
 
@@ -73,11 +73,14 @@ class AttachmentUseCases:
             ],
         )
         try:
-            log_chatbot_api_call("attachment_analysis", "gpt-5.4-mini")
-            response = await AsyncOpenAI().responses.parse(
-                model="gpt-5.4-mini",
-                input=analysis_input,
-                text_format=AttachmentAnalysis,
+            response = await observe_chatbot_api_call(
+                "attachment_analysis",
+                "gpt-5.4-mini",
+                AsyncOpenAI().responses.parse(
+                    model="gpt-5.4-mini",
+                    input=analysis_input,
+                    text_format=AttachmentAnalysis,
+                ),
             )
         except Exception:
             logger.exception("Failed to analyze chatbot attachment (attachment_id=%s)", attachment_id)
