@@ -37,7 +37,7 @@ from cogs.chatbot.use_cases.admin_validation import (
     parse_memory_admin_target,
     validate_exported_memory_ids,
 )
-from cogs.chatbot.use_cases.chatbot import ChatbotUseCases
+from cogs.chatbot.use_cases.conversation import ConversationUseCases
 from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
 
@@ -407,7 +407,7 @@ class ReferencedAuthorTest(unittest.TestCase):
 
 class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
     async def test_suppresses_embeds_for_channel_message(self) -> None:
-        cog = object.__new__(ChatbotUseCases)
+        cog = object.__new__(ConversationUseCases)
         channel = SimpleNamespace(id=100, send=AsyncMock())
         message = cast("Message", SimpleNamespace(channel=channel))
         state = ChannelProcessingState()
@@ -422,7 +422,7 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
         channel.send.assert_awaited_once_with("https://example.com", suppress_embeds=True)
 
     async def test_suppresses_embeds_for_reply(self) -> None:
-        cog = object.__new__(ChatbotUseCases)
+        cog = object.__new__(ConversationUseCases)
         reply_to_message_id = 200
         target_message = SimpleNamespace(reply=AsyncMock())
         channel = Mock(spec=discord.TextChannel)
