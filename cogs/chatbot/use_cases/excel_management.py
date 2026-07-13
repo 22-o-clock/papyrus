@@ -39,7 +39,7 @@ from cogs.chatbot.constants import (
     SHADOW_REASON_LABELS,
     SHADOW_REVIEW_HEADERS,
 )
-from cogs.chatbot.observability import log_chatbot_api_call
+from cogs.chatbot.observability import observe_chatbot_api_call
 from cogs.chatbot.repositories.long_term_memory import (
     ChatbotLongTermMemory,
     ChatbotLongTermMemoryRepository,
@@ -704,9 +704,11 @@ class ExcelManagementUseCases:
         changed = [item for item in updates if item.content != current_contents[item.memory_id]]
         if not changed:
             return
-        log_chatbot_api_call("memory_admin_embedding", "text-embedding-3-large", item_count=len(changed))
-        response = await AsyncOpenAI().embeddings.create(
-            model="text-embedding-3-large", input=[item.content for item in changed]
+        response = await observe_chatbot_api_call(
+            "memory_admin_embedding",
+            "text-embedding-3-large",
+            AsyncOpenAI().embeddings.create(model="text-embedding-3-large", input=[item.content for item in changed]),
+            item_count=len(changed),
         )
         for item, embedding_data in zip(changed, response.data, strict=True):
             item.embedding = embedding_data.embedding

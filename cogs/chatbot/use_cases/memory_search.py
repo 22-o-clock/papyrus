@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from openai import AsyncOpenAI
 
 from cogs.chatbot.constants import MEMORY_SEARCH_CONTEXT_MESSAGE_COUNT, MEMORY_SEARCH_MAXIMUM_COSINE_DISTANCE
-from cogs.chatbot.observability import log_chatbot_api_call
+from cogs.chatbot.observability import observe_chatbot_api_call
 from cogs.chatbot.repositories.member_alias import find_user_ids_by_member_alias
 from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
@@ -52,10 +52,14 @@ class MemorySearchUseCases:
             search_queries = [get_latest_memory_search_query(search_messages[-1])]
             if len(search_messages) > 1:
                 search_queries.append(search_context)
-            log_chatbot_api_call("memory_search_embedding", "text-embedding-3-large", item_count=len(search_queries))
-            embedding_response = await AsyncOpenAI().embeddings.create(
-                model="text-embedding-3-large",
-                input=search_queries,
+            embedding_response = await observe_chatbot_api_call(
+                "memory_search_embedding",
+                "text-embedding-3-large",
+                AsyncOpenAI().embeddings.create(
+                    model="text-embedding-3-large",
+                    input=search_queries,
+                ),
+                item_count=len(search_queries),
             )
             target_user_ids = {
                 user_id

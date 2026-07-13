@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from .channel_roles import ChannelRole
 from .models.custom_profile import CustomProfile
-from .observability import log_chatbot_api_call
+from .observability import observe_chatbot_api_call
 from .prompt import draft_generator_prompt, memory_extraction_prompt, memory_reconciliation_prompt
 
 logger = getLogger(__name__)
@@ -432,20 +432,23 @@ class LongTermMemoryReconciler:
         """明確な矛盾だけを構造化された関係として返します。"""
         if not existing_memories:
             return MemoryReconciliation(action="keep")
-        log_chatbot_api_call("memory_reconciliation", MEMORY_EXTRACTION_MODEL)
-        response = await self.client.responses.parse(
-            model=MEMORY_EXTRACTION_MODEL,
-            reasoning={"effort": "none"},
-            instructions=memory_reconciliation_prompt.MEMORY_RECONCILIATION_INSTRUCTIONS,
-            input=json.dumps(
-                {
-                    "new_information": new_information,
-                    "existing_memories": existing_memories,
-                    "correction_only": correction_only,
-                },
-                ensure_ascii=False,
+        response = await observe_chatbot_api_call(
+            "memory_reconciliation",
+            MEMORY_EXTRACTION_MODEL,
+            self.client.responses.parse(
+                model=MEMORY_EXTRACTION_MODEL,
+                reasoning={"effort": "none"},
+                instructions=memory_reconciliation_prompt.MEMORY_RECONCILIATION_INSTRUCTIONS,
+                input=json.dumps(
+                    {
+                        "new_information": new_information,
+                        "existing_memories": existing_memories,
+                        "correction_only": correction_only,
+                    },
+                    ensure_ascii=False,
+                ),
+                text_format=MemoryReconciliation,
             ),
-            text_format=MemoryReconciliation,
         )
         return response.output_parsed or MemoryReconciliation(action="keep")
 
@@ -462,16 +465,20 @@ class LongTermMemoryExtractor:
         member_references: list[dict[str, object]],
     ) -> LongTermMemoryExtraction:
         """投稿一覧から、根拠付きの長期記憶候補を返します。"""
-        log_chatbot_api_call("memory_extraction", MEMORY_EXTRACTION_MODEL, item_count=len(messages))
-        api_response = await self.client.responses.parse(
-            model=MEMORY_EXTRACTION_MODEL,
-            reasoning={"effort": "none"},
-            instructions=memory_extraction_prompt.MEMORY_EXTRACTION_INSTRUCTIONS,
-            input=json.dumps(
-                {"messages": [message.to_dict() for message in messages], "members": member_references},
-                ensure_ascii=False,
+        api_response = await observe_chatbot_api_call(
+            "memory_extraction",
+            MEMORY_EXTRACTION_MODEL,
+            self.client.responses.parse(
+                model=MEMORY_EXTRACTION_MODEL,
+                reasoning={"effort": "none"},
+                instructions=memory_extraction_prompt.MEMORY_EXTRACTION_INSTRUCTIONS,
+                input=json.dumps(
+                    {"messages": [message.to_dict() for message in messages], "members": member_references},
+                    ensure_ascii=False,
+                ),
+                text_format=LongTermMemoryExtraction,
             ),
-            text_format=LongTermMemoryExtraction,
+            item_count=len(messages),
         )
         if api_response.output_parsed is None:
             logger.warning("Failed to parse long-term memory extraction response")
@@ -572,27 +579,27 @@ class DraftGenerator:
                 f"\n\n{custom_profile.instructions}"
             )
 
-        log_chatbot_api_call(
+        api_response = await observe_chatbot_api_call(
             "draft_generation",
             model,
+            self.client.responses.parse(
+                input=llm_input,  # type: ignore
+                instructions=instructions,
+                model=model,
+                reasoning={"effort": reasoning_effort},
+                tools=[
+                    {
+                        "type": "web_search",
+                        "user_location": {"type": "approximate", "country": "JP"},
+                    },
+                    {
+                        "type": "code_interpreter",
+                        "container": {"type": "auto"},
+                    },
+                ],
+                text_format=LLMMessage,
+            ),
             custom_profile=(custom_profile.name if custom_profile is not None else None),
-        )
-        api_response = await self.client.responses.parse(
-            input=llm_input,  # type: ignore
-            instructions=instructions,
-            model=model,
-            reasoning={"effort": reasoning_effort},
-            tools=[
-                {
-                    "type": "web_search",
-                    "user_location": {"type": "approximate", "country": "JP"},
-                },
-                {
-                    "type": "code_interpreter",
-                    "container": {"type": "auto"},
-                },
-            ],
-            text_format=LLMMessage,
         )
 
         if api_response.output_parsed is None:
