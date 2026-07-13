@@ -2,16 +2,13 @@ import asyncio
 import datetime
 import io
 import json
-import random
-import re
 import uuid
-from dataclasses import dataclass, field
 from logging import getLogger
-from typing import Any, cast
+from typing import Any
 from zipfile import BadZipFile
 
 import discord
-from discord import Message, MessageReference, app_commands
+from discord import Message
 from discord.ext import commands
 from openai import AsyncOpenAI, OpenAIError
 from openpyxl import Workbook, load_workbook
@@ -23,12 +20,41 @@ from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.worksheet import Worksheet
-from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .channel_roles import ChannelRole, ChannelRoleManager
-from .database import (
+from cogs.chatbot.channel_roles import ChannelRole, ChannelRoleManager
+from cogs.chatbot.constants import (
+    CONVERSATION_RESET_MINUTES_KEY,
+    LONG_TERM_MEMORY_EVIDENCE_COLUMN,
+    LONG_TERM_MEMORY_HEADERS,
+    LONG_TERM_MEMORY_KIND_LABELS,
+    LONG_TERM_MEMORY_MANIFEST_SHEET_NAME,
+    LONG_TERM_MEMORY_SHEET_NAME,
+    LONG_TERM_MEMORY_SOURCE_LABELS,
+    LONG_TERM_MEMORY_STATUS_LABELS,
+    MEMBER_ALIAS_ACTION_LABELS,
+    MEMBER_ALIAS_EVIDENCE_COLUMN,
+    MEMBER_ALIAS_HEADERS,
+    MEMBER_ALIAS_MEMBER_SHEET_NAME,
+    MEMBER_ALIAS_SHEET_NAME,
+    MEMBER_ALIAS_STATUS_LABELS,
+    MEMORY_EXTRACTION_BATCH_SIZE,
+    MEMORY_EXTRACTION_WAIT_SECONDS,
+    MEMORY_RECONCILIATION_VERSION,
+    MEMORY_RECONCILIATION_VERSION_KEY,
+    MEMORY_SEARCH_CONTEXT_MESSAGE_COUNT,
+    MEMORY_SEARCH_MAXIMUM_COSINE_DISTANCE,
+    MINIMUM_CONVERSATION_RESET_MINUTES,
+    SHADOW_ACTION_LABELS,
+    SHADOW_EVALUATION_FIELDS,
+    SHADOW_EVALUATION_VALUES,
+    SHADOW_REASON_LABELS,
+    SHADOW_REVIEW_HEADERS,
+    UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY,
+    UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY,
+)
+from cogs.chatbot.database import (
     ChatbotLongTermMemory,
     ChatbotLongTermMemoryStore,
     ChatbotMemberAliasStore,
@@ -49,9 +75,10 @@ from .database import (
     find_user_ids_by_member_alias,
     normalize_member_alias,
 )
-from .database_envs import DatabaseEnvManager
-from .observability import log_chatbot_api_call
-from .responses_api import (
+from cogs.chatbot.database_envs import DatabaseEnvManager
+from cogs.chatbot.models import ChannelProcessingState
+from cogs.chatbot.observability import log_chatbot_api_call
+from cogs.chatbot.responses_api import (
     AttachmentInMemory,
     LLMMessage,
     LongTermMemoryCandidate,
@@ -64,334 +91,47 @@ from .responses_api import (
     ResponsePipeline,
     ShadowReason,
 )
-from .shadow_mode import ShadowModeManager
+from cogs.chatbot.services.history_sync import get_history_sync_after
+from cogs.chatbot.services.message_delivery import reply_with_split_response, send_split_response
+from cogs.chatbot.services.response_policy import (
+    can_change_channel_role,
+    can_execute_spontaneous_action,
+    can_start_spontaneous_generation,
+    claim_response_slot,
+    get_available_referenced_author_id,
+    get_response_debounce_seconds,
+    get_unanswered_question_wait_minutes,
+    is_generation_current,
+    is_unaddressed_question,
+    should_reset_conversation,
+    should_respond,
+)
+from cogs.chatbot.shadow_mode import ShadowModeManager
+
+from .admin_validation import (
+    parse_memory_admin_expiration,
+    parse_memory_admin_target,
+    validate_exported_memory_ids,
+)
+from .attachment import AttachmentUseCases
+from .memory_query import get_latest_memory_search_query
+from .settings import SettingsUseCases
 
 logger = getLogger(__name__)
 
-ASSISTANT_DEBOUNCE_SECONDS = 2.0
-CHAT_DEBOUNCE_MIN_SECONDS = 5.0
-CHAT_DEBOUNCE_MAX_SECONDS = 15.0
-CHAT_TEXT_COOLDOWN_SECONDS = 15 * 60
-CHAT_REACTION_COOLDOWN_SECONDS = 2 * 60
-DEFAULT_CONVERSATION_RESET_MINUTES = 12 * 60
-MINIMUM_CONVERSATION_RESET_MINUTES = 1
-CONVERSATION_RESET_MINUTES_KEY = "CHATBOT_CONVERSATION_RESET_MINUTES"
-DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES = 30
-DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES = 60
-UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY = "CHATBOT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES"
-UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY = "CHATBOT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES"
-ATTACHMENT_CONTEXT_MAX_CHARACTERS = 100
-MEMORY_EXTRACTION_BATCH_SIZE = 5
-MEMORY_EXTRACTION_WAIT_SECONDS = 10 * 60
-MEMORY_SEARCH_CONTEXT_MESSAGE_COUNT = 10
-MEMORY_SEARCH_MAXIMUM_COSINE_DISTANCE = 0.70
-HISTORY_SYNC_INITIAL_LOOKBACK_HOURS = 12
-HISTORY_SYNC_MAXIMUM_LOOKBACK_DAYS = 30
-MEMORY_RECONCILIATION_VERSION_KEY = "CHATBOT_MEMORY_RECONCILIATION_VERSION"
-MEMORY_RECONCILIATION_VERSION = "2"
 
-QUESTION_ENDING_PATTERN = re.compile(r"(?:\?|ですか|ますか|でしょうか|かな|の\?|何\?|どう\?|誰\?|どこ\?|いつ\?)$")
-SHADOW_EVALUATION_FIELDS = (
-    "action_appropriate",
-    "context_understood",
-    "identity_correct",
-    "length_natural",
-    "non_intrusive",
-    "worth_posting",
-)
-SHADOW_EVALUATION_VALUES = {"◯", "\u00d7", "△"}
-SHADOW_REVIEW_HEADERS = {
-    "trigger_message": "反応元メッセージ",
-    "target_message": "反応対象メッセージ",
-    "conversation_context": "会話抜粋",
-    "action": "選択した行動",
-    "content": "生成文",
-    "reaction_emoji": "リアクション",
-    "reason": "判断理由",
-    "action_appropriate": "行動選択の適切さ",
-    "context_understood": "文脈の理解",
-    "identity_correct": "人物の区別",
-    "length_natural": "長さの自然さ",
-    "non_intrusive": "邪魔でない",
-    "worth_posting": "総合評価",
-    "comment": "コメント",
-    "created_at": "作成日時",
-    "candidate_id": "候補ID",
-    "channel_id": "チャンネルID",
-    "trigger_message_id": "反応元メッセージID",
-    "reply_to_message_id": "反応対象メッセージID",
-    "context_message_ids": "文脈メッセージID一覧",
-}
-SHADOW_ACTION_LABELS = {
-    "silence": "沈黙",
-    "reaction": "リアクション",
-    "reply": "返信",
-    "message": "通常投稿",
-}
-SHADOW_REASON_LABELS = {
-    "natural_contribution": "自然な会話",
-    "helpful_unanswered_question": "未回答質問への回答",
-    "avoid_interrupting_humans": "人間の会話を優先",
-    "no_helpful_contribution": "有益な回答ができない",
-    "identity_uncertain": "発言者を区別できない",
-    "cooldown": "クールダウン中",
-}
-MEMBER_ALIAS_SHEET_NAME = "別名管理"
-MEMBER_ALIAS_MEMBER_SHEET_NAME = "メンバー一覧"
-MEMBER_ALIAS_ACTION_LABELS = {
-    "keep": "変更なし",
-    "change_target": "対象者を変更",
-    "invalidate": "無効化",
-}
-MEMBER_ALIAS_STATUS_LABELS = {
-    "active": "有効",
-    "ambiguous": "曖昧",
-    "invalidated": "無効",
-}
-MEMBER_ALIAS_HEADERS = (
-    "処理",
-    "別名",
-    "変更後の対象者",
-    "現在の対象者",
-    "状態",
-    "根拠",
-    "投稿リンク",
-    "更新日時",
-    "別名ID",
-    "対象者ID",
-    "正規化別名",
-)
-MEMBER_ALIAS_EVIDENCE_COLUMN = 6
-LONG_TERM_MEMORY_SHEET_NAME = "長期記憶管理"
-LONG_TERM_MEMORY_MANIFEST_SHEET_NAME = "出力記憶ID"
-LONG_TERM_MEMORY_ACTION_LABELS = {"keep": "変更なし", "update": "更新", "invalidate": "無効化", "activate": "有効化"}
-LONG_TERM_MEMORY_KIND_LABELS = {"profile": "プロフィール", "ongoing": "継続中", "temporary": "一時的", "shared": "共有"}
-LONG_TERM_MEMORY_SOURCE_LABELS = {"self_statement": "本人発言", "third_party": "第三者発言", "inference": "推測"}
-LONG_TERM_MEMORY_STATUS_LABELS = {
-    "active": "有効",
-    "invalidated": "無効",
-    "superseded": "置換済み",
-    "conflicted": "競合",
-    "expired": "期限切れ",
-}
-LONG_TERM_MEMORY_HEADERS = (
-    "処理",
-    "内容",
-    "対象種別",
-    "変更後の対象",
-    "現在の対象",
-    "種類",
-    "情報源",
-    "機微情報",
-    "有効期限",
-    "状態",
-    "根拠",
-    "投稿リンク",
-    "元投稿日時",
-    "作成日時",
-    "置換先ID",
-    "競合グループID",
-    "記憶ID",
-)
-LONG_TERM_MEMORY_EVIDENCE_COLUMN = 11
-
-
-class AttachmentAnalysis(BaseModel):
-    """短期文脈に保存する添付ファイルの要約です。"""
-
-    summary: str
-    important_text: str
-
-
-@dataclass
-class ChannelProcessingState:
-    """チャンネルごとの生成状態と生成中に受信したメッセージを保持します。"""
-
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    generating: bool = False
-    pending_messages: list[Message] = field(default_factory=list)
-    queued_response_message: Message | None = None
-    queued_response_is_explicit_call: bool = False
-    debounce_task: asyncio.Task[None] | None = None
-    debounced_response_message: Message | None = None
-    debounced_response_is_explicit_call: bool = False
-    generation_revision: int = 0
-    last_spontaneous_action_at: float | None = None
-    last_human_message_timestamp: datetime.datetime | None = None
-    unanswered_question_task: asyncio.Task[None] | None = None
-    unanswered_question_message_id: int | None = None
-    queued_response_is_unanswered_question: bool = False
-    debounced_response_is_unanswered_question: bool = False
-
-
-def claim_response_slot(
-    state: ChannelProcessingState,
-    message: Message,
-    *,
-    is_explicit_call: bool,
-    is_unanswered_question: bool,
-) -> bool:
-    """生成枠を確保し、使用中の場合は次の返信対象としてメッセージを保持します。"""
-    if state.generating:
-        state.queued_response_message = message
-        state.queued_response_is_explicit_call = is_explicit_call
-        state.queued_response_is_unanswered_question = is_unanswered_question
-        state.generation_revision += 1
-        return False
-
-    state.generating = True
-    return True
-
-
-def get_response_debounce_seconds(role: ChannelRole) -> float:
-    """役割に応じた返信生成前の待機秒数を返します。"""
-    if role is ChannelRole.ASSISTANT:
-        return ASSISTANT_DEBOUNCE_SECONDS
-    return random.SystemRandom().uniform(CHAT_DEBOUNCE_MIN_SECONDS, CHAT_DEBOUNCE_MAX_SECONDS)
-
-
-def is_generation_current(state: ChannelProcessingState, revision: int) -> bool:
-    """生成開始後に、回答を作り直す必要がある返信要求が追加されていないか確認します。"""
-    return state.generation_revision == revision
-
-
-def can_execute_spontaneous_action(
-    action: ResponseAction,
-    last_action_at: float | None,
-    now: float,
-) -> bool:
-    """自発反応が行動別のクールダウンを過ぎているか判定します。"""
-    if action is ResponseAction.SILENCE or last_action_at is None:
-        return True
-
-    cooldown_seconds = CHAT_REACTION_COOLDOWN_SECONDS if action is ResponseAction.REACTION else CHAT_TEXT_COOLDOWN_SECONDS
-    return now - last_action_at >= cooldown_seconds
-
-
-def can_start_spontaneous_generation(last_action_at: float | None, now: float) -> bool:
-    """全ての自発行動が抑制される期間を避けて生成を始めるか判定します。"""
-    if last_action_at is None:
-        return True
-    return now - last_action_at >= CHAT_REACTION_COOLDOWN_SECONDS
-
-
-def should_reset_conversation(
-    last_human_message_timestamp: datetime.datetime | None,
-    current_message_timestamp: datetime.datetime,
-    reset_minutes: int,
-) -> bool:
-    """最後の人間投稿から設定時間以上空いたときに会話文脈をリセットするか判定します。"""
-    if last_human_message_timestamp is None:
-        return False
-    return current_message_timestamp - last_human_message_timestamp >= datetime.timedelta(minutes=reset_minutes)
-
-
-def is_unaddressed_question(
-    *,
-    content: str,
-    is_reply: bool,
-    mentioned_user_ids: list[int],
-) -> bool:
-    """宛先のない質問として待機対象にする投稿か判定します。"""
-    if is_reply or mentioned_user_ids:
-        return False
-    normalized_content = content.replace("\uff1f", "?").strip()
-    return QUESTION_ENDING_PATTERN.search(normalized_content) is not None
-
-
-def get_unanswered_question_wait_minutes(minimum_minutes: int, maximum_minutes: int) -> int:
-    """宛先のない質問への回答を待つ時間を一様ランダムに選びます。"""
-    return random.SystemRandom().randint(minimum_minutes, maximum_minutes)
-
-
-def can_change_channel_role(*, is_thread: bool, manage_channels: bool) -> bool:
-    """スレッドでは全員、通常チャンネルでは管理権限を持つ人だけに変更を許可します。"""
-    return is_thread or manage_channels
-
-
-def get_available_referenced_author_id(reference: MessageReference) -> int | None:
-    """追加のAPI取得なしで利用できる返信元メッセージの発言者IDを返します。"""
-    if isinstance(reference.resolved, Message):
-        return reference.resolved.author.id
-    if reference.cached_message is not None:
-        return reference.cached_message.author.id
-    return None
-
-
-def should_respond(
-    role: ChannelRole,
-    *,
-    mentioned_bot: bool,
-    replied_to_bot: bool,
-) -> bool:
-    """チャンネル役割と呼びかけ方法から、応答判断を開始するか決定します。"""
-    explicitly_called = mentioned_bot or replied_to_bot
-    return explicitly_called or role is ChannelRole.CHAT
-
-
-def get_latest_memory_search_query(message: MessageInMemory) -> str:
-    """最新投稿は識別用メタデータを除き、本文の意味を優先して記憶検索へ使います。"""
-    content = message.content.strip()
-    return content or json.dumps(message.to_dict(), ensure_ascii=False)
-
-
-def parse_memory_admin_target(
-    target_type: str,
-    target_value: str,
-    member_values: dict[str, int],
-) -> tuple[int | None, str | None, str]:
-    """管理Excelの対象種別と入力値を検証します。"""
-    if target_type == "メンバー":
-        if target_value not in member_values:
-            msg = "変更後の対象メンバーが選択されていません"
-            raise ValueError(msg)
-        return member_values[target_value], None, "member"
-    if target_type == "外部対象":
-        if not target_value.strip():
-            msg = "外部対象名が空です"
-            raise ValueError(msg)
-        return None, target_value.strip(), "external"
-    if target_type == "共有情報" and not target_value.strip():
-        return None, None, "unresolved"
-    msg = "対象種別と変更後の対象が矛盾しています"
-    raise ValueError(msg)
-
-
-def parse_memory_admin_expiration(value: object) -> datetime.datetime | None:
-    """管理Excelの有効期限をUTC日時へ変換します。"""
-    if value in (None, ""):
-        return None
-    parsed = value if isinstance(value, datetime.datetime) else datetime.datetime.fromisoformat(str(value))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
-    return parsed.astimezone(datetime.UTC)
-
-
-def validate_exported_memory_ids(seen_ids: set[uuid.UUID], exported_ids: set[uuid.UUID]) -> None:
-    """Excel出力時に含まれた行が削除・追加されていないことを保証します。"""
-    if seen_ids != exported_ids:
-        msg = "出力された記憶の行が削除または追加されています"
-        raise ValueError(msg)
-
-
-def get_history_sync_after(
-    latest_stored_at: datetime.datetime | None,
-    now: datetime.datetime,
-) -> datetime.datetime:
-    """保存状況に応じて、起動時にDiscord履歴を取得する開始日時を返します。"""
-    maximum_lookback = now - datetime.timedelta(days=HISTORY_SYNC_MAXIMUM_LOOKBACK_DAYS)
-    if latest_stored_at is None:
-        return now - datetime.timedelta(hours=HISTORY_SYNC_INITIAL_LOOKBACK_HOURS)
-    return max(latest_stored_at, maximum_lookback)
-
-
-class ChatBot(commands.Cog):
+class ChatbotUseCases:
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
         self.response_pipelines: dict[int, ResponsePipeline] = {}
         self.env_manager = DatabaseEnvManager(session_factory)
         self.channel_role_manager = ChannelRoleManager(self.env_manager)
         self.shadow_mode_manager = ShadowModeManager(self.env_manager)
+        self.settings_use_cases = SettingsUseCases(
+            self.env_manager,
+            self.channel_role_manager,
+            self.shadow_mode_manager,
+        )
         self.shadow_candidate_store = ChatbotShadowCandidateStore(session_factory)
         self.short_term_message_store = ChatbotShortTermMessageStore(session_factory)
         self.memory_extraction_queue = ChatbotMemoryExtractionQueueStore(session_factory)
@@ -408,9 +148,11 @@ class ChatBot(commands.Cog):
         self._initialization_lock = asyncio.Lock()
         self._channel_states: dict[int, ChannelProcessingState] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
-        self.conversation_reset_minutes = DEFAULT_CONVERSATION_RESET_MINUTES
-        self.unanswered_question_minimum_wait_minutes = DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES
-        self.unanswered_question_maximum_wait_minutes = DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES
+        self.attachment_use_cases = AttachmentUseCases(
+            self.short_term_message_store,
+            self.response_pipelines,
+            self._background_tasks,
+        )
 
     async def initialize_response_pipeline_for_channel(self, channel_id: int) -> None:
         if self.bot.user:
@@ -439,8 +181,8 @@ class ChatBot(commands.Cog):
                                 filename=attachment.filename,
                                 kind=attachment.kind,
                                 analysis_status=attachment.analysis_status,
-                                summary=self._truncate_attachment_context(attachment.summary),
-                                important_text=self._truncate_attachment_context(attachment.important_text),
+                                summary=self.attachment_use_cases.truncate_context(attachment.summary),
+                                important_text=self.attachment_use_cases.truncate_context(attachment.important_text),
                             )
                         )
                     self.response_pipelines[channel_id].short_term_memory.restore(
@@ -467,31 +209,11 @@ class ChatBot(commands.Cog):
                     )
         return self._channel_states[channel_id]
 
-    @commands.Cog.listener()
     async def on_ready(self) -> None:
         """サーバー共通の待機時間設定を読み込みます。"""
-        self.conversation_reset_minutes = await self._load_positive_minutes(
-            CONVERSATION_RESET_MINUTES_KEY,
-            DEFAULT_CONVERSATION_RESET_MINUTES,
-        )
-        minimum_minutes = await self._load_positive_minutes(
-            UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY,
-            DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES,
-        )
-        maximum_minutes = await self._load_positive_minutes(
-            UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY,
-            DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES,
-        )
-        if minimum_minutes > maximum_minutes:
-            logger.warning(
-                "Invalid chatbot unanswered question wait range (minimum=%s, maximum=%s)",
-                minimum_minutes,
-                maximum_minutes,
-            )
+        if not await self.settings_use_cases.initialize():
             self._history_sync_complete.set()
             return
-        self.unanswered_question_minimum_wait_minutes = minimum_minutes
-        self.unanswered_question_maximum_wait_minutes = maximum_minutes
         self._history_sync_complete.clear()
         try:
             async with self._history_sync_lock:
@@ -605,7 +327,6 @@ class ChatBot(commands.Cog):
             return default
         return minutes
 
-    @app_commands.command(name="show_chatbot_role", description="このチャンネルでのChatbotの役割を表示します")
     async def show_chatbot_role(self, interaction: discord.Interaction) -> None:
         channel_id = interaction.channel_id
         if channel_id is None:
@@ -624,8 +345,6 @@ class ChatBot(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="set_chatbot_reset_minutes", description="Chatbotの会話リセット時間を変更します")
-    @app_commands.describe(minutes="最後の人間投稿から会話をリセットするまでの分数 (1以上)")
     async def set_chatbot_conversation_reset_minutes(
         self,
         interaction: discord.Interaction,
@@ -649,11 +368,6 @@ class ChatBot(commands.Cog):
             f"Chatbotの会話リセット時間を {previous_minutes}分から {minutes}分に変更しました。"
         )
 
-    @app_commands.command(name="set_chatbot_question_wait", description="宛先のない質問への回答待機時間を変更します")
-    @app_commands.describe(
-        minimum_minutes="最短待機時間 (分、1以上)",
-        maximum_minutes="最長待機時間 (分、最短以上)",
-    )
     async def set_chatbot_question_wait(
         self,
         interaction: discord.Interaction,
@@ -686,8 +400,6 @@ class ChatBot(commands.Cog):
             f"{minimum_minutes}〜{maximum_minutes}分に変更しました。"
         )
 
-    @app_commands.command(name="set_chatbot_role", description="このチャンネルでのChatbotの役割を変更します")
-    @app_commands.describe(role="assistant または chat を選択します")
     async def set_chatbot_role(self, interaction: discord.Interaction, role: ChannelRole) -> None:
         channel_id = interaction.channel_id
         if channel_id is None:
@@ -711,7 +423,6 @@ class ChatBot(commands.Cog):
             f"{interaction.user.mention} がこの{target_name}のChatbotの役割を `{role.value}` に変更しました。"
         )
 
-    @app_commands.command(name="set_chatbot_shadow_mode", description="このチャンネルのChatbotシャドーモードを変更します")
     async def set_chatbot_shadow_mode(self, interaction: discord.Interaction, *, enabled: bool) -> None:
         """雑談の自発反応を投稿せず候補として保存する設定を変更します。"""
         channel_id = interaction.channel_id
@@ -729,7 +440,6 @@ class ChatBot(commands.Cog):
         state_text = "有効" if enabled else "無効"
         await interaction.response.send_message(f"このチャンネルのChatbotシャドーモードを{state_text}にしました。")
 
-    @app_commands.command(name="export_chatbot_shadow_candidates", description="未評価のChatbotシャドー候補をExcelで出力します")
     async def export_chatbot_shadow_candidates(self, interaction: discord.Interaction) -> None:
         """実行した管理者が未評価の候補を最大100件、評価用Excel添付で返します。"""
         if not interaction.permissions.manage_guild:
@@ -828,10 +538,6 @@ class ChatBot(commands.Cog):
             file=discord.File(output, filename=f"chatbot_shadow_candidates_{timestamp}.xlsx"),
         )
 
-    @app_commands.command(
-        name="import_chatbot_shadow_reviews",
-        description="評価済みのChatbotシャドー候補Excelを取り込みます",
-    )
     async def import_chatbot_shadow_evaluations(
         self,
         interaction: discord.Interaction,
@@ -877,7 +583,6 @@ class ChatBot(commands.Cog):
             comment=row.get("comment", ""),
         )
 
-    @app_commands.command(name="export_chatbot_member_aliases", description="Chatbotのメンバー別名をExcelで出力します")
     async def export_chatbot_member_aliases(self, interaction: discord.Interaction) -> None:
         """管理者向けに全別名と根拠を一括編集用Excelで返します。"""
         if not interaction.permissions.manage_guild:
@@ -905,7 +610,6 @@ class ChatBot(commands.Cog):
             file=discord.File(output, filename=f"chatbot_member_aliases_{timestamp}.xlsx"),
         )
 
-    @app_commands.command(name="import_chatbot_member_aliases", description="編集済みのメンバー別名Excelを取り込みます")
     async def import_chatbot_member_aliases(
         self,
         interaction: discord.Interaction,
@@ -1076,7 +780,6 @@ class ChatBot(commands.Cog):
             if evidence.channel_id is not None
         )
 
-    @app_commands.command(name="export_chatbot_memories", description="Chatbotの長期記憶をExcelで出力します")
     async def export_chatbot_memories(self, interaction: discord.Interaction) -> None:
         """管理者向けに全長期記憶を一括編集用Excelで返します。"""
         if not interaction.permissions.manage_guild or interaction.guild is None:
@@ -1094,7 +797,6 @@ class ChatBot(commands.Cog):
             file=discord.File(output, filename=f"chatbot_memories_{timestamp}.xlsx"),
         )
 
-    @app_commands.command(name="import_chatbot_memories", description="編集済みの長期記憶Excelを取り込みます")
     async def import_chatbot_memories(
         self,
         interaction: discord.Interaction,
@@ -1435,7 +1137,6 @@ class ChatBot(commands.Cog):
             context.append(TextBlock(content_font, f"{message['content']}{suffix}"))
         return context
 
-    @app_commands.command(name="reset_chatbot_role", description="このチャンネル固有のChatbot役割を解除します")
     async def reset_chatbot_role(self, interaction: discord.Interaction) -> None:
         channel_id = interaction.channel_id
         if channel_id is None:
@@ -1465,7 +1166,6 @@ class ChatBot(commands.Cog):
             f"現在は `{role.value}` です。設定元: {source}。"
         )
 
-    @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
         # 起動直後の不完全な文脈で応答せず、履歴同期後に受信イベントを処理する。
         await self._history_sync_complete.wait()
@@ -1859,8 +1559,8 @@ class ChatBot(commands.Cog):
                 state.debounced_response_is_unanswered_question = False
 
             wait_minutes = get_unanswered_question_wait_minutes(
-                self.unanswered_question_minimum_wait_minutes,
-                self.unanswered_question_maximum_wait_minutes,
+                self.settings_use_cases.unanswered_question_minimum_wait_minutes,
+                self.settings_use_cases.unanswered_question_maximum_wait_minutes,
             )
             task = asyncio.create_task(self._answer_unanswered_question_after_wait(message, state, wait_minutes))
             state.unanswered_question_task = task
@@ -1914,7 +1614,6 @@ class ChatBot(commands.Cog):
             is_unanswered_question=True,
         )
 
-    @commands.Cog.listener()
     async def on_message_delete(self, message: Message) -> None:
         """待機中の質問が削除された場合は、遅延した回答を取り消します。"""
         await self.short_term_message_store.delete(message.id)
@@ -1932,7 +1631,6 @@ class ChatBot(commands.Cog):
             state.unanswered_question_task = None
             state.unanswered_question_message_id = None
 
-    @commands.Cog.listener()
     async def on_message_edit(self, before: Message, after: Message) -> None:
         """編集された投稿を短期保存と現在の短期記憶へ反映します。"""
         state = await self._ensure_channel_state(after.channel.id)
@@ -1959,7 +1657,7 @@ class ChatBot(commands.Cog):
             if not after.author.bot:
                 await self.short_term_message_store.delete_attachments(after.id)
                 for attachment in after.attachments:
-                    attachment_kind = self._get_attachment_kind(attachment.content_type)
+                    attachment_kind = self.attachment_use_cases.get_kind(attachment.content_type)
                     if attachment_kind is None:
                         continue
                     await self.short_term_message_store.save_attachment(
@@ -1972,7 +1670,7 @@ class ChatBot(commands.Cog):
                             kind=attachment_kind,
                         )
                     )
-                    self._schedule_attachment_analysis(
+                    self.attachment_use_cases.schedule(
                         after.id,
                         attachment.id,
                         attachment.filename,
@@ -2096,7 +1794,7 @@ class ChatBot(commands.Cog):
         if not message.author.bot and should_reset_conversation(
             state.last_human_message_timestamp,
             message.created_at,
-            self.conversation_reset_minutes,
+            self.settings_use_cases.conversation_reset_minutes,
         ):
             short_term_memory.reset_for_new_conversation()
 
@@ -2118,7 +1816,7 @@ class ChatBot(commands.Cog):
             )
             if not message.author.bot:
                 for attachment in message.attachments:
-                    attachment_kind = self._get_attachment_kind(attachment.content_type)
+                    attachment_kind = self.attachment_use_cases.get_kind(attachment.content_type)
                     if attachment_kind is None:
                         continue
                     await self.short_term_message_store.save_attachment(
@@ -2131,7 +1829,7 @@ class ChatBot(commands.Cog):
                             kind=attachment_kind,
                         )
                     )
-                    self._schedule_attachment_analysis(
+                    self.attachment_use_cases.schedule(
                         message.id,
                         attachment.id,
                         attachment.filename,
@@ -2140,138 +1838,6 @@ class ChatBot(commands.Cog):
                     )
         if not message.author.bot:
             state.last_human_message_timestamp = message.created_at
-
-    def _get_attachment_kind(self, content_type: str | None) -> str | None:
-        """短期文脈の解析対象にする添付種別を返します。"""
-        if content_type in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
-            return "image"
-        if content_type == "application/pdf":
-            return "pdf"
-        return None
-
-    def _schedule_attachment_analysis(
-        self,
-        message_id: int,
-        attachment_id: int,
-        filename: str,
-        url: str,
-        kind: str,
-    ) -> None:
-        """添付内容の要約を、投稿処理を待たせずに生成します。"""
-        self._update_attachment_context(
-            message_id,
-            AttachmentInMemory(
-                attachment_id=attachment_id,
-                filename=filename,
-                kind=kind,
-                analysis_status="pending",
-            ),
-        )
-        task = asyncio.create_task(self._analyze_attachment(message_id, attachment_id, filename, url, kind))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
-    async def _analyze_attachment(
-        self,
-        message_id: int,
-        attachment_id: int,
-        filename: str,
-        url: str,
-        kind: str,
-    ) -> None:
-        """画像またはPDFを解析し、短い説明と重要テキストを保存します。"""
-        content_type = "input_image" if kind == "image" else "input_file"
-        content_key = "image_url" if kind == "image" else "file_url"
-        analysis_input = cast(
-            "Any",
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": (
-                                "添付内容をそれぞれ100文字以内で短く要約してください。"
-                                "画像やPDF内で会話の理解に重要な文字情報があれば重要テキストに抜粋し、"
-                                "なければ空文字にしてください。"
-                            ),
-                        },
-                        {"type": content_type, content_key: url},
-                    ],
-                }
-            ],
-        )
-        try:
-            log_chatbot_api_call("attachment_analysis", "gpt-5.4-mini")
-            response = await AsyncOpenAI().responses.parse(
-                model="gpt-5.4-mini",
-                input=analysis_input,
-                text_format=AttachmentAnalysis,
-            )
-        except Exception:
-            logger.exception("Failed to analyze chatbot attachment (attachment_id=%s)", attachment_id)
-            await self.short_term_message_store.save_attachment_analysis(
-                attachment_id,
-                summary=None,
-                important_text=None,
-                status="failed",
-            )
-            self._update_attachment_context(
-                message_id,
-                AttachmentInMemory(
-                    attachment_id=attachment_id,
-                    filename=filename,
-                    kind=kind,
-                    analysis_status="failed",
-                ),
-            )
-            return
-        if response.output_parsed is None:
-            logger.warning("Failed to parse chatbot attachment analysis (attachment_id=%s)", attachment_id)
-            await self.short_term_message_store.save_attachment_analysis(
-                attachment_id,
-                summary=None,
-                important_text=None,
-                status="failed",
-            )
-            self._update_attachment_context(
-                message_id,
-                AttachmentInMemory(
-                    attachment_id=attachment_id,
-                    filename=filename,
-                    kind=kind,
-                    analysis_status="failed",
-                ),
-            )
-            return
-        await self.short_term_message_store.save_attachment_analysis(
-            attachment_id,
-            summary=self._truncate_attachment_context(response.output_parsed.summary),
-            important_text=self._truncate_attachment_context(response.output_parsed.important_text),
-            status="completed",
-        )
-        self._update_attachment_context(
-            message_id,
-            AttachmentInMemory(
-                attachment_id=attachment_id,
-                filename=filename,
-                kind=kind,
-                analysis_status="completed",
-                summary=self._truncate_attachment_context(response.output_parsed.summary),
-                important_text=self._truncate_attachment_context(response.output_parsed.important_text),
-            ),
-        )
-
-    def _truncate_attachment_context(self, text: str | None) -> str | None:
-        """添付の解析結果を会話文脈用の上限以内に収めます。"""
-        if text is None:
-            return None
-        return text[:ATTACHMENT_CONTEXT_MAX_CHARACTERS]
-
-    def _update_attachment_context(self, message_id: int, attachment: AttachmentInMemory) -> None:
-        """解析完了後、稼働中の短期記憶へ添付情報を反映します。"""
-        for response_pipeline in self.response_pipelines.values():
-            response_pipeline.short_term_memory.set_attachment_analysis(message_id, attachment)
 
     async def _generate_and_send_response(
         self,
@@ -2386,7 +1952,7 @@ class ChatBot(commands.Cog):
             return
 
         if response.action is ResponseAction.MESSAGE:
-            await message.channel.send(response.content, suppress_embeds=True)
+            await send_split_response(message.channel, response.content)
             if not is_explicit_call:
                 state.last_spontaneous_action_at = now
             return
@@ -2417,7 +1983,7 @@ class ChatBot(commands.Cog):
                 state.last_spontaneous_action_at = now
             return
 
-        await target_message.reply(response.content, suppress_embeds=True)
+        await reply_with_split_response(target_message, response.content)
         if not is_explicit_call:
             state.last_spontaneous_action_at = now
 
@@ -2445,7 +2011,3 @@ class ChatBot(commands.Cog):
                 context_snapshot=[memory_message.to_dict() for memory_message in short_term_memory.memory],
             )
         )
-
-
-async def setup(bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
-    await bot.add_cog(ChatBot(bot, session_factory))

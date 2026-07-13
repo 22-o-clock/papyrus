@@ -9,32 +9,36 @@ import discord
 from discord import Message, MessageReference
 
 from cogs.chatbot.channel_roles import ChannelRole
-from cogs.chatbot.chatbot_cog import (
+from cogs.chatbot.constants import (
     ASSISTANT_DEBOUNCE_SECONDS,
     CHAT_DEBOUNCE_MAX_SECONDS,
     CHAT_DEBOUNCE_MIN_SECONDS,
     CHAT_REACTION_COOLDOWN_SECONDS,
     CHAT_TEXT_COOLDOWN_SECONDS,
-    ChannelProcessingState,
-    ChatBot,
+)
+from cogs.chatbot.models import ChannelProcessingState
+from cogs.chatbot.responses_api import LLMMessage, MessageInMemory, ResponseAction
+from cogs.chatbot.services.history_sync import get_history_sync_after
+from cogs.chatbot.services.response_policy import (
     can_change_channel_role,
     can_execute_spontaneous_action,
     can_start_spontaneous_generation,
     claim_response_slot,
     get_available_referenced_author_id,
-    get_history_sync_after,
-    get_latest_memory_search_query,
     get_response_debounce_seconds,
     get_unanswered_question_wait_minutes,
     is_generation_current,
     is_unaddressed_question,
-    parse_memory_admin_expiration,
-    parse_memory_admin_target,
     should_reset_conversation,
     should_respond,
+)
+from cogs.chatbot.use_cases.admin_validation import (
+    parse_memory_admin_expiration,
+    parse_memory_admin_target,
     validate_exported_memory_ids,
 )
-from cogs.chatbot.responses_api import LLMMessage, MessageInMemory, ResponseAction
+from cogs.chatbot.use_cases.chatbot import ChatbotUseCases
+from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
 
 def make_discord_message(author_id: int) -> Message:
@@ -403,7 +407,7 @@ class ReferencedAuthorTest(unittest.TestCase):
 
 class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
     async def test_suppresses_embeds_for_channel_message(self) -> None:
-        cog = object.__new__(ChatBot)
+        cog = object.__new__(ChatbotUseCases)
         channel = SimpleNamespace(id=100, send=AsyncMock())
         message = cast("Message", SimpleNamespace(channel=channel))
         state = ChannelProcessingState()
@@ -418,7 +422,7 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
         channel.send.assert_awaited_once_with("https://example.com", suppress_embeds=True)
 
     async def test_suppresses_embeds_for_reply(self) -> None:
-        cog = object.__new__(ChatBot)
+        cog = object.__new__(ChatbotUseCases)
         reply_to_message_id = 200
         target_message = SimpleNamespace(reply=AsyncMock())
         channel = Mock(spec=discord.TextChannel)
