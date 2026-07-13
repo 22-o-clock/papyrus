@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from cogs import admin, agree, audit, chatbot, hwh, monitor, moving, remind, speak, voice, voicevox
 from cogs.chatbot.repositories.schema import CHATBOT_DATABASE_SCHEMA, create_chatbot_tables
 from core.db import create_session_factory, create_tables, dispose_engine, init_engine
+from core.debug_cogs import load_debug_cogs
 
 
 async def load_all_cogs(
@@ -41,7 +42,10 @@ class MyBot(commands.Bot):
             search_path=f"{CHATBOT_DATABASE_SCHEMA},extensions,public",
         )
         self._chatbot_engine = chatbot_engine
-        await load_all_cogs(self, session_factory, chatbot_session_factory)
+        if os.getenv("DEBUG", "").lower() == "true":
+            await load_debug_cogs(self, session_factory, chatbot_session_factory)
+        else:
+            await load_all_cogs(self, session_factory, chatbot_session_factory)
         await create_tables()
         await create_chatbot_tables(chatbot_engine)
         my_server = await self.fetch_guild(int(os.environ["SERVER_ID"]))
