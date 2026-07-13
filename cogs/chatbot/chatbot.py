@@ -33,6 +33,22 @@ class ChatBot(commands.Cog):
     async def on_message_edit(self, before: Message, after: Message) -> None:
         await self.conversation_use_cases.on_message_edit(before, after)
 
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        await self.conversation_use_cases.on_raw_reaction_change(payload.message_id, payload.channel_id)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        await self.conversation_use_cases.on_raw_reaction_change(payload.message_id, payload.channel_id)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_clear(self, payload: discord.RawReactionClearEvent) -> None:
+        await self.conversation_use_cases.on_raw_reaction_change(payload.message_id, payload.channel_id)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_clear_emoji(self, payload: discord.RawReactionClearEmojiEvent) -> None:
+        await self.conversation_use_cases.on_raw_reaction_change(payload.message_id, payload.channel_id)
+
     @app_commands.command(name="show_chatbot_role", description="このチャンネルでのChatbotの役割を表示します")
     async def show_chatbot_role(self, interaction: discord.Interaction) -> None:
         await self.settings_use_cases.show_role(interaction)

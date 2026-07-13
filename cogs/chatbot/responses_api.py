@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from logging import getLogger
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, cast
 
 import dateutil
 import discord
@@ -24,6 +24,26 @@ DRAFT_GENERATOR_MODEL = "gpt-5.6-terra"
 CUSTOM_PROFILE_DEFAULT_MODEL = "gpt-5.6"
 MEMORY_EXTRACTION_MODEL = "gpt-5.6-terra"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
+REACTION_CONTEXT_INSTRUCTIONS = """
+
+# メッセージのリアクション情報
+
+- reactionsは各メッセージに付いたリアクションのスナップショットです。
+- 会話の温度感や流れを補う弱いシグナルとして参照してください。
+- リアクションだけを根拠に、発言内容への同意、事実の正しさ、問題の解決を断定しないでください。
+- リアクションから人物の恒久的な嗜好を断定しないでください。
+- reactors_truncatedまたはreactors_incompleteがtrueの場合、reactorsは全利用者の一覧ではありません。
+- countをリアクションの総数として扱ってください。
+- reaction_typeがburstのものはスーパーリアクションです。
+- スーパーリアクションも通常リアクションと同様に、補助情報として慎重に解釈してください。
+"""
+
+
+def _coerce_int(value: object) -> int:
+    """DBから復元したJSON値を整数へ安全に変換します。"""
+    if isinstance(value, int | str):
+        return int(value)
+    return 0
 
 
 @dataclass
@@ -52,6 +72,85 @@ class AttachmentInMemory:
 
 
 @dataclass
+class ReactionUserInMemory:
+    """リアクションしたDiscordユーザーの取得時点の情報。"""
+
+    user_id: int
+    display_name: str
+    is_bot: bool
+
+    def to_dict(self) -> dict[str, object]:
+        """発言生成用のユーザー情報を辞書形式で返します。"""
+        return {
+            "user_id": self.user_id,
+            "display_name": self.display_name,
+            "is_bot": self.is_bot,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, object]) -> Self:
+        """DBのJSON表現からリアクションユーザーを復元します。"""
+        return cls(
+            user_id=_coerce_int(value["user_id"]),
+            display_name=str(value["display_name"]),
+            is_bot=bool(value["is_bot"]),
+        )
+
+
+@dataclass
+class ReactionInMemory:
+    """短期文脈で参照するDiscordリアクションのスナップショット。"""
+
+    emoji_name: str
+    emoji_id: int | None
+    animated: bool
+    reaction_type: Literal["normal", "burst"]
+    count: int
+    reactors: list[ReactionUserInMemory] = field(default_factory=list)
+    reactors_truncated: bool = False
+    reactors_incomplete: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        """発言生成用のリアクション情報を辞書形式で返します。"""
+        return {
+            "emoji_name": self.emoji_name,
+            "emoji_id": self.emoji_id,
+            "animated": self.animated,
+            "reaction_type": self.reaction_type,
+            "count": self.count,
+            "reactors": [reactor.to_dict() for reactor in self.reactors],
+            "reactors_truncated": self.reactors_truncated,
+            "reactors_incomplete": self.reactors_incomplete,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, object]) -> Self:
+        """DBのJSON表現からリアクションを復元します。"""
+        raw_reactors = value.get("reactors", [])
+        reactors = (
+            [
+                ReactionUserInMemory.from_dict(cast("dict[str, object]", reactor))
+                for reactor in raw_reactors
+                if isinstance(reactor, dict)
+            ]
+            if isinstance(raw_reactors, list)
+            else []
+        )
+        reaction_type = "burst" if value.get("reaction_type") == "burst" else "normal"
+        raw_emoji_id = value.get("emoji_id")
+        return cls(
+            emoji_name=str(value.get("emoji_name", "")),
+            emoji_id=int(raw_emoji_id) if isinstance(raw_emoji_id, int | str) else None,
+            animated=bool(value.get("animated", False)),
+            reaction_type=reaction_type,
+            count=_coerce_int(value.get("count", 0)),
+            reactors=reactors,
+            reactors_truncated=bool(value.get("reactors_truncated", False)),
+            reactors_incomplete=bool(value.get("reactors_incomplete", False)),
+        )
+
+
+@dataclass
 class MessageInMemory:
     """短期記憶内に保存されるメッセージを表すデータクラス。
 
@@ -67,6 +166,7 @@ class MessageInMemory:
         image_url: メッセージに含まれる画像のURL (存在する場合)
         pdf_url: メッセージに含まれるPDFのURL (存在する場合)
         attachments: 添付の解析状態と、完了済みの場合は要約・重要テキスト
+        reactions: 発言生成時に参照するリアクション情報
 
     """
 
@@ -81,15 +181,16 @@ class MessageInMemory:
     image_url: str | None = None
     pdf_url: str | None = None
     attachments: list[AttachmentInMemory] = field(default_factory=list)
+    reactions: list[ReactionInMemory] = field(default_factory=list)
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self, *, include_reactions: bool = True) -> dict[str, object]:
         """プロンプト作成に用いる要素のみを辞書形式で出力します。
 
         Returns:
             人物と返信先をDiscord IDで識別できる辞書
 
         """
-        return {
+        result: dict[str, object] = {
             "message_id": self.message_id,
             "author_id": self.author_id,
             "author_name": self.author_name,
@@ -100,6 +201,9 @@ class MessageInMemory:
             "is_stale_context": self.is_stale_context,
             "attachments": [attachment.to_dict() for attachment in self.attachments],
         }
+        if include_reactions:
+            result["reactions"] = [reaction.to_dict() for reaction in self.reactions]
+        return result
 
 
 class ShortTermMemory:
@@ -263,6 +367,12 @@ class ShortTermMemory:
             if existing_attachment.attachment_id != attachment.attachment_id
         ]
         message.attachments.append(attachment)
+
+    def set_reactions(self, message_id: int, reactions: list[ReactionInMemory]) -> None:
+        """対象メッセージのリアクションを最新スナップショットへ置き換えます。"""
+        message = self.get_message(message_id)
+        if message is not None:
+            message.reactions = reactions
 
     def can_target_message(self, message_id: int) -> bool:
         """返信またはリアクションの対象にできる現在の会話内メッセージか判定します。"""
@@ -473,7 +583,10 @@ class LongTermMemoryExtractor:
                 reasoning={"effort": "none"},
                 instructions=memory_extraction_prompt.MEMORY_EXTRACTION_INSTRUCTIONS,
                 input=json.dumps(
-                    {"messages": [message.to_dict() for message in messages], "members": member_references},
+                    {
+                        "messages": [message.to_dict(include_reactions=False) for message in messages],
+                        "members": member_references,
+                    },
                     ensure_ascii=False,
                 ),
                 text_format=LongTermMemoryExtraction,
@@ -557,16 +670,19 @@ class DraftGenerator:
         if request_message.pdf_url:
             llm_input[0]["content"].append({"type": "input_file", "file_url": request_message.pdf_url})
 
-        instructions = draft_generator_prompt.DRAFT_INSTRUCTIONS.format(
-            bot_name=self.bot_name,
-            channel_role=channel_role.value,
-            unanswered_question_instruction=(
-                "- この回答は、人間からの回答を待った宛先のない質問へのものです。"
-                "短く明確に答えられる場合だけ応答してください。"
-                "詳しい調査や長い説明が必要ならsilenceを選んでください。"
-                if is_unanswered_question
-                else ""
-            ),
+        instructions = (
+            draft_generator_prompt.DRAFT_INSTRUCTIONS.format(
+                bot_name=self.bot_name,
+                channel_role=channel_role.value,
+                unanswered_question_instruction=(
+                    "- この回答は、人間からの回答を待った宛先のない質問へのものです。"
+                    "短く明確に答えられる場合だけ応答してください。"
+                    "詳しい調査や長い説明が必要ならsilenceを選んでください。"
+                    if is_unanswered_question
+                    else ""
+                ),
+            )
+            + REACTION_CONTEXT_INSTRUCTIONS
         )
         model = DRAFT_GENERATOR_MODEL
         reasoning_effort = "medium"

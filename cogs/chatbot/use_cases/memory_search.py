@@ -46,7 +46,7 @@ class MemorySearchUseCases:
             if not search_messages:
                 return ""
             search_context = json.dumps(
-                [memory_message.to_dict() for memory_message in search_messages],
+                [memory_message.to_dict(include_reactions=False) for memory_message in search_messages],
                 ensure_ascii=False,
             )
             search_queries = [get_latest_memory_search_query(search_messages[-1])]

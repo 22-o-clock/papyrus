@@ -19,17 +19,20 @@ from cogs.chatbot.repositories.short_term_message import (
     ChatbotShortTermMessageRepository,
     StoredAttachmentInput,
     StoredMessageInput,
+    StoredReactionSnapshotInput,
 )
 from cogs.chatbot.responses_api import (
     AttachmentInMemory,
     LLMMessage,
     MessageInMemory,
+    ReactionInMemory,
     ResponseAction,
     ResponsePipeline,
     ShadowReason,
 )
 from cogs.chatbot.services.history_sync import get_history_sync_after
 from cogs.chatbot.services.message_delivery import reply_with_split_response, send_split_response
+from cogs.chatbot.services.reaction_context import collect_message_reactions, preserve_known_reactors
 from cogs.chatbot.services.response_policy import (
     can_execute_spontaneous_action,
     can_start_spontaneous_generation,
@@ -117,6 +120,9 @@ class ConversationUseCases:
                     stored_attachments = await self.short_term_message_repository.get_attachments(
                         [stored.message_id for stored in stored_messages]
                     )
+                    stored_reaction_snapshots = await self.short_term_message_repository.get_reaction_snapshots(
+                        [stored.message_id for stored in stored_messages]
+                    )
                     attachments_by_message_id: dict[int, list[AttachmentInMemory]] = {}
                     for attachment in stored_attachments:
                         attachments_by_message_id.setdefault(attachment.message_id, []).append(
@@ -129,6 +135,14 @@ class ConversationUseCases:
                                 important_text=self.attachment_use_cases.truncate_context(attachment.important_text),
                             )
                         )
+                    reactions_by_message_id = {
+                        snapshot.message_id: [
+                            ReactionInMemory.from_dict(reaction)
+                            for reaction in snapshot.reactions
+                            if isinstance(reaction, dict)
+                        ]
+                        for snapshot in stored_reaction_snapshots
+                    }
                     self.response_pipelines[channel_id].short_term_memory.restore(
                         [
                             MessageInMemory(
@@ -140,6 +154,7 @@ class ConversationUseCases:
                                 mentioned_user_ids=stored.mentioned_user_ids,
                                 timestamp=stored.created_at,
                                 attachments=attachments_by_message_id.get(stored.message_id, []),
+                                reactions=reactions_by_message_id.get(stored.message_id, []),
                             )
                             for stored in stored_messages
                         ]
@@ -185,6 +200,7 @@ class ConversationUseCases:
                     latest_stored_at = await self.short_term_message_repository.get_latest_created_at(channel.id)
                     after = get_history_sync_after(latest_stored_at, now)
                     state = await self._ensure_channel_state(channel.id)
+                    await self._refresh_retained_message_reactions(channel)
                     channel_message_count = 0
                     async for message in channel.history(after=after, oldest_first=True, limit=None):
                         await self._append_message_to_short_term_memory(message, state)
@@ -202,6 +218,37 @@ class ConversationUseCases:
                 except Exception:
                     logger.exception("Failed to synchronize chatbot Discord history (channel_id=%s)", channel.id)
         logger.info("Completed chatbot Discord history sync (message_count=%s)", synchronized_message_count)
+
+    async def _refresh_retained_message_reactions(
+        self,
+        channel: discord.TextChannel | discord.Thread,
+    ) -> None:
+        """再起動中の変更を補うため、実際に残る短期文脈だけDiscordと照合します。"""
+        short_term_memory = self.response_pipelines[channel.id].short_term_memory
+        if not short_term_memory.memory:
+            return
+        retained_messages = {message.message_id: message for message in short_term_memory.memory}
+        oldest_timestamp = min(message.timestamp for message in retained_messages.values())
+        snapshots: list[StoredReactionSnapshotInput] = []
+        async for message in channel.history(
+            after=oldest_timestamp - datetime.timedelta(microseconds=1),
+            oldest_first=True,
+            limit=None,
+        ):
+            stored_message = retained_messages.get(message.id)
+            if stored_message is None:
+                continue
+            reactions = await collect_message_reactions(message)
+            preserve_known_reactors(reactions, stored_message.reactions)
+            short_term_memory.set_reactions(message.id, reactions)
+            snapshots.append(
+                StoredReactionSnapshotInput(
+                    message_id=message.id,
+                    reactions=[reaction.to_dict() for reaction in reactions],
+                )
+            )
+        short_term_memory.forget()
+        await self.short_term_message_repository.save_reaction_snapshots(snapshots)
 
     async def on_message(self, message: Message) -> None:
         # 起動直後の不完全な文脈で応答せず、履歴同期後に受信イベントを処理する。
@@ -481,6 +528,7 @@ class ConversationUseCases:
                     is_bot=after.author.bot,
                 )
             )
+            await self._synchronize_message_reactions(after)
             if not after.author.bot:
                 await self.short_term_message_repository.delete_attachments(after.id)
                 for attachment in after.attachments:
@@ -647,6 +695,7 @@ class ConversationUseCases:
                     is_bot=message.author.bot,
                 )
             )
+            await self._synchronize_message_reactions(message)
             if not message.author.bot:
                 for attachment in message.attachments:
                     attachment_kind = self.attachment_use_cases.get_kind(attachment.content_type)
@@ -671,6 +720,59 @@ class ConversationUseCases:
                     )
         if not message.author.bot:
             state.last_human_message_timestamp = message.created_at
+
+    async def on_raw_reaction_change(self, message_id: int, channel_id: int) -> None:
+        """リアクションイベントを応答開始条件にせず、短期文脈だけ更新します。"""
+        await self._history_sync_complete.wait()
+        if not await self.short_term_message_repository.contains(message_id):
+            return
+        channel = self.bot.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel | discord.Thread):
+            return
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.HTTPException:
+            logger.warning(
+                "Failed to fetch reacted chatbot message (message_id=%s, channel_id=%s)",
+                message_id,
+                channel_id,
+                exc_info=True,
+            )
+            return
+        state = self._channel_states.get(channel_id)
+        if state is None:
+            reactions = await collect_message_reactions(message)
+            snapshots = await self.short_term_message_repository.get_reaction_snapshots([message_id])
+            previous_reactions = (
+                [ReactionInMemory.from_dict(reaction) for reaction in snapshots[0].reactions if isinstance(reaction, dict)]
+                if snapshots
+                else []
+            )
+            preserve_known_reactors(reactions, previous_reactions)
+            await self._save_message_reactions(message_id, reactions)
+            return
+        async with state.lock:
+            await self._synchronize_message_reactions(message)
+
+    async def _synchronize_message_reactions(self, message: Message) -> None:
+        """Discord上の最新リアクションを短期記憶とDBへ反映します。"""
+        reactions = await collect_message_reactions(message)
+        short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
+        stored_message = short_term_memory.get_message(message.id)
+        previous_reactions = stored_message.reactions if stored_message is not None else []
+        preserve_known_reactors(reactions, previous_reactions)
+        short_term_memory.set_reactions(message.id, reactions)
+        short_term_memory.forget()
+        await self._save_message_reactions(message.id, reactions)
+
+    async def _save_message_reactions(self, message_id: int, reactions: list[ReactionInMemory]) -> None:
+        """リアクションの構造化スナップショットを永続化します。"""
+        await self.short_term_message_repository.save_reactions(
+            StoredReactionSnapshotInput(
+                message_id=message_id,
+                reactions=[reaction.to_dict() for reaction in reactions],
+            )
+        )
 
     async def _generate_and_send_response(
         self,
