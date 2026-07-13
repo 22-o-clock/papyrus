@@ -15,6 +15,9 @@ from cogs.chatbot.responses_api import (
     LLMMessage,
     LongTermMemoryExtractor,
     LongTermMemoryReconciler,
+    MessageInMemory,
+    ReactionInMemory,
+    ReactionUserInMemory,
     ResponseAction,
     ResponsePipeline,
     ShortTermMemory,
@@ -170,6 +173,35 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
             "analysis_status": "pending",
         }:
             self.fail("解析中の添付に未完成の要約や重要テキストが含まれています")
+
+    async def test_serializes_reactions_only_for_response_context(self) -> None:
+        reactor_user_id = 20
+        memory = ShortTermMemory()
+        await memory.append(make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="了解")))
+        memory.set_reactions(
+            1,
+            [
+                ReactionInMemory(
+                    emoji_name="👍",
+                    emoji_id=None,
+                    animated=False,
+                    reaction_type="normal",
+                    count=2,
+                    reactors=[ReactionUserInMemory(user_id=reactor_user_id, display_name="反応者", is_bot=False)],
+                    reactors_incomplete=True,
+                )
+            ],
+        )
+
+        response_context = json.loads(memory.to_json())[0]
+        memory_context = memory.memory[0].to_dict(include_reactions=False)
+
+        if response_context["reactions"][0]["reactors"][0]["user_id"] != reactor_user_id:
+            self.fail("発言生成用の文脈にリアクションした人物が含まれていません")
+        if not response_context["reactions"][0]["reactors_incomplete"]:
+            self.fail("リアクション利用者の不完全取得状態が保持されていません")
+        if "reactions" in memory_context:
+            self.fail("長期記憶用に除外したリアクションが残っています")
 
 
 class LLMMessageTest(unittest.TestCase):
@@ -368,6 +400,34 @@ class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
             self.fail("記憶抽出がTerraを使用していません")
         if responses.calls[0]["reasoning"] != {"effort": "none"}:
             self.fail("記憶抽出の推論強度がnoneになっていません")
+
+    async def test_excludes_reactions_from_memory_extraction(self) -> None:
+        responses = ConfigRecordingResponses(SimpleNamespace(candidates=[]))
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        message = MessageInMemory(
+            message_id=1,
+            author_id=10,
+            author_name="発言者",
+            content="本文",
+            reply_to_message_id=None,
+            mentioned_user_ids=[],
+            timestamp=datetime.datetime(2026, 7, 11, tzinfo=datetime.UTC),
+            reactions=[
+                ReactionInMemory(
+                    emoji_name="👍",
+                    emoji_id=None,
+                    animated=False,
+                    reaction_type="normal",
+                    count=1,
+                )
+            ],
+        )
+
+        await LongTermMemoryExtractor(client).extract([message], [])
+
+        serialized_input = json.loads(str(responses.calls[0]["input"]))
+        if "reactions" in serialized_input["messages"][0]:
+            self.fail("リアクションが長期記憶抽出へ渡されています")
 
     async def test_reconciles_memories_with_terra_without_reasoning(self) -> None:
         responses = ConfigRecordingResponses(SimpleNamespace(action="keep", existing_memory_ids=[]))

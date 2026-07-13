@@ -47,6 +47,20 @@ class ChatbotStoredAttachment(ChatbotBase):
     analyzed_at = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
+class ChatbotStoredReactionSnapshot(ChatbotBase):
+    """メッセージ単位で保存するリアクションの最新スナップショット。"""
+
+    __tablename__ = "chatbot_stored_reaction_snapshots"
+
+    message_id = mapped_column(
+        BigInteger,
+        ForeignKey("chatbot.chatbot_stored_messages.message_id"),
+        primary_key=True,
+    )
+    reactions = mapped_column(JSONB, nullable=False)
+    updated_at = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
 @dataclass
 class StoredMessageInput:
     """短期文脈として保存するDiscordメッセージ。"""
@@ -74,6 +88,14 @@ class StoredAttachmentInput:
     kind: str
 
 
+@dataclass
+class StoredReactionSnapshotInput:
+    """短期文脈として保存するリアクションの最新状態。"""
+
+    message_id: int
+    reactions: list[dict[str, object]]
+
+
 class ChatbotShortTermMessageRepository:
     """短期文脈メッセージを30日間保存します。"""
 
@@ -87,6 +109,9 @@ class ChatbotShortTermMessageRepository:
             expired_message_ids = select(ChatbotStoredMessage.message_id).where(ChatbotStoredMessage.created_at < expiration)
             await session.execute(
                 delete(ChatbotStoredAttachment).where(ChatbotStoredAttachment.message_id.in_(expired_message_ids))
+            )
+            await session.execute(
+                delete(ChatbotStoredReactionSnapshot).where(ChatbotStoredReactionSnapshot.message_id.in_(expired_message_ids))
             )
             await session.execute(delete(ChatbotStoredMessage).where(ChatbotStoredMessage.created_at < expiration))
             values = {
@@ -113,7 +138,39 @@ class ChatbotShortTermMessageRepository:
         async with self._session_factory.begin() as session:
             # 添付の外部キーにDB側のCASCADE指定はしていないため、投稿削除時に明示的に消す。
             await session.execute(delete(ChatbotStoredAttachment).where(ChatbotStoredAttachment.message_id == message_id))
+            await session.execute(
+                delete(ChatbotStoredReactionSnapshot).where(ChatbotStoredReactionSnapshot.message_id == message_id)
+            )
             await session.execute(delete(ChatbotStoredMessage).where(ChatbotStoredMessage.message_id == message_id))
+
+    async def contains(self, message_id: int) -> bool:
+        """指定メッセージが短期保存対象に含まれるか確認します。"""
+        async with self._session_factory() as session:
+            return await session.get(ChatbotStoredMessage, message_id) is not None
+
+    async def save_reactions(self, snapshot: StoredReactionSnapshotInput) -> None:
+        """メッセージのリアクションを最新スナップショットへ置き換えます。"""
+        await self.save_reaction_snapshots([snapshot])
+
+    async def save_reaction_snapshots(self, snapshots: list[StoredReactionSnapshotInput]) -> None:
+        """複数メッセージのリアクションを1トランザクションで置き換えます。"""
+        if not snapshots:
+            return
+        updated_at = datetime.datetime.now(datetime.UTC)
+        async with self._session_factory.begin() as session:
+            for snapshot in snapshots:
+                values = {
+                    "message_id": snapshot.message_id,
+                    "reactions": snapshot.reactions,
+                    "updated_at": updated_at,
+                }
+                statement = insert(ChatbotStoredReactionSnapshot).values(**values)
+                await session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[ChatbotStoredReactionSnapshot.message_id],
+                        set_={"reactions": values["reactions"], "updated_at": values["updated_at"]},
+                    )
+                )
 
     async def delete_attachments(self, message_id: int) -> None:
         """編集前の添付解析結果を除去します。"""
@@ -188,6 +245,16 @@ class ChatbotShortTermMessageRepository:
                 select(ChatbotStoredAttachment)
                 .where(ChatbotStoredAttachment.message_id.in_(message_ids))
                 .order_by(ChatbotStoredAttachment.id)
+            )
+            return list(result.scalars().all())
+
+    async def get_reaction_snapshots(self, message_ids: list[int]) -> list[ChatbotStoredReactionSnapshot]:
+        """指定メッセージに紐づくリアクションスナップショットを取得します。"""
+        if not message_ids:
+            return []
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ChatbotStoredReactionSnapshot).where(ChatbotStoredReactionSnapshot.message_id.in_(message_ids))
             )
             return list(result.scalars().all())
 
