@@ -8,7 +8,7 @@ from discord import Intents
 from discord.ext import commands
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from cogs import admin, agree, api_usage, audit, chatbot, hwh, monitor, moving, remind, speak, voice, voicevox
+from cogs import admin, agree, api_usage, audit, chatbot, hwh, monitor, moving, remind, speak, talkdata, voice, voicevox
 from cogs.chatbot.repositories.schema import CHATBOT_DATABASE_SCHEMA, create_chatbot_tables
 from core.db import create_session_factory, create_tables, dispose_engine, init_engine
 from core.debug_cogs import load_debug_cogs
@@ -29,6 +29,7 @@ async def load_all_cogs(
     await moving.setup(bot)
     await remind.setup(bot, session_factory)
     await speak.setup(bot)
+    await talkdata.setup(bot, session_factory)
     await voice.setup(bot, session_factory)
     await voicevox.setup(bot, session_factory)
 
