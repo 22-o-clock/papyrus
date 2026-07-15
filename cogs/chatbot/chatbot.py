@@ -3,6 +3,8 @@ from discord import Message, app_commands
 from discord.ext import commands
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from core.runtime_environment import get_runtime_environment
+
 from .channel_roles import ChannelRole
 from .use_cases.conversation import ConversationUseCases
 from .use_cases.excel_management import ExcelManagementUseCases
@@ -12,6 +14,7 @@ class ChatBot(commands.Cog):
     """DiscordイベントとChatbotユースケースを接続するController。"""
 
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self.runtime_environment = get_runtime_environment()
         self.conversation_use_cases = ConversationUseCases(bot, session_factory)
         self.settings_use_cases = self.conversation_use_cases.settings_use_cases
         self.custom_profile_use_cases = self.conversation_use_cases.custom_profile_use_cases
@@ -140,6 +143,8 @@ class ChatBot(commands.Cog):
         interaction: discord.Interaction,
         attachment: discord.Attachment,
     ) -> None:
+        if await self._reject_debug_shared_write(interaction):
+            return
         await self.excel_management_use_cases.import_chatbot_shadow_evaluations(interaction, attachment)
 
     @app_commands.command(name="export_chatbot_member_aliases", description="Chatbotのメンバー別名をExcelで出力します")
@@ -152,6 +157,8 @@ class ChatBot(commands.Cog):
         interaction: discord.Interaction,
         attachment: discord.Attachment,
     ) -> None:
+        if await self._reject_debug_shared_write(interaction):
+            return
         await self.excel_management_use_cases.import_chatbot_member_aliases(interaction, attachment)
 
     @app_commands.command(name="export_chatbot_memories", description="Chatbotの長期記憶をExcelで出力します")
@@ -164,7 +171,19 @@ class ChatBot(commands.Cog):
         interaction: discord.Interaction,
         attachment: discord.Attachment,
     ) -> None:
+        if await self._reject_debug_shared_write(interaction):
+            return
         await self.excel_management_use_cases.import_chatbot_memories(interaction, attachment)
+
+    async def _reject_debug_shared_write(self, interaction: discord.Interaction) -> bool:
+        """デバッグBotから長期保存データを管理更新させません。"""
+        if self.runtime_environment.is_production:
+            return False
+        await interaction.response.send_message(
+            "デバッグ環境では、本番と共有するChatbotデータを更新できません。",
+            ephemeral=True,
+        )
+        return True
 
 
 async def setup(bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:

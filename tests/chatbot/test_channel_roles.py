@@ -16,6 +16,22 @@ class FakeDatabaseEnvironmentRepository:
     async def set_env(self, key: str, value: str) -> None:
         self.values[key] = value
 
+    async def update_json_mapping_entry(self, key: str, entry_key: str, value: str | None) -> None:
+        loaded = json.loads(self.values.get(key, "{}"))
+        if value is None:
+            loaded.pop(entry_key, None)
+        else:
+            loaded[entry_key] = value
+        self.values[key] = json.dumps(loaded)
+
+    async def update_json_string_set_member(self, key: str, member: str, *, enabled: bool) -> None:
+        loaded = set(json.loads(self.values.get(key, "[]")))
+        if enabled:
+            loaded.add(member)
+        else:
+            loaded.discard(member)
+        self.values[key] = json.dumps(sorted(loaded))
+
 
 class ChannelRoleManagerTest(unittest.IsolatedAsyncioTestCase):
     async def test_returns_assistant_when_channel_is_not_configured(self) -> None:

@@ -4,6 +4,8 @@ from discord import Interaction, app_commands
 from discord.ext import commands, tasks
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from core.runtime_environment import get_runtime_environment
+
 from .use_cases.reporting import ApiUsageReportUseCases
 
 logger = getLogger(__name__)
@@ -17,6 +19,7 @@ class ApiUsageReporter(commands.Cog):
 
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._bot = bot
+        self._runtime_environment = get_runtime_environment()
         self._use_cases = ApiUsageReportUseCases(bot, session_factory)
 
     async def cog_unload(self) -> None:
@@ -27,6 +30,9 @@ class ApiUsageReporter(commands.Cog):
     async def on_ready(self) -> None:
         """DB初期化完了後に計測開始日時を確定して日次ループを開始する。"""
         await self._use_cases.initialize()
+        if self._runtime_environment.is_debug:
+            logger.info("Disabled scheduled API usage reports in debug environment")
+            return
         if not self.report_loop.is_running():
             self.report_loop.start()
 

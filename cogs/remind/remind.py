@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cogs.remind.database import ReminderDatabase, ReminderTable
 from core.exception.exception import ArgumentError
+from core.runtime_environment import get_runtime_environment
 from core.tools.ebd import add_timestamp_footer, make_simple_embed
 
 logger = getLogger(__name__)
@@ -25,9 +26,13 @@ class Notify(commands.Cog):
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
         self.db = ReminderDatabase(session_factory)
+        self.runtime_environment = get_runtime_environment()
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
+        if self.runtime_environment.is_debug:
+            logger.info("Disabled reminder delivery worker in debug environment")
+            return
         if not self.loop_wrapper.is_running():
             self.loop_wrapper.start()
 

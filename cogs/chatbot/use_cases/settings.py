@@ -15,6 +15,7 @@ from cogs.chatbot.constants import (
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
 from cogs.chatbot.services.response_policy import can_change_channel_role
 from cogs.chatbot.shadow_mode import ShadowModeManager
+from core.runtime_environment import RuntimeEnvironment
 
 logger = getLogger(__name__)
 
@@ -27,10 +28,12 @@ class SettingsUseCases:
         environment_repository: DatabaseEnvironmentRepository,
         role_manager: ChannelRoleManager,
         shadow_mode_manager: ShadowModeManager,
+        runtime_environment: RuntimeEnvironment,
     ) -> None:
         self._environment_repository = environment_repository
         self._role_manager = role_manager
         self._shadow_mode_manager = shadow_mode_manager
+        self._runtime_environment = runtime_environment
         self.conversation_reset_minutes = DEFAULT_CONVERSATION_RESET_MINUTES
         self.unanswered_question_minimum_wait_minutes = DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES
         self.unanswered_question_maximum_wait_minutes = DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES
@@ -71,6 +74,8 @@ class SettingsUseCases:
         return minutes
 
     async def show_role(self, interaction: discord.Interaction) -> None:
+        if not await self._validate_chatbot_channel(interaction):
+            return
         channel_id = interaction.channel_id
         if channel_id is None:
             await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
@@ -88,6 +93,8 @@ class SettingsUseCases:
         )
 
     async def set_conversation_reset_minutes(self, interaction: discord.Interaction, minutes: int) -> None:
+        if not await self._validate_shared_write(interaction):
+            return
         if not interaction.permissions.manage_guild:
             await interaction.response.send_message(
                 "会話リセット時間の変更には「サーバー管理」権限が必要です。", ephemeral=True
@@ -102,6 +109,8 @@ class SettingsUseCases:
         await interaction.response.send_message(f"Chatbotの会話リセット時間を {previous}分から {minutes}分に変更しました。")
 
     async def set_question_wait(self, interaction: discord.Interaction, minimum: int, maximum: int) -> None:
+        if not await self._validate_shared_write(interaction):
+            return
         if not interaction.permissions.manage_guild:
             await interaction.response.send_message(
                 "質問への回答待機時間の変更には「サーバー管理」権限が必要です。", ephemeral=True
@@ -124,6 +133,8 @@ class SettingsUseCases:
         )
 
     async def set_role(self, interaction: discord.Interaction, role: ChannelRole) -> None:
+        if not await self._validate_chatbot_channel(interaction):
+            return
         channel_id = interaction.channel_id
         if channel_id is None:
             await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
@@ -141,6 +152,8 @@ class SettingsUseCases:
         )
 
     async def reset_role(self, interaction: discord.Interaction) -> None:
+        if not await self._validate_chatbot_channel(interaction):
+            return
         channel_id = interaction.channel_id
         if channel_id is None:
             await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
@@ -161,6 +174,8 @@ class SettingsUseCases:
         )
 
     async def set_shadow_mode(self, interaction: discord.Interaction, *, enabled: bool) -> None:
+        if not await self._validate_chatbot_channel(interaction):
+            return
         channel_id = interaction.channel_id
         if channel_id is None:
             await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
@@ -174,3 +189,24 @@ class SettingsUseCases:
         await self._shadow_mode_manager.set_enabled(channel_id, enabled=enabled)
         state_text = "有効" if enabled else "無効"
         await interaction.response.send_message(f"このチャンネルのChatbotシャドーモードを{state_text}にしました。")
+
+    async def _validate_chatbot_channel(self, interaction: discord.Interaction) -> bool:
+        """実行環境でChatbot処理を許可したチャンネルだけを受け付けます。"""
+        channel_id = interaction.channel_id
+        if channel_id is not None and self._runtime_environment.should_process_chatbot_channel(channel_id):
+            return True
+        await interaction.response.send_message(
+            "この実行環境では、このチャンネルのChatbot設定を操作できません。",
+            ephemeral=True,
+        )
+        return False
+
+    async def _validate_shared_write(self, interaction: discord.Interaction) -> bool:
+        """デバッグBotから本番共通のグローバル設定を変更させません。"""
+        if self._runtime_environment.is_production:
+            return True
+        await interaction.response.send_message(
+            "デバッグ環境では、本番と共有するChatbot設定を変更できません。",
+            ephemeral=True,
+        )
+        return False

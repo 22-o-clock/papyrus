@@ -309,7 +309,7 @@ class ShortTermMemory:
         # 5. メモリ内のメッセージを日時順にソート
         self.memory.sort(key=lambda m: m.timestamp)
 
-        logger.debug("Current messages in memory: %s", self.memory)
+        logger.debug("Current messages in memory: %s messages", len(self.memory))
 
     def to_json(self, *, content_overrides: dict[int, str] | None = None) -> str:
         """短期記憶内のメッセージをプロンプトに用いるJSON形式の文字列に変換します。
@@ -356,7 +356,7 @@ class ShortTermMemory:
             ),
         )
 
-        logger.debug("Current memory: %s", self.memory)
+        logger.debug("Current messages in memory after pruning: %s messages", len(self.memory))
 
     def contains_message(self, message_id: int) -> bool:
         """指定されたDiscordメッセージが現在の短期記憶に含まれるか確認します。"""

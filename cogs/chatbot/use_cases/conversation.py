@@ -1,6 +1,5 @@
 import asyncio
 import datetime
-import os
 from dataclasses import dataclass
 from logging import getLogger
 
@@ -11,7 +10,6 @@ from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cogs.chatbot.channel_roles import ChannelRole, ChannelRoleManager
-from cogs.chatbot.constants import SKIP_HISTORY_SYNC_ENVIRONMENT_KEY
 from cogs.chatbot.models import ChannelProcessingState, CustomProfile, ResponseMode, ResponseRequestOptions
 from cogs.chatbot.repositories.custom_profile import CustomProfileRepository
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
@@ -49,6 +47,7 @@ from cogs.chatbot.services.response_policy import (
     should_respond,
 )
 from cogs.chatbot.shadow_mode import ShadowModeManager
+from core.runtime_environment import RuntimeEnvironment, get_runtime_environment
 
 from .attachment import AttachmentUseCases
 from .custom_profile import (
@@ -71,11 +70,6 @@ class _ResponseSelectionRequest:
     is_explicit_call: bool
     is_unanswered_question: bool
     resolved_member_aliases: dict[str, int]
-
-
-def should_skip_history_sync(environment_value: str | None) -> bool:
-    """手動テスト起動で履歴同期を明示的に省略するか判定します。"""
-    return environment_value is not None and environment_value.casefold() == "true"
 
 
 def should_defer_unanswered_question(*, delayed_attempt: bool, generation_current: bool, unaddressed: bool) -> bool:
@@ -102,6 +96,7 @@ def should_enqueue_long_term_memory(message: Message) -> bool:
 class ConversationUseCases:
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
+        self.runtime_environment: RuntimeEnvironment = get_runtime_environment()
         self.response_pipelines: dict[int, ResponsePipeline] = {}
         self.environment_repository = DatabaseEnvironmentRepository(session_factory)
         self.channel_role_manager = ChannelRoleManager(self.environment_repository)
@@ -110,12 +105,16 @@ class ConversationUseCases:
             self.environment_repository,
             self.channel_role_manager,
             self.shadow_mode_manager,
+            self.runtime_environment,
         )
         self.shadow_candidate_repository = ChatbotShadowCandidateRepository(session_factory)
         self.short_term_message_repository = ChatbotShortTermMessageRepository(session_factory)
         self.long_term_memory_repository = ChatbotLongTermMemoryRepository(session_factory)
         self.member_alias_repository = ChatbotMemberAliasRepository(session_factory)
-        self.custom_profile_use_cases = CustomProfileUseCases(CustomProfileRepository(session_factory))
+        self.custom_profile_use_cases = CustomProfileUseCases(
+            CustomProfileRepository(session_factory),
+            self.runtime_environment,
+        )
         self._history_sync_complete = asyncio.Event()
         self._history_sync_lock = asyncio.Lock()
 
@@ -213,10 +212,10 @@ class ConversationUseCases:
             self._history_sync_complete.set()
             return
         self._history_sync_complete.clear()
-        if should_skip_history_sync(os.getenv(SKIP_HISTORY_SYNC_ENVIRONMENT_KEY)):
-            logger.info("Skipped chatbot Discord history sync by environment setting")
+        if self.runtime_environment.is_debug:
+            logger.info("Skipped chatbot Discord history sync in debug environment")
             self._history_sync_complete.set()
-            await self.long_term_memory_use_cases.initialize()
+            await self._initialize_long_term_memory_if_enabled()
             return
         try:
             async with self._history_sync_lock:
@@ -224,6 +223,13 @@ class ConversationUseCases:
         finally:
             # 一部チャンネルの失敗で、通常の応答まで永続的に停止させない。
             self._history_sync_complete.set()
+        await self._initialize_long_term_memory_if_enabled()
+
+    async def _initialize_long_term_memory_if_enabled(self) -> None:
+        """共有記憶を書き換えるバックグラウンド処理を本番だけで開始します。"""
+        if self.runtime_environment.is_debug:
+            logger.info("Disabled chatbot long-term memory workers in debug environment")
+            return
         await self.long_term_memory_use_cases.initialize()
 
     async def _synchronize_recent_discord_history(self) -> None:
@@ -237,6 +243,8 @@ class ConversationUseCases:
                 continue
             channels: list[discord.TextChannel | discord.Thread] = [*guild.text_channels, *guild.threads]
             for channel in channels:
+                if not self.runtime_environment.should_process_chatbot_channel(channel.id):
+                    continue
                 permissions = channel.permissions_for(bot_member)
                 if not permissions.view_channel or not permissions.read_message_history:
                     continue
@@ -248,7 +256,7 @@ class ConversationUseCases:
                     channel_message_count = 0
                     async for message in channel.history(after=after, oldest_first=True, limit=None):
                         await self._append_message_to_short_term_memory(message, state)
-                        if should_enqueue_long_term_memory(message):
+                        if self.runtime_environment.is_production and should_enqueue_long_term_memory(message):
                             await self.long_term_memory_use_cases.enqueue(message.id, channel.id)
                         channel_message_count += 1
                     synchronized_message_count += channel_message_count
@@ -295,6 +303,8 @@ class ConversationUseCases:
         await self.short_term_message_repository.save_reaction_snapshots(snapshots)
 
     async def on_message(self, message: Message) -> None:
+        if not self.runtime_environment.should_process_chatbot_channel(message.channel.id):
+            return
         # 起動直後の不完全な文脈で応答せず、履歴同期後に受信イベントを処理する。
         await self._history_sync_complete.wait()
         # 1. 明示的に呼ばれる前の会話も保持するため、チャンネルごとにパイプラインを遅延初期化
@@ -312,7 +322,7 @@ class ConversationUseCases:
         if message.author.bot:
             return
 
-        if should_enqueue_long_term_memory(message):
+        if self.runtime_environment.is_production and should_enqueue_long_term_memory(message):
             await self.long_term_memory_use_cases.enqueue(message.id, message.channel.id)
 
         bot_user = self.bot.user
@@ -527,8 +537,11 @@ class ConversationUseCases:
 
     async def on_message_delete(self, message: Message) -> None:
         """待機中の質問が削除された場合は、遅延した回答を取り消します。"""
+        if not self.runtime_environment.should_process_chatbot_channel(message.channel.id):
+            return
         await self.short_term_message_repository.delete(message.id)
-        await self.long_term_memory_use_cases.delete(message.id)
+        if self.runtime_environment.is_production:
+            await self.long_term_memory_use_cases.delete(message.id)
         state = self._channel_states.get(message.channel.id)
         if state is None:
             return
@@ -544,6 +557,8 @@ class ConversationUseCases:
 
     async def on_message_edit(self, before: Message, after: Message) -> None:
         """編集された投稿を短期保存と現在の短期記憶へ反映します。"""
+        if not self.runtime_environment.should_process_chatbot_channel(after.channel.id):
+            return
         state = await self._ensure_channel_state(after.channel.id)
         async with state.lock:
             short_term_memory = self.response_pipelines[after.channel.id].short_term_memory
@@ -590,7 +605,7 @@ class ConversationUseCases:
                         attachment_kind,
                     )
 
-            if not after.author.bot:
+            if self.runtime_environment.is_production and not after.author.bot:
                 await self.long_term_memory_use_cases.enqueue(after.id, after.channel.id)
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
@@ -762,6 +777,8 @@ class ConversationUseCases:
 
     async def on_raw_reaction_change(self, message_id: int, channel_id: int) -> None:
         """リアクションイベントを応答開始条件にせず、短期文脈だけ更新します。"""
+        if not self.runtime_environment.should_process_chatbot_channel(channel_id):
+            return
         await self._history_sync_complete.wait()
         if not await self.short_term_message_repository.contains(message_id):
             return

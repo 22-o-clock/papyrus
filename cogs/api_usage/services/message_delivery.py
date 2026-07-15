@@ -10,6 +10,10 @@ from cogs.api_usage.repositories.report import ApiUsageReportDatabase, ReportDel
 from .report_builder import REPORT_MARKER_PREFIX
 
 
+class ReportMessageOwnershipError(RuntimeError):
+    """配送記録が別BotのDiscord投稿を指している場合の設定エラー。"""
+
+
 class ApiUsageReportMessageDelivery:
     """Discord上の日次レポートを再発見し、投稿または更新する。"""
 
@@ -32,8 +36,22 @@ class ApiUsageReportMessageDelivery:
         now = datetime.datetime.now(JST)
         if message is None:
             return await target.send(embed=embed), now
+        self.validate_message_owner(message)
         await message.edit(embed=embed)
         return message, now
+
+    def validate_message_owner(self, message: discord.Message) -> None:
+        """別Botの配送記録を上書きせず、設定誤りとして停止します。"""
+        bot_user = self._bot.user
+        if bot_user is not None and message.author.id == bot_user.id:
+            return
+        bot_user_id = bot_user.id if bot_user is not None else None
+        error_message = (
+            "API usage report delivery belongs to another Bot "
+            f"(target_id={self.target_id}, message_id={message.id}, "
+            f"message_author_id={message.author.id}, bot_user_id={bot_user_id})"
+        )
+        raise ReportMessageOwnershipError(error_message)
 
     async def _fetch_delivery_message(
         self,

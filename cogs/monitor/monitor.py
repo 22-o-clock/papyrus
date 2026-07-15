@@ -11,6 +11,7 @@ from discord import Interaction, Member, Message, RawReactionActionEvent, TextCh
 from discord.ext import commands, tasks
 
 from core.exception.exception import ArgumentError, MissingRequiredRoleError
+from core.runtime_environment import get_runtime_environment
 from core.tools.ebd import add_timestamp_footer, make_simple_embed
 from core.tools.utils import fetch_text_channel
 
@@ -151,9 +152,10 @@ class Monitor(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self.runtime_environment = get_runtime_environment()
         self.server_id = int(os.environ["SERVER_ID"])
-        self.admin_role_id = int(os.environ["BOT_ADMIN"])
-        self.log_thread_id = int(os.environ["ANTHYME_LOG_THREAD"])
+        self.admin_role_id = int(os.environ["ROLE_ID_BOT_ADMIN"])
+        self.log_thread_id = int(os.environ["THREAD_ID_ANTHYME_LOG"])
         self.gatekeeper = GateKeeper("so[uー]*nan+da")
         self.non_delete_mode = True
         self.banned_users: set[int] = set()
@@ -190,13 +192,18 @@ class Monitor(commands.Cog):
         if message.guild is None or message.guild.id != self.server_id:
             return
 
-        if not message.author.bot:
+        if not message.author.bot and self.runtime_environment.is_production:
             for detected in self.gatekeeper.check(message, on_delete=on_delete, non_delete=self.non_delete_mode):
                 await self.censor(detected, non_delete=self.non_delete_mode)
 
-            if not on_delete and message.author.id in self.reaction_banned_users and EMOJI_PATTERN.search(message.content):
-                await self.censor(message, non_delete=False)
-                return
+        if (
+            not message.author.bot
+            and not on_delete
+            and message.author.id in self.reaction_banned_users
+            and EMOJI_PATTERN.search(message.content)
+        ):
+            await self.censor(message, non_delete=False)
+            return
 
         if (
             not on_delete

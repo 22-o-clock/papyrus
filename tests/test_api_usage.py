@@ -2,10 +2,11 @@ import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from cogs.api_usage.models import ReportMeasurementState
 from cogs.api_usage.openai_usage import JST, UTC, OpenAIUsageSummary, _aggregate_costs, utc_report_period
+from cogs.api_usage.services.message_delivery import ApiUsageReportMessageDelivery, ReportMessageOwnershipError
 from cogs.api_usage.services.report_builder import aggregate_feature_usages, build_usage_embed
 from cogs.api_usage.use_cases.reporting import should_run_daily_report, validate_report_date
 from cogs.chatbot import observability
@@ -288,3 +289,29 @@ class ApiUsageObservationTest(IsolatedAsyncioTestCase):
         ensure_equal(increment.long_context_input_tokens, 300_000)
         ensure_equal(increment.web_search_calls, 1)
         ensure_equal(increment.code_interpreter_sessions, 1)
+
+
+class ApiUsageDeliveryTest(TestCase):
+    def test_rejects_delivery_message_owned_by_another_bot(self) -> None:
+        bot = MagicMock()
+        bot.user.id = 100
+        delivery = ApiUsageReportMessageDelivery(bot, MagicMock(), target_id=200)
+        message = MagicMock()
+        message.id = 300
+        message.author.id = 400
+
+        try:
+            delivery.validate_message_owner(message)
+        except ReportMessageOwnershipError:
+            return
+        raise AssertionError
+
+    def test_accepts_delivery_message_owned_by_current_bot(self) -> None:
+        bot = MagicMock()
+        bot.user.id = 100
+        delivery = ApiUsageReportMessageDelivery(bot, MagicMock(), target_id=200)
+        message = MagicMock()
+        message.id = 300
+        message.author.id = 100
+
+        delivery.validate_message_owner(message)

@@ -7,6 +7,7 @@ import discord
 from discord import Interaction, Message, TextChannel, Thread, app_commands
 from discord.ext import commands, tasks
 
+from core.runtime_environment import get_runtime_environment
 from core.tools.ebd import make_simple_embed
 from core.tools.utils import parse_comma_separated_values
 
@@ -32,15 +33,19 @@ async def _fetch_text_channel(bot: commands.Bot, channel_id: int) -> TextChannel
 class Patchwork(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.event_notify_channel = int(os.environ["LOBBY"])
+        self.runtime_environment = get_runtime_environment()
+        self.event_notify_channel = int(os.environ["CHANNEL_ID_LOBBY"])
         self.lastfm_users = parse_comma_separated_values(os.environ.get("LASTFM_IDS"))
-        self.lastfm_log_thread = int(os.environ["ANTHYME_LOG_THREAD"]) if self.lastfm_users else None
+        self.lastfm_log_thread = int(os.environ["THREAD_ID_ANTHYME_LOG"]) if self.lastfm_users else None
         self.last_warned: dict[str, datetime] = {}
         self.prohibited_users: dict[int, set[int]] = {}
         self.focus_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
+        if self.runtime_environment.is_debug:
+            logger.info("Disabled Last.fm warning worker in debug environment")
+            return
         if not self.last_fm_update_warn.is_running():
             self.last_fm_update_warn.start()
 
@@ -117,12 +122,16 @@ class Patchwork(commands.Cog):
 
     @commands.Cog.listener("on_scheduled_event_create")
     async def event_create_notify(self, event: discord.ScheduledEvent) -> None:
+        if self.runtime_environment.is_debug:
+            return
         channel = await _fetch_text_channel(self.bot, self.event_notify_channel)
         embed = await self._create_event_embed(event, discord.Colour.teal(), f"🗓️ イベントの作成: {event.name}", channel)
         await channel.send(embed=embed)
 
     @commands.Cog.listener("on_scheduled_event_update")
     async def event_update_notify(self, before: discord.ScheduledEvent, after: discord.ScheduledEvent) -> None:
+        if self.runtime_environment.is_debug:
+            return
         if self._events_are_equal(before, after):
             return
 
@@ -144,6 +153,8 @@ class Patchwork(commands.Cog):
 
     @commands.Cog.listener("on_scheduled_event_delete")
     async def event_delete_notify(self, event: discord.ScheduledEvent) -> None:
+        if self.runtime_environment.is_debug:
+            return
         channel = await _fetch_text_channel(self.bot, self.event_notify_channel)
         embed = await self._create_event_embed(
             event,

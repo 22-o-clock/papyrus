@@ -8,6 +8,7 @@ import discord
 from discord import Message, TextChannel, Thread
 from discord.ext import commands
 
+from core.runtime_environment import get_runtime_environment
 from core.tools.utils import parse_comma_separated_values
 from core.tools.webhook import fetch_webhook
 
@@ -32,7 +33,7 @@ async def _get_or_fetch_member(guild: discord.Guild, user_id: int) -> discord.Me
 async def _get_or_fetch_channel(guild: discord.Guild, channel_id: int) -> discord.TextChannel | discord.Thread:
     """ギルド内チャンネル/スレッドをキャッシュから取得し、なければAPIで取得する。
 
-    LOG_THREAD はスレッドを想定しているが、親が TextChannel の場合もあるため
+    THREAD_ID_LOG はスレッドを想定しているが、親が TextChannel の場合もあるため
     TextChannel | Thread に限定して返す。該当しない種別の場合は例外を送出する。
     """
     channel = guild.get_channel(channel_id)
@@ -116,13 +117,17 @@ async def create_webhook_log_message(message: Message, event: Event) -> dict[str
 class Audit(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot: commands.Bot = bot
+        self.runtime_environment = get_runtime_environment()
         self.hook: discord.Webhook | None = None
         self.server_id: int = int(os.environ["SERVER_ID"])
-        self.log_thread: int = int(os.environ["LOG_THREAD"])
+        self.log_thread: int = int(os.environ["THREAD_ID_LOG"])
         self.audit_immunity = [int(channel_id) for channel_id in parse_comma_separated_values(os.environ.get("AUDIT_IMMUNITY"))]
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
+        if self.runtime_environment.is_debug:
+            logger.info("Disabled audit log forwarding in debug environment")
+            return
         thread = await self.bot.fetch_channel(self.log_thread)
         if not isinstance(thread, (TextChannel, Thread)):
             error_message = f"audit log channel {self.log_thread} is not a text channel or thread"
@@ -143,6 +148,8 @@ class Audit(commands.Cog):
 
     @commands.Cog.listener("on_message_delete")
     async def message_delete_log(self, message: Message) -> None:
+        if self.runtime_environment.is_debug:
+            return
         if not message.guild or message.guild.id != self.server_id:
             return
 
@@ -181,6 +188,8 @@ class Audit(commands.Cog):
 
     @commands.Cog.listener("on_message_edit")
     async def message_edit_log(self, before: Message, after: Message) -> None:
+        if self.runtime_environment.is_debug:
+            return
         if not after.guild or after.guild.id != self.server_id:
             return
 

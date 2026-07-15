@@ -41,7 +41,6 @@ from cogs.chatbot.use_cases.conversation import (
     get_mentioned_bot_role_ids,
     should_defer_unanswered_question,
     should_enqueue_long_term_memory,
-    should_skip_history_sync,
 )
 from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
@@ -90,15 +89,6 @@ class HistorySyncRangeTest(unittest.TestCase):
 
         if get_history_sync_after(now - timedelta(days=60), now) != now - timedelta(days=30):
             self.fail("保存済みチャンネルの履歴取得が30日を超えています")
-
-
-class HistorySyncModeTest(unittest.TestCase):
-    def test_skips_history_sync_only_for_explicit_true(self) -> None:
-        if not should_skip_history_sync("true"):
-            self.fail("手動テスト用の履歴同期省略フラグを認識できません")
-        for value in (None, "", "false", "1"):
-            if should_skip_history_sync(value):
-                self.fail("明示的なtrue以外で履歴同期が省略されます")
 
 
 class MemoryAdminInputTest(unittest.TestCase):

@@ -1,6 +1,8 @@
+import json
 from logging import getLogger
 
-from sqlalchemy import Text, insert, select, update
+from sqlalchemy import Text, func, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
 
@@ -59,3 +61,67 @@ class DatabaseEnvironmentRepository:
             else:
                 # INSERT
                 await session.execute(insert(DatabaseEnvironment).values(key=key, value=value))
+
+    async def update_json_mapping_entry(self, key: str, entry_key: str, value: str | None) -> None:
+        """共有JSONオブジェクトの1要素をプロセス間で直列化して更新します。"""
+        async with self._session_factory.begin() as session:
+            await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(key))))
+            current = await session.scalar(select(DatabaseEnvironment.value).where(DatabaseEnvironment.key == key))
+            loaded = self._load_json_mapping(current)
+            if value is None:
+                loaded.pop(entry_key, None)
+            else:
+                loaded[entry_key] = value
+            serialized = json.dumps(loaded, ensure_ascii=False, sort_keys=True)
+            statement = insert(DatabaseEnvironment).values(key=key, value=serialized)
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[DatabaseEnvironment.key],
+                    set_={"value": serialized},
+                )
+            )
+
+    async def update_json_string_set_member(self, key: str, member: str, *, enabled: bool) -> None:
+        """共有JSON文字列集合の1要素をプロセス間で直列化して更新します。"""
+        async with self._session_factory.begin() as session:
+            await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(key))))
+            current = await session.scalar(select(DatabaseEnvironment.value).where(DatabaseEnvironment.key == key))
+            loaded = self._load_json_string_set(current)
+            if enabled:
+                loaded.add(member)
+            else:
+                loaded.discard(member)
+            serialized = json.dumps(sorted(loaded))
+            statement = insert(DatabaseEnvironment).values(key=key, value=serialized)
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[DatabaseEnvironment.key],
+                    set_={"value": serialized},
+                )
+            )
+
+    @staticmethod
+    def _load_json_mapping(value: str | None) -> dict[str, str]:
+        """不正な既存値を空として扱い、文字列マッピングだけを返します。"""
+        try:
+            loaded = json.loads(value) if value is not None else {}
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(loaded, dict):
+            return {}
+        return {
+            entry_key: entry_value
+            for entry_key, entry_value in loaded.items()
+            if isinstance(entry_key, str) and isinstance(entry_value, str)
+        }
+
+    @staticmethod
+    def _load_json_string_set(value: str | None) -> set[str]:
+        """不正な既存値を空として扱い、文字列要素だけを返します。"""
+        try:
+            loaded = json.loads(value) if value is not None else []
+        except json.JSONDecodeError:
+            return set()
+        if not isinstance(loaded, list):
+            return set()
+        return {member for member in loaded if isinstance(member, str)}

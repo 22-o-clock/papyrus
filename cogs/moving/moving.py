@@ -182,7 +182,7 @@ async def transport_messages_in_specified_period(
 class Moving(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.admin_role_id = int(os.environ["BOT_ADMIN"])
+        self.admin_role_id = int(os.environ["ROLE_ID_BOT_ADMIN"])
 
     async def interaction_check(self, interaction: Interaction) -> bool:
         """全コマンドの実行者が管理者ロールを持つか確認する。"""

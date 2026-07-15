@@ -1,4 +1,3 @@
-import asyncio
 import json
 
 from .channel_roles import DatabaseEnvironmentRepositoryProtocol
@@ -11,7 +10,6 @@ class ShadowModeManager:
 
     def __init__(self, environment_repository: DatabaseEnvironmentRepositoryProtocol) -> None:
         self._environment_repository = environment_repository
-        self._write_lock = asyncio.Lock()
 
     async def is_enabled(self, channel_id: int) -> bool:
         """指定チャンネルでシャドーモードが有効か取得します。"""
@@ -19,13 +17,11 @@ class ShadowModeManager:
 
     async def set_enabled(self, channel_id: int, *, enabled: bool) -> None:
         """指定チャンネルのシャドーモードを保存します。"""
-        async with self._write_lock:
-            channel_ids = await self._load_channel_ids()
-            if enabled:
-                channel_ids.add(str(channel_id))
-            else:
-                channel_ids.discard(str(channel_id))
-            await self._environment_repository.set_env(SHADOW_MODE_CHANNELS_KEY, json.dumps(sorted(channel_ids)))
+        await self._environment_repository.update_json_string_set_member(
+            SHADOW_MODE_CHANNELS_KEY,
+            str(channel_id),
+            enabled=enabled,
+        )
 
     async def _load_channel_ids(self) -> set[str]:
         """有効化済みチャンネルIDを読み込みます。"""
