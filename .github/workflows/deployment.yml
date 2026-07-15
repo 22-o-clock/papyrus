@@ -1,4 +1,4 @@
-name: Push Docker image
+name: Deploy Papyrus
 
 on:
   workflow_dispatch:
@@ -10,6 +10,10 @@ env:
   GAR_LOCATION: us-west1
   SERVICE: hwh-bot-img
   IMAGE: papyrus
+
+concurrency:
+  group: deployment
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -39,6 +43,7 @@ jobs:
         id: auth
         with:
           token_format: 'access_token'
+          project_id: '${{ secrets.PROJECT_ID }}'
           workload_identity_provider: '${{ secrets.WIF_PROVIDER }}'
           service_account: '${{ secrets.WIF_SERVICE_ACCOUNT }}'
 
@@ -51,8 +56,13 @@ jobs:
 
       - uses: 'google-github-actions/setup-gcloud@v2'
 
-      - name: Delete old docker image
-        run: gcloud artifacts docker images delete "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.IMAGE }}" --delete-tags || (echo "No image to delete"; exit 0)
+      - name: Delete old Docker image
+        continue-on-error: true
+        run: >-
+          gcloud artifacts docker images delete
+          "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.IMAGE }}"
+          --delete-tags
+          --quiet
 
       - uses: docker/setup-buildx-action@v3
 
@@ -60,5 +70,82 @@ jobs:
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.IMAGE }}"
+          tags: |
+            ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.IMAGE }}:latest
+
+      - name: Deploy to instance
+        env:
+          IMAGE_URI: ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.IMAGE }}:${{ github.sha }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_ADMIN_API_KEY: ${{ secrets.OPENAI_ADMIN_API_KEY }}
+          OPENAI_USAGE_PROJECT_ID: ${{ secrets.OPENAI_USAGE_PROJECT_ID }}
+          SUPABASE_CONNECTION_STRING: ${{ secrets.SUPABASE_CONNECTION_STRING }}
+          CHATBOT_SUPABASE_CONNECTION_STRING: ${{ secrets.CHATBOT_SUPABASE_CONNECTION_STRING }}
+          VOICEVOX_URL: ${{ secrets.VOICEVOX_URL }}
+          SERVER_ID: ${{ secrets.SERVER_ID }}
+          ROLE_ID_BOT_ADMIN: ${{ secrets.ROLE_ID_BOT_ADMIN }}
+          CHANNEL_ID_LOBBY: ${{ secrets.CHANNEL_ID_LOBBY }}
+          CHANNEL_ID_LISTEN_ONLY_MEMBER: ${{ secrets.CHANNEL_ID_LISTEN_ONLY_MEMBER }}
+          THREAD_ID_LOG: ${{ secrets.THREAD_ID_LOG }}
+          THREAD_ID_ANTHYME_LOG: ${{ secrets.THREAD_ID_ANTHYME_LOG }}
+          THREAD_ID_API_USAGE_REPORT: ${{ secrets.THREAD_ID_API_USAGE_REPORT }}
+          CHANNEL_ID_DEBUG_CHATBOT: ${{ secrets.CHANNEL_ID_DEBUG_CHATBOT }}
+          THREAD_ID_DEBUG_API_USAGE_REPORT: ${{ secrets.THREAD_ID_DEBUG_API_USAGE_REPORT }}
+          AUDIT_IMMUNITY: ${{ secrets.AUDIT_IMMUNITY }}
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_IDS: ${{ secrets.LASTFM_IDS }}
+          BOT_ENVIRONMENT: production
+          DEBUG: 'false'
+          LOG_LEVEL: INFO
+        run: |
+          container_env_file="$(mktemp "${RUNNER_TEMP}/papyrus-container-env.XXXXXX")"
+          trap 'rm -f "$container_env_file"' EXIT
+          chmod 600 "$container_env_file"
+          printf '%s=%s\n' \
+            DISCORD_BOT_TOKEN "$DISCORD_BOT_TOKEN" \
+            OPENAI_API_KEY "$OPENAI_API_KEY" \
+            OPENAI_ADMIN_API_KEY "$OPENAI_ADMIN_API_KEY" \
+            OPENAI_USAGE_PROJECT_ID "$OPENAI_USAGE_PROJECT_ID" \
+            SUPABASE_CONNECTION_STRING "$SUPABASE_CONNECTION_STRING" \
+            CHATBOT_SUPABASE_CONNECTION_STRING "$CHATBOT_SUPABASE_CONNECTION_STRING" \
+            VOICEVOX_URL "$VOICEVOX_URL" \
+            SERVER_ID "$SERVER_ID" \
+            ROLE_ID_BOT_ADMIN "$ROLE_ID_BOT_ADMIN" \
+            CHANNEL_ID_LOBBY "$CHANNEL_ID_LOBBY" \
+            CHANNEL_ID_LISTEN_ONLY_MEMBER "$CHANNEL_ID_LISTEN_ONLY_MEMBER" \
+            THREAD_ID_LOG "$THREAD_ID_LOG" \
+            THREAD_ID_ANTHYME_LOG "$THREAD_ID_ANTHYME_LOG" \
+            THREAD_ID_API_USAGE_REPORT "$THREAD_ID_API_USAGE_REPORT" \
+            CHANNEL_ID_DEBUG_CHATBOT "$CHANNEL_ID_DEBUG_CHATBOT" \
+            THREAD_ID_DEBUG_API_USAGE_REPORT "$THREAD_ID_DEBUG_API_USAGE_REPORT" \
+            AUDIT_IMMUNITY "$AUDIT_IMMUNITY" \
+            LASTFM_API_KEY "$LASTFM_API_KEY" \
+            LASTFM_IDS "$LASTFM_IDS" \
+            BOT_ENVIRONMENT "$BOT_ENVIRONMENT" \
+            DEBUG "$DEBUG" \
+            LOG_LEVEL "$LOG_LEVEL" > "$container_env_file"
+          gcloud compute scp "$container_env_file" papyrus:/tmp/papyrus.env.next \
+            --zone="${{ env.GAR_LOCATION }}-a" \
+            --ssh-key-expire-after=10m \
+            --quiet
+          gcloud compute ssh papyrus \
+            --zone="${{ env.GAR_LOCATION }}-a" \
+            --ssh-key-expire-after=10m \
+            --quiet \
+            --command="
+              set -euo pipefail
+              install -m 600 /tmp/papyrus.env.next \"\$HOME/.papyrus.env\"
+              rm -f /tmp/papyrus.env.next
+              docker-credential-gcr configure-docker --registries=${{ env.GAR_LOCATION }}-docker.pkg.dev
+              docker pull '$IMAGE_URI'
+              docker rm -f papyrus || true
+              docker run -d \\
+                --name papyrus \\
+                --restart=always \\
+                --network=host \\
+                --env-file=\"\$HOME/.papyrus.env\" \\
+                '$IMAGE_URI'
+              docker image prune -f
+            "
