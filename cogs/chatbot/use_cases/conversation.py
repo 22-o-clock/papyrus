@@ -71,6 +71,11 @@ def get_mentioned_bot_role_ids(message: Message, bot_user: discord.ClientUser) -
     return {role.id for role in message.role_mentions if role.id in bot_role_ids}
 
 
+def should_enqueue_long_term_memory(message: Message) -> bool:
+    """本人へ帰属できる人間の投稿だけを長期記憶抽出へ渡します。"""
+    return not message.author.bot and not message.message_snapshots
+
+
 class ConversationUseCases:
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
@@ -215,7 +220,7 @@ class ConversationUseCases:
                     channel_message_count = 0
                     async for message in channel.history(after=after, oldest_first=True, limit=None):
                         await self._append_message_to_short_term_memory(message, state)
-                        if not message.author.bot:
+                        if should_enqueue_long_term_memory(message):
                             await self.long_term_memory_use_cases.enqueue(message.id, channel.id)
                         channel_message_count += 1
                     synchronized_message_count += channel_message_count
@@ -279,7 +284,8 @@ class ConversationUseCases:
         if message.author.bot:
             return
 
-        await self.long_term_memory_use_cases.enqueue(message.id, message.channel.id)
+        if should_enqueue_long_term_memory(message):
+            await self.long_term_memory_use_cases.enqueue(message.id, message.channel.id)
 
         bot_user = self.bot.user
         if bot_user is None:

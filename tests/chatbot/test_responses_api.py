@@ -37,6 +37,7 @@ class MessageSpec:
     content: str
     mentioned_user_ids: tuple[int, ...] = ()
     reply_to_message_id: int | None = None
+    forwarded_content: str | None = None
 
 
 def make_message(spec: MessageSpec) -> Message:
@@ -48,7 +49,7 @@ def make_message(spec: MessageSpec) -> Message:
         author=SimpleNamespace(id=spec.author_id, display_name=spec.author_name),
         clean_content=spec.content,
         created_at=datetime.datetime(2026, 7, 11, tzinfo=datetime.UTC),
-        message_snapshots=[],
+        message_snapshots=([SimpleNamespace(content=spec.forwarded_content)] if spec.forwarded_content is not None else []),
         type=message_type,
         reference=reference,
         mentions=[SimpleNamespace(id=user_id) for user_id in spec.mentioned_user_ids],
@@ -60,6 +61,29 @@ def make_message(spec: MessageSpec) -> Message:
 
 
 class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_marks_forwarded_content_as_unknown_third_party_statement(self) -> None:
+        memory = ShortTermMemory()
+        await memory.append(
+            make_message(
+                MessageSpec(
+                    message_id=1,
+                    author_id=10,
+                    author_name="転送者",
+                    content="",
+                    forwarded_content="原文です",
+                )
+            )
+        )
+
+        stored_content = memory.memory[0].content
+
+        if "[転送された第三者の発言]" not in stored_content:
+            self.fail("転送メッセージが第三者の発言として明示されていません")
+        if "転送者による発言ではありません" not in stored_content:
+            self.fail("転送本文を転送者自身の発言ではないと明示できていません")
+        if "原発言者は不明" not in stored_content or "本文: 原文です" not in stored_content:
+            self.fail("取得不能な原発言者と転送本文を正しく表現できていません")
+
     async def test_serializes_distinct_user_ids_for_same_display_name(self) -> None:
         memory = ShortTermMemory()
         await memory.append(

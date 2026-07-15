@@ -37,7 +37,11 @@ from cogs.chatbot.use_cases.admin_validation import (
     parse_memory_admin_target,
     validate_exported_memory_ids,
 )
-from cogs.chatbot.use_cases.conversation import ConversationUseCases, get_mentioned_bot_role_ids
+from cogs.chatbot.use_cases.conversation import (
+    ConversationUseCases,
+    get_mentioned_bot_role_ids,
+    should_enqueue_long_term_memory,
+)
 from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
 
@@ -203,6 +207,20 @@ class BotRoleMentionTest(unittest.TestCase):
 
         if result:
             self.fail("Bot名と異なる付与ロールへのメンションを誤検出しています")
+
+
+class LongTermMemoryEnqueueTest(unittest.TestCase):
+    def test_excludes_forwarded_message(self) -> None:
+        message = SimpleNamespace(author=SimpleNamespace(bot=False), message_snapshots=[SimpleNamespace(content="本文")])
+
+        if should_enqueue_long_term_memory(cast("Message", message)):
+            self.fail("転送メッセージが長期記憶抽出の対象になっています")
+
+    def test_includes_regular_human_message(self) -> None:
+        message = SimpleNamespace(author=SimpleNamespace(bot=False), message_snapshots=[])
+
+        if not should_enqueue_long_term_memory(cast("Message", message)):
+            self.fail("通常の人間の投稿が長期記憶抽出から除外されています")
 
 
 class ChannelRolePermissionTest(unittest.TestCase):

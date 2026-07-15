@@ -236,7 +236,12 @@ class ShortTermMemory:
         # 2. reply_to に関する特殊処理
 
         if message.message_snapshots:  # メッセージが転送である場合
-            content = f"{author_name}がメッセージを転送: 「{message.message_snapshots[0].content}」"
+            forwarded_content = message.message_snapshots[0].content
+            content = (
+                "[転送された第三者の発言]\n"
+                f"この本文は転送者の{author_name}による発言ではありません。原発言者は不明です。\n"
+                f"本文: {forwarded_content}"
+            )
 
         if message.type == discord.MessageType.reply and message.reference and message.reference.message_id:
             reply_to_message_id = message.reference.message_id
