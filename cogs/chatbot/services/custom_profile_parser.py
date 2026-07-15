@@ -1,4 +1,5 @@
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -34,12 +35,14 @@ def parse_custom_profile_directive(
     *,
     bot_user_id: int,
     directly_mentioned: bool,
+    bot_role_ids: Collection[int] = (),
 ) -> ParsedCustomProfileDirective | None:
-    """Botへの直接メンションに続く先頭のoption指定だけを抽出します。"""
+    """BotまたはBotの同名ロールへのメンション後にあるoption指定を抽出します。"""
     if not directly_mentioned:
         return None
 
-    without_bot_mention = re.sub(rf"<@!?{bot_user_id}>", "", content)
+    mention_patterns = [rf"<@!?{bot_user_id}>", *(rf"<@&{role_id}>" for role_id in bot_role_ids)]
+    without_bot_mention = re.sub("|".join(mention_patterns), "", content)
     lines = without_bot_mention.splitlines()
     directive_index = next((index for index, line in enumerate(lines) if line.strip()), None)
     if directive_index is None:

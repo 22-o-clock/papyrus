@@ -1,4 +1,3 @@
-import asyncio
 import json
 from enum import StrEnum
 from logging import getLogger
@@ -23,30 +22,28 @@ class DatabaseEnvironmentRepositoryProtocol(Protocol):
 
     async def set_env(self, key: str, value: str) -> None: ...
 
+    async def update_json_mapping_entry(self, key: str, entry_key: str, value: str | None) -> None: ...
+
+    async def update_json_string_set_member(self, key: str, member: str, *, enabled: bool) -> None: ...
+
 
 class ChannelRoleManager:
     """チャンネルごとのChatbot役割を永続化します。"""
 
     def __init__(self, environment_repository: DatabaseEnvironmentRepositoryProtocol) -> None:
         self._environment_repository = environment_repository
-        self._write_lock = asyncio.Lock()
 
-    async def get_role(self, channel_id: int, parent_channel_id: int | None = None) -> ChannelRole:
-        """チャンネルの役割を取得し、未設定のスレッドでは親チャンネルから継承します。"""
+    async def get_role(self, channel_id: int) -> ChannelRole:
+        """チャンネル自体の役割を取得し、未設定なら既定値を返します。"""
         roles = await self._load_roles()
-        for candidate_channel_id in (channel_id, parent_channel_id):
-            if candidate_channel_id is None:
-                continue
-            configured_role = roles.get(str(candidate_channel_id))
-            if configured_role is None:
-                continue
-
+        configured_role = roles.get(str(channel_id))
+        if configured_role is not None:
             try:
                 return ChannelRole(configured_role)
             except ValueError:
                 logger.warning(
                     "Unknown chatbot channel role (channel_id=%s, role=%r)",
-                    candidate_channel_id,
+                    channel_id,
                     configured_role,
                 )
 
@@ -67,23 +64,11 @@ class ChannelRoleManager:
 
     async def set_role(self, channel_id: int, role: ChannelRole) -> None:
         """チャンネルの役割を保存します。"""
-        async with self._write_lock:
-            roles = await self._load_roles()
-            roles[str(channel_id)] = role.value
-            await self._environment_repository.set_env(
-                CHANNEL_ROLES_KEY,
-                json.dumps(roles, ensure_ascii=False, sort_keys=True),
-            )
+        await self._environment_repository.update_json_mapping_entry(CHANNEL_ROLES_KEY, str(channel_id), role.value)
 
     async def clear_role(self, channel_id: int) -> None:
-        """チャンネル固有の役割を削除し、既定値または親チャンネルの継承へ戻します。"""
-        async with self._write_lock:
-            roles = await self._load_roles()
-            roles.pop(str(channel_id), None)
-            await self._environment_repository.set_env(
-                CHANNEL_ROLES_KEY,
-                json.dumps(roles, ensure_ascii=False, sort_keys=True),
-            )
+        """チャンネル固有の役割を削除し、既定値へ戻します。"""
+        await self._environment_repository.update_json_mapping_entry(CHANNEL_ROLES_KEY, str(channel_id), None)
 
     async def _load_roles(self) -> dict[str, str]:
         """保存済み設定を読み込み、壊れている場合は空の設定として扱います。"""

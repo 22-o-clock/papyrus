@@ -38,7 +38,7 @@ class Voicevox(commands.Cog):
         self.db = VoiceVoxDatabase(session_factory)
         self.lock = asyncio.Lock()
         self.voicevox_url = os.environ["VOICEVOX_URL"]
-        self.message_channel = os.environ["LISTEN_ONLY_MEMBER"]
+        self.message_channel = os.environ["CHANNEL_ID_LISTEN_ONLY_MEMBER"]
         self.character_for_member: dict[int, int] = {}
         self.speakers_cache: dict[int, str] = {}
 

@@ -85,15 +85,19 @@ jobs:
           CHATBOT_SUPABASE_CONNECTION_STRING: ${{ secrets.CHATBOT_SUPABASE_CONNECTION_STRING }}
           VOICEVOX_URL: ${{ secrets.VOICEVOX_URL }}
           SERVER_ID: ${{ secrets.SERVER_ID }}
-          BOT_ADMIN: ${{ secrets.BOT_ADMIN }}
-          LOBBY: ${{ secrets.LOBBY }}
-          LISTEN_ONLY_MEMBER: ${{ secrets.LISTEN_ONLY_MEMBER }}
-          LOG_THREAD: ${{ secrets.LOG_THREAD }}
-          ANTHYME_LOG_THREAD: ${{ secrets.ANTHYME_LOG_THREAD }}
+          ROLE_ID_BOT_ADMIN: ${{ secrets.ROLE_ID_BOT_ADMIN }}
+          CHANNEL_ID_LOBBY: ${{ secrets.CHANNEL_ID_LOBBY }}
+          CHANNEL_ID_LISTEN_ONLY_MEMBER: ${{ secrets.CHANNEL_ID_LISTEN_ONLY_MEMBER }}
+          THREAD_ID_LOG: ${{ secrets.THREAD_ID_LOG }}
+          THREAD_ID_ANTHYME_LOG: ${{ secrets.THREAD_ID_ANTHYME_LOG }}
+          THREAD_ID_API_USAGE_REPORT: ${{ secrets.THREAD_ID_API_USAGE_REPORT }}
+          CHANNEL_ID_DEBUG_CHATBOT: ${{ secrets.CHANNEL_ID_DEBUG_CHATBOT }}
+          THREAD_ID_DEBUG_API_USAGE_REPORT: ${{ secrets.THREAD_ID_DEBUG_API_USAGE_REPORT }}
           AUDIT_IMMUNITY: ${{ secrets.AUDIT_IMMUNITY }}
-          API_USAGE_REPORT_THREAD_ID: ${{ secrets.API_USAGE_REPORT_THREAD_ID }}
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           LASTFM_IDS: ${{ secrets.LASTFM_IDS }}
+          BOT_ENVIRONMENT: production
+          DEBUG: 'false'
           LOG_LEVEL: INFO
         run: |
           container_env_file="$(mktemp "${RUNNER_TEMP}/papyrus-container-env.XXXXXX")"
@@ -108,15 +112,19 @@ jobs:
             CHATBOT_SUPABASE_CONNECTION_STRING "$CHATBOT_SUPABASE_CONNECTION_STRING" \
             VOICEVOX_URL "$VOICEVOX_URL" \
             SERVER_ID "$SERVER_ID" \
-            BOT_ADMIN "$BOT_ADMIN" \
-            LOBBY "$LOBBY" \
-            LISTEN_ONLY_MEMBER "$LISTEN_ONLY_MEMBER" \
-            LOG_THREAD "$LOG_THREAD" \
-            ANTHYME_LOG_THREAD "$ANTHYME_LOG_THREAD" \
+            ROLE_ID_BOT_ADMIN "$ROLE_ID_BOT_ADMIN" \
+            CHANNEL_ID_LOBBY "$CHANNEL_ID_LOBBY" \
+            CHANNEL_ID_LISTEN_ONLY_MEMBER "$CHANNEL_ID_LISTEN_ONLY_MEMBER" \
+            THREAD_ID_LOG "$THREAD_ID_LOG" \
+            THREAD_ID_ANTHYME_LOG "$THREAD_ID_ANTHYME_LOG" \
+            THREAD_ID_API_USAGE_REPORT "$THREAD_ID_API_USAGE_REPORT" \
+            CHANNEL_ID_DEBUG_CHATBOT "$CHANNEL_ID_DEBUG_CHATBOT" \
+            THREAD_ID_DEBUG_API_USAGE_REPORT "$THREAD_ID_DEBUG_API_USAGE_REPORT" \
             AUDIT_IMMUNITY "$AUDIT_IMMUNITY" \
-            API_USAGE_REPORT_THREAD_ID "$API_USAGE_REPORT_THREAD_ID" \
             LASTFM_API_KEY "$LASTFM_API_KEY" \
             LASTFM_IDS "$LASTFM_IDS" \
+            BOT_ENVIRONMENT "$BOT_ENVIRONMENT" \
+            DEBUG "$DEBUG" \
             LOG_LEVEL "$LOG_LEVEL" > "$container_env_file"
           gcloud compute scp "$container_env_file" papyrus:/tmp/papyrus.env.next \
             --zone="${{ env.GAR_LOCATION }}-a" \

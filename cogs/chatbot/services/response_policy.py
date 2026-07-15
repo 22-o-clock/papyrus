@@ -14,7 +14,22 @@ from cogs.chatbot.constants import (
 )
 from cogs.chatbot.models.conversation import ChannelProcessingState
 from cogs.chatbot.models.custom_profile import CustomProfile
-from cogs.chatbot.responses_api import ResponseAction
+from cogs.chatbot.models.response_judgment import CooldownStage
+
+
+def activate_response(
+    state: ChannelProcessingState,
+    message: Message,
+    *,
+    is_explicit_call: bool,
+    is_unanswered_question: bool,
+    custom_profile: CustomProfile | None,
+) -> None:
+    """現在処理中の応答要求と、その必須性を状態へ保持します。"""
+    state.active_response_message = message
+    state.active_response_is_explicit_call = is_explicit_call
+    state.active_response_is_unanswered_question = is_unanswered_question
+    state.active_custom_profile = custom_profile
 
 
 def claim_response_slot(
@@ -27,13 +42,32 @@ def claim_response_slot(
 ) -> bool:
     """生成枠を確保し、使用中の場合は次の返信対象としてメッセージを保持します。"""
     if state.generating:
-        state.queued_response_message = message
-        state.queued_response_is_explicit_call = is_explicit_call
-        state.queued_response_is_unanswered_question = is_unanswered_question
-        state.queued_custom_profile = custom_profile
+        if is_explicit_call:
+            state.queued_response_message = message
+            state.queued_response_is_explicit_call = True
+            state.queued_response_is_unanswered_question = is_unanswered_question
+            state.queued_custom_profile = custom_profile
+        elif not state.queued_response_is_explicit_call:
+            if state.active_response_is_explicit_call and state.active_response_message is not None:
+                state.queued_response_message = state.active_response_message
+                state.queued_response_is_explicit_call = True
+                state.queued_response_is_unanswered_question = state.active_response_is_unanswered_question
+                state.queued_custom_profile = state.active_custom_profile
+            else:
+                state.queued_response_message = message
+                state.queued_response_is_explicit_call = False
+                state.queued_response_is_unanswered_question = is_unanswered_question
+                state.queued_custom_profile = custom_profile
         state.generation_revision += 1
         return False
     state.generating = True
+    activate_response(
+        state,
+        message,
+        is_explicit_call=is_explicit_call,
+        is_unanswered_question=is_unanswered_question,
+        custom_profile=custom_profile,
+    )
     return True
 
 
@@ -49,17 +83,13 @@ def is_generation_current(state: ChannelProcessingState, revision: int) -> bool:
     return state.generation_revision == revision
 
 
-def can_execute_spontaneous_action(action: ResponseAction, last_action_at: float | None, now: float) -> bool:
-    """自発反応が行動別のクールダウンを過ぎているか判定します。"""
-    if action is ResponseAction.SILENCE or last_action_at is None:
-        return True
-    cooldown_seconds = CHAT_REACTION_COOLDOWN_SECONDS if action is ResponseAction.REACTION else CHAT_TEXT_COOLDOWN_SECONDS
-    return now - last_action_at >= cooldown_seconds
-
-
-def can_start_spontaneous_generation(last_action_at: float | None, now: float) -> bool:
-    """全ての自発行動が抑制される期間を避けて生成を始めるか判定します。"""
-    return last_action_at is None or now - last_action_at >= CHAT_REACTION_COOLDOWN_SECONDS
+def get_cooldown_stage(last_action_at: float | None, now: float) -> CooldownStage:
+    """最後のBot反応からの経過時間を自発反応の抑制度へ変換します。"""
+    if last_action_at is None or now - last_action_at >= CHAT_TEXT_COOLDOWN_SECONDS:
+        return CooldownStage.READY
+    if now - last_action_at >= CHAT_REACTION_COOLDOWN_SECONDS:
+        return CooldownStage.RECOVERING
+    return CooldownStage.RECENT
 
 
 def should_reset_conversation(

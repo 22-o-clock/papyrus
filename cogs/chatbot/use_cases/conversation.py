@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+from dataclasses import dataclass
 from logging import getLogger
 
 import discord
@@ -9,11 +10,11 @@ from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cogs.chatbot.channel_roles import ChannelRole, ChannelRoleManager
-from cogs.chatbot.models import ChannelProcessingState, CustomProfile, ResponseRequestOptions
+from cogs.chatbot.models import ChannelProcessingState, CustomProfile, ResponseMode, ResponseRequestOptions
 from cogs.chatbot.repositories.custom_profile import CustomProfileRepository
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
 from cogs.chatbot.repositories.long_term_memory import ChatbotLongTermMemoryRepository
-from cogs.chatbot.repositories.member_alias import ChatbotMemberAliasRepository
+from cogs.chatbot.repositories.member_alias import ChatbotMemberAliasRepository, find_member_aliases
 from cogs.chatbot.repositories.shadow_candidate import ChatbotShadowCandidateRepository, ShadowCandidateInput
 from cogs.chatbot.repositories.short_term_message import (
     ChatbotShortTermMessageRepository,
@@ -27,17 +28,17 @@ from cogs.chatbot.responses_api import (
     MessageInMemory,
     ReactionInMemory,
     ResponseAction,
+    ResponseGenerationOptions,
     ResponsePipeline,
-    ShadowReason,
 )
 from cogs.chatbot.services.history_sync import get_history_sync_after
 from cogs.chatbot.services.message_delivery import reply_with_split_response, send_split_response
 from cogs.chatbot.services.reaction_context import collect_message_reactions, preserve_known_reactors
 from cogs.chatbot.services.response_policy import (
-    can_execute_spontaneous_action,
-    can_start_spontaneous_generation,
+    activate_response,
     claim_response_slot,
     get_available_referenced_author_id,
+    get_cooldown_stage,
     get_response_debounce_seconds,
     get_unanswered_question_wait_minutes,
     is_generation_current,
@@ -46,6 +47,7 @@ from cogs.chatbot.services.response_policy import (
     should_respond,
 )
 from cogs.chatbot.shadow_mode import ShadowModeManager
+from core.runtime_environment import RuntimeEnvironment, get_runtime_environment
 
 from .attachment import AttachmentUseCases
 from .custom_profile import (
@@ -60,9 +62,41 @@ from .settings import SettingsUseCases
 logger = getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class _ResponseSelectionRequest:
+    """応答種別判定時点で固定する入力。"""
+
+    generation_revision: int
+    is_explicit_call: bool
+    is_unanswered_question: bool
+    resolved_member_aliases: dict[str, int]
+
+
+def should_defer_unanswered_question(*, delayed_attempt: bool, generation_current: bool, unaddressed: bool) -> bool:
+    """初回の有効な判定で反応不要だった宛先のない質問だけを待機対象にします。"""
+    return not delayed_attempt and generation_current and unaddressed
+
+
+def get_mentioned_bot_role_ids(message: Message, bot_user: discord.ClientUser) -> set[int]:
+    """Botに付与された同名ロールのうち、投稿でメンションされたIDを返します。"""
+    guild = message.guild
+    bot_member = guild.me if guild is not None else None
+    if bot_member is None:
+        return set()
+
+    bot_role_ids = {role.id for role in bot_member.roles if role.name == bot_user.name}
+    return {role.id for role in message.role_mentions if role.id in bot_role_ids}
+
+
+def should_enqueue_long_term_memory(message: Message) -> bool:
+    """本人へ帰属できる人間の投稿だけを長期記憶抽出へ渡します。"""
+    return not message.author.bot and not message.message_snapshots
+
+
 class ConversationUseCases:
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
+        self.runtime_environment: RuntimeEnvironment = get_runtime_environment()
         self.response_pipelines: dict[int, ResponsePipeline] = {}
         self.environment_repository = DatabaseEnvironmentRepository(session_factory)
         self.channel_role_manager = ChannelRoleManager(self.environment_repository)
@@ -71,12 +105,16 @@ class ConversationUseCases:
             self.environment_repository,
             self.channel_role_manager,
             self.shadow_mode_manager,
+            self.runtime_environment,
         )
         self.shadow_candidate_repository = ChatbotShadowCandidateRepository(session_factory)
         self.short_term_message_repository = ChatbotShortTermMessageRepository(session_factory)
         self.long_term_memory_repository = ChatbotLongTermMemoryRepository(session_factory)
         self.member_alias_repository = ChatbotMemberAliasRepository(session_factory)
-        self.custom_profile_use_cases = CustomProfileUseCases(CustomProfileRepository(session_factory))
+        self.custom_profile_use_cases = CustomProfileUseCases(
+            CustomProfileRepository(session_factory),
+            self.runtime_environment,
+        )
         self._history_sync_complete = asyncio.Event()
         self._history_sync_lock = asyncio.Lock()
 
@@ -174,12 +212,24 @@ class ConversationUseCases:
             self._history_sync_complete.set()
             return
         self._history_sync_complete.clear()
+        if self.runtime_environment.is_debug:
+            logger.info("Skipped chatbot Discord history sync in debug environment")
+            self._history_sync_complete.set()
+            await self._initialize_long_term_memory_if_enabled()
+            return
         try:
             async with self._history_sync_lock:
                 await self._synchronize_recent_discord_history()
         finally:
             # 一部チャンネルの失敗で、通常の応答まで永続的に停止させない。
             self._history_sync_complete.set()
+        await self._initialize_long_term_memory_if_enabled()
+
+    async def _initialize_long_term_memory_if_enabled(self) -> None:
+        """共有記憶を書き換えるバックグラウンド処理を本番だけで開始します。"""
+        if self.runtime_environment.is_debug:
+            logger.info("Disabled chatbot long-term memory workers in debug environment")
+            return
         await self.long_term_memory_use_cases.initialize()
 
     async def _synchronize_recent_discord_history(self) -> None:
@@ -193,6 +243,8 @@ class ConversationUseCases:
                 continue
             channels: list[discord.TextChannel | discord.Thread] = [*guild.text_channels, *guild.threads]
             for channel in channels:
+                if not self.runtime_environment.should_process_chatbot_channel(channel.id):
+                    continue
                 permissions = channel.permissions_for(bot_member)
                 if not permissions.view_channel or not permissions.read_message_history:
                     continue
@@ -204,7 +256,7 @@ class ConversationUseCases:
                     channel_message_count = 0
                     async for message in channel.history(after=after, oldest_first=True, limit=None):
                         await self._append_message_to_short_term_memory(message, state)
-                        if not message.author.bot:
+                        if self.runtime_environment.is_production and should_enqueue_long_term_memory(message):
                             await self.long_term_memory_use_cases.enqueue(message.id, channel.id)
                         channel_message_count += 1
                     synchronized_message_count += channel_message_count
@@ -251,6 +303,8 @@ class ConversationUseCases:
         await self.short_term_message_repository.save_reaction_snapshots(snapshots)
 
     async def on_message(self, message: Message) -> None:
+        if not self.runtime_environment.should_process_chatbot_channel(message.channel.id):
+            return
         # 起動直後の不完全な文脈で応答せず、履歴同期後に受信イベントを処理する。
         await self._history_sync_complete.wait()
         # 1. 明示的に呼ばれる前の会話も保持するため、チャンネルごとにパイプラインを遅延初期化
@@ -268,15 +322,17 @@ class ConversationUseCases:
         if message.author.bot:
             return
 
-        await self.long_term_memory_use_cases.enqueue(message.id, message.channel.id)
+        if self.runtime_environment.is_production and should_enqueue_long_term_memory(message):
+            await self.long_term_memory_use_cases.enqueue(message.id, message.channel.id)
 
         bot_user = self.bot.user
         if bot_user is None:
             return
 
-        parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
-        role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
-        mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
+        role = await self.channel_role_manager.get_role(message.channel.id)
+        directly_mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
+        mentioned_bot_role_ids = get_mentioned_bot_role_ids(message, bot_user)
+        mentioned_bot = directly_mentioned_bot or bool(mentioned_bot_role_ids)
         replied_to_bot = await self._is_reply_to_bot(message)
         is_explicit_call = mentioned_bot or replied_to_bot
         custom_profile: CustomProfile | None = None
@@ -287,6 +343,7 @@ class ConversationUseCases:
                     message_id=message.id,
                     bot_user_id=bot_user.id,
                     directly_mentioned=True,
+                    bot_role_ids=mentioned_bot_role_ids,
                 )
             except InvalidCustomProfileDirectiveError as exc:
                 await message.reply(self._custom_profile_directive_error_message(exc))
@@ -304,17 +361,6 @@ class ConversationUseCases:
                 return
 
         await self._cancel_unanswered_question_wait(state)
-        if (
-            role is ChannelRole.CHAT
-            and not is_explicit_call
-            and is_unaddressed_question(
-                content=message.clean_content,
-                is_reply=message.type == discord.MessageType.reply,
-                mentioned_user_ids=[user.id for user in message.mentions],
-            )
-        ):
-            await self._schedule_unanswered_question_wait(message, state)
-            return
 
         response_required = should_respond(
             role,
@@ -362,7 +408,7 @@ class ConversationUseCases:
                     )
                 return
 
-            if response_message is not None:
+            if response_message is not None and (options.is_explicit_call or not state.debounced_response_is_explicit_call):
                 state.debounced_response_message = response_message
                 state.debounced_response_is_explicit_call = options.is_explicit_call
                 state.debounced_response_is_unanswered_question = options.is_unanswered_question
@@ -462,8 +508,7 @@ class ConversationUseCases:
         except asyncio.CancelledError:
             return
 
-        parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
-        role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
+        role = await self.channel_role_manager.get_role(message.channel.id)
         if role is not ChannelRole.CHAT:
             return
 
@@ -490,8 +535,11 @@ class ConversationUseCases:
 
     async def on_message_delete(self, message: Message) -> None:
         """待機中の質問が削除された場合は、遅延した回答を取り消します。"""
+        if not self.runtime_environment.should_process_chatbot_channel(message.channel.id):
+            return
         await self.short_term_message_repository.delete(message.id)
-        await self.long_term_memory_use_cases.delete(message.id)
+        if self.runtime_environment.is_production:
+            await self.long_term_memory_use_cases.delete(message.id)
         state = self._channel_states.get(message.channel.id)
         if state is None:
             return
@@ -507,6 +555,8 @@ class ConversationUseCases:
 
     async def on_message_edit(self, before: Message, after: Message) -> None:
         """編集された投稿を短期保存と現在の短期記憶へ反映します。"""
+        if not self.runtime_environment.should_process_chatbot_channel(after.channel.id):
+            return
         state = await self._ensure_channel_state(after.channel.id)
         async with state.lock:
             short_term_memory = self.response_pipelines[after.channel.id].short_term_memory
@@ -553,7 +603,7 @@ class ConversationUseCases:
                         attachment_kind,
                     )
 
-            if not after.author.bot:
+            if self.runtime_environment.is_production and not after.author.bot:
                 await self.long_term_memory_use_cases.enqueue(after.id, after.channel.id)
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
@@ -610,28 +660,13 @@ class ConversationUseCases:
         completed_normally = False
         try:
             while True:
-                now = asyncio.get_running_loop().time()
-                if current_is_explicit_call or can_start_spontaneous_generation(state.last_spontaneous_action_at, now):
-                    await self._generate_and_send_response(
-                        current_message,
-                        state,
-                        is_explicit_call=current_is_explicit_call,
-                        is_unanswered_question=current_is_unanswered_question,
-                        custom_profile=current_custom_profile,
-                    )
-                else:
-                    if await self._is_shadow_mode_for_message(
-                        current_message,
-                        is_explicit_call=current_is_explicit_call,
-                    ):
-                        await self._save_shadow_candidate(
-                            current_message,
-                            LLMMessage(action=ResponseAction.SILENCE, shadow_reason=ShadowReason.COOLDOWN),
-                        )
-                    logger.info(
-                        "Skipped spontaneous chatbot generation due to cooldown (channel_id=%s)",
-                        current_message.channel.id,
-                    )
+                await self._generate_and_send_response(
+                    current_message,
+                    state,
+                    is_explicit_call=current_is_explicit_call,
+                    is_unanswered_question=current_is_unanswered_question,
+                    custom_profile=current_custom_profile,
+                )
 
                 async with state.lock:
                     await self._flush_pending_messages(state)
@@ -645,12 +680,20 @@ class ConversationUseCases:
                     state.queued_custom_profile = None
                     if next_message is None:
                         state.generating = False
+                        self._clear_active_response(state)
                         completed_normally = True
                         return
                     current_message = next_message
                     current_is_explicit_call = next_is_explicit_call
                     current_is_unanswered_question = next_is_unanswered_question
                     current_custom_profile = next_custom_profile
+                    activate_response(
+                        state,
+                        current_message,
+                        is_explicit_call=current_is_explicit_call,
+                        is_unanswered_question=current_is_unanswered_question,
+                        custom_profile=current_custom_profile,
+                    )
         finally:
             if not completed_normally:
                 async with state.lock:
@@ -660,6 +703,15 @@ class ConversationUseCases:
                     state.queued_response_is_unanswered_question = False
                     state.queued_custom_profile = None
                     state.generating = False
+                    self._clear_active_response(state)
+
+    @staticmethod
+    def _clear_active_response(state: ChannelProcessingState) -> None:
+        """処理済みの応答要求を状態から除去します。"""
+        state.active_response_message = None
+        state.active_response_is_explicit_call = False
+        state.active_response_is_unanswered_question = False
+        state.active_custom_profile = None
 
     async def _flush_pending_messages(self, state: ChannelProcessingState) -> None:
         """生成中に保留したメッセージを時系列順で短期記憶へ移します。"""
@@ -723,6 +775,8 @@ class ConversationUseCases:
 
     async def on_raw_reaction_change(self, message_id: int, channel_id: int) -> None:
         """リアクションイベントを応答開始条件にせず、短期文脈だけ更新します。"""
+        if not self.runtime_environment.should_process_chatbot_channel(channel_id):
+            return
         await self._history_sync_complete.wait()
         if not await self.short_term_message_repository.contains(message_id):
             return
@@ -783,18 +837,67 @@ class ConversationUseCases:
         is_unanswered_question: bool,
         custom_profile: CustomProfile | None,
     ) -> None:
-        """短期記憶から回答を生成し、生成中に文脈が更新されていなければ送信します。"""
+        """要否判定後に回答を生成し、文脈が更新されていなければ送信します。"""
         generation_revision = state.generation_revision
-        async with message.channel.typing():
-            parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
-            role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
-            long_term_memory_context = await self.memory_search_use_cases.build_response_context(message.channel.id)
-            generated_response = await self.response_pipelines[message.channel.id].generate_response(
-                role,
+        role = await self.channel_role_manager.get_role(message.channel.id)
+        resolved_member_aliases = await self._resolve_member_aliases(message.channel.id)
+        required_reply_to_message_id = message.id if is_explicit_call else None
+        response_mode = await self._select_response_mode(
+            message,
+            state,
+            role,
+            _ResponseSelectionRequest(
+                generation_revision=generation_revision,
+                is_explicit_call=is_explicit_call,
                 is_unanswered_question=is_unanswered_question,
-                long_term_memory_context=long_term_memory_context,
-                custom_profile=custom_profile,
+                resolved_member_aliases=resolved_member_aliases,
+            ),
+        )
+        if response_mode is None:
+            await self._defer_unanswered_question_after_none(
+                message,
+                state,
+                generation_revision=generation_revision,
+                is_unanswered_question=is_unanswered_question,
             )
+            return
+
+        async def generate_response() -> LLMMessage:
+            long_term_memory_context = await self.memory_search_use_cases.build_response_context(message.channel.id)
+            return await self.response_pipelines[message.channel.id].generate_response(
+                role,
+                ResponseGenerationOptions(
+                    response_mode=response_mode,
+                    required_reply_to_message_id=required_reply_to_message_id,
+                    is_unanswered_question=is_unanswered_question,
+                    long_term_memory_context=long_term_memory_context,
+                    custom_profile=custom_profile,
+                    resolved_member_aliases=resolved_member_aliases,
+                ),
+            )
+
+        try:
+            if response_mode is ResponseMode.TEXT:
+                async with message.channel.typing():
+                    generated_response = await generate_response()
+            else:
+                generated_response = await generate_response()
+        except Exception:
+            logger.exception(
+                "Failed to generate chatbot response (channel_id=%s, trigger_message_id=%s, explicit=%s)",
+                message.channel.id,
+                message.id,
+                is_explicit_call,
+            )
+            if is_explicit_call and is_generation_current(state, generation_revision):
+                try:
+                    await message.reply("回答の生成に失敗しました。しばらくしてからもう一度お試しください。")
+                except discord.HTTPException:
+                    logger.exception(
+                        "Failed to notify explicit chatbot response failure (trigger_message_id=%s)",
+                        message.id,
+                    )
+            return
 
         async with state.lock:
             if not is_generation_current(state, generation_revision):
@@ -802,37 +905,100 @@ class ConversationUseCases:
             if await self._is_shadow_mode_for_message(message, is_explicit_call=is_explicit_call):
                 await self._save_shadow_candidate(message, generated_response)
                 return
-            await self.execute_response_action(message, generated_response, state, is_explicit_call=is_explicit_call)
+            await self.execute_response_action(message, generated_response, state)
+            if is_explicit_call:
+                state.active_response_is_explicit_call = False
+
+    async def _defer_unanswered_question_after_none(
+        self,
+        message: Message,
+        state: ChannelProcessingState,
+        *,
+        generation_revision: int,
+        is_unanswered_question: bool,
+    ) -> None:
+        """初回判定で反応不要だった宛先のない質問だけを、人間の回答待ちへ移します。"""
+        unaddressed = is_unaddressed_question(
+            content=message.clean_content,
+            is_reply=message.type == discord.MessageType.reply,
+            mentioned_user_ids=[user.id for user in message.mentions],
+        )
+        async with state.lock:
+            generation_current = is_generation_current(state, generation_revision)
+        if not should_defer_unanswered_question(
+            delayed_attempt=is_unanswered_question,
+            generation_current=generation_current,
+            unaddressed=unaddressed,
+        ):
+            return
+        logger.info(
+            "Deferred unanswered question after none judgment (channel_id=%s, trigger_message_id=%s)",
+            message.channel.id,
+            message.id,
+        )
+        await self._schedule_unanswered_question_wait(message, state)
+
+    async def _select_response_mode(
+        self,
+        message: Message,
+        state: ChannelProcessingState,
+        role: ChannelRole,
+        request: _ResponseSelectionRequest,
+    ) -> ResponseMode | None:
+        """明示呼びかけを優先し、それ以外は固定したクールダウン段階で判定します。"""
+        if request.is_explicit_call:
+            logger.info(
+                "Bypassed chatbot response judgment for explicit call (channel_id=%s, trigger_message_id=%s)",
+                message.channel.id,
+                message.id,
+            )
+            return ResponseMode.TEXT
+
+        cooldown_stage = get_cooldown_stage(state.last_action_at, asyncio.get_running_loop().time())
+        judgment = await self.response_pipelines[message.channel.id].judge_response(
+            role,
+            cooldown_stage=cooldown_stage,
+            is_unanswered_question=request.is_unanswered_question,
+            resolved_member_aliases=request.resolved_member_aliases,
+        )
+        logger.info(
+            "Completed chatbot response judgment (channel_id=%s, trigger_message_id=%s, response_mode=%s, cooldown_stage=%s)",
+            message.channel.id,
+            message.id,
+            judgment.response_mode.value,
+            cooldown_stage.value,
+        )
+        async with state.lock:
+            if is_generation_current(state, request.generation_revision):
+                return judgment.response_mode if judgment.response_mode is not ResponseMode.NONE else None
+        logger.info(
+            "Discarded stale chatbot response judgment (channel_id=%s, trigger_message_id=%s)",
+            message.channel.id,
+            message.id,
+        )
+        return None
+
+    async def _resolve_member_aliases(self, channel_id: int) -> dict[str, int]:
+        """短期会話に実際に含まれる確定済み別名だけを解決します。"""
+        short_term_memory = self.response_pipelines[channel_id].short_term_memory
+        active_aliases = await self.member_alias_repository.get_active_aliases()
+        return find_member_aliases(short_term_memory.to_json(), active_aliases)
 
     async def execute_response_action(
         self,
         message: Message,
         response: LLMMessage,
         state: ChannelProcessingState,
-        *,
-        is_explicit_call: bool,
     ) -> None:
         """構造化された応答行動をDiscord上で実行します。"""
         if response.action is ResponseAction.SILENCE:
             return
 
         now = asyncio.get_running_loop().time()
-        if not is_explicit_call and not can_execute_spontaneous_action(
-            response.action,
-            state.last_spontaneous_action_at,
-            now,
-        ):
-            logger.info(
-                "Skipped spontaneous chatbot action due to cooldown (action=%s, channel_id=%s)",
-                response.action.value,
-                message.channel.id,
-            )
-            return
 
         if response.action is ResponseAction.MESSAGE:
             await send_split_response(message.channel, response.content)
-            if not is_explicit_call:
-                state.last_spontaneous_action_at = now
+            state.last_action_at = now
             return
 
         reply_to_message_id = response.reply_to_message_id
@@ -857,20 +1023,17 @@ class ConversationUseCases:
                 logger.warning("Generated reaction has no emoji (message_id=%s)", reply_to_message_id)
                 return
             await target_message.add_reaction(reaction_emoji)
-            if not is_explicit_call:
-                state.last_spontaneous_action_at = now
+            state.last_action_at = now
             return
 
         await reply_with_split_response(target_message, response.content)
-        if not is_explicit_call:
-            state.last_spontaneous_action_at = now
+        state.last_action_at = now
 
     async def _is_shadow_mode_for_message(self, message: Message, *, is_explicit_call: bool) -> bool:
         """明示依頼以外のchat役割でシャドーモードを適用するか判定します。"""
         if is_explicit_call:
             return False
-        parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
-        role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
+        role = await self.channel_role_manager.get_role(message.channel.id)
         return role is ChannelRole.CHAT and await self.shadow_mode_manager.is_enabled(message.channel.id)
 
     async def _save_shadow_candidate(self, message: Message, response: LLMMessage) -> None:

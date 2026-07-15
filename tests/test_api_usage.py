@@ -2,10 +2,11 @@ import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from cogs.api_usage.models import ReportMeasurementState
 from cogs.api_usage.openai_usage import JST, UTC, OpenAIUsageSummary, _aggregate_costs, utc_report_period
+from cogs.api_usage.services.message_delivery import ApiUsageReportMessageDelivery, ReportMessageOwnershipError
 from cogs.api_usage.services.report_builder import aggregate_feature_usages, build_usage_embed
 from cogs.api_usage.use_cases.reporting import should_run_daily_report, validate_report_date
 from cogs.chatbot import observability
@@ -135,6 +136,20 @@ class ApiUsageAggregationTest(TestCase):
 
         ensure_equal(usage.model_cost, Decimal("0.25"))
 
+    def test_nano_judgment_uses_configured_token_prices(self) -> None:
+        row = create_usage(
+            "response_judgment",
+            "gpt-5.4-nano",
+            input_tokens=2_000_000,
+            cached_input_tokens=1_000_000,
+            output_tokens=1_000_000,
+        )
+        row.usage_date = datetime.date(2026, 7, 15)
+
+        usage = aggregate_feature_usages([row])[0]
+
+        ensure_equal(usage.model_cost, Decimal("1.47"))
+
     def test_unknown_model_is_explicitly_marked(self) -> None:
         usage = aggregate_feature_usages([create_usage("draft_generation", "unknown-model", input_tokens=10_000)])[0]
 
@@ -170,6 +185,30 @@ class ApiUsageAggregationTest(TestCase):
 
 
 class ApiUsageEmbedTest(TestCase):
+    def test_embed_labels_judgment_and_generation_separately(self) -> None:
+        report_date = datetime.date(2026, 7, 15)
+        rows = [
+            create_usage("response_judgment", "gpt-5.4-nano", input_tokens=1_000),
+            create_usage("draft_generation", "gpt-5.6-terra", input_tokens=1_000),
+        ]
+        for row in rows:
+            row.usage_date = report_date
+        features = aggregate_feature_usages(rows)
+
+        embed = build_usage_embed(
+            report_date,
+            features,
+            None,
+            ReportMeasurementState(started_at=None, error_count=0),
+        )
+
+        field_names = [str(field.name or "") for field in embed.fields]
+        ensure(any(name.startswith("応答要否判定 —") for name in field_names))
+        ensure(any(name.startswith("応答生成 —") for name in field_names))
+        ensure(all("応答生成・行動判断" not in name for name in field_names))
+        judgment_field = next(field for field in embed.fields if str(field.name or "").startswith("応答要否判定 —"))
+        ensure_contains("判定 1件", str(judgment_field.value))
+
     def test_embed_prioritizes_feature_costs_and_long_term_memory_breakdown(self) -> None:
         report_date = datetime.date(2026, 7, 14)
         features = aggregate_feature_usages(
@@ -250,3 +289,29 @@ class ApiUsageObservationTest(IsolatedAsyncioTestCase):
         ensure_equal(increment.long_context_input_tokens, 300_000)
         ensure_equal(increment.web_search_calls, 1)
         ensure_equal(increment.code_interpreter_sessions, 1)
+
+
+class ApiUsageDeliveryTest(TestCase):
+    def test_rejects_delivery_message_owned_by_another_bot(self) -> None:
+        bot = MagicMock()
+        bot.user.id = 100
+        delivery = ApiUsageReportMessageDelivery(bot, MagicMock(), target_id=200)
+        message = MagicMock()
+        message.id = 300
+        message.author.id = 400
+
+        try:
+            delivery.validate_message_owner(message)
+        except ReportMessageOwnershipError:
+            return
+        raise AssertionError
+
+    def test_accepts_delivery_message_owned_by_current_bot(self) -> None:
+        bot = MagicMock()
+        bot.user.id = 100
+        delivery = ApiUsageReportMessageDelivery(bot, MagicMock(), target_id=200)
+        message = MagicMock()
+        message.id = 300
+        message.author.id = 100
+
+        delivery.validate_message_owner(message)

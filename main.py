@@ -12,6 +12,7 @@ from cogs import admin, agree, api_usage, audit, chatbot, hwh, monitor, moving, 
 from cogs.chatbot.repositories.schema import CHATBOT_DATABASE_SCHEMA, create_chatbot_tables
 from core.db import create_session_factory, create_tables, dispose_engine, init_engine
 from core.debug_cogs import load_debug_cogs
+from core.runtime_environment import configure_runtime_environment, get_runtime_environment
 
 
 async def load_all_cogs(
@@ -48,8 +49,12 @@ class MyBot(commands.Bot):
             await load_debug_cogs(self, session_factory, chatbot_session_factory)
         else:
             await load_all_cogs(self, session_factory, chatbot_session_factory)
-        await create_tables()
-        await create_chatbot_tables(chatbot_engine)
+        runtime = get_runtime_environment()
+        if runtime.is_production:
+            await create_tables()
+            await create_chatbot_tables(chatbot_engine)
+        else:
+            getLogger(__name__).info("Skipped shared database schema updates in debug environment")
         my_server = await self.fetch_guild(int(os.environ["SERVER_ID"]))
         self.tree.copy_global_to(guild=my_server)
         await self.tree.sync(guild=my_server)
@@ -64,6 +69,7 @@ class MyBot(commands.Bot):
 
 def main() -> None:
     dotenv.load_dotenv()
+    configure_runtime_environment()
 
     with Path("./log/logging_conf.json").open("r", encoding="utf-8") as f:
         config.dictConfig(json.load(f))

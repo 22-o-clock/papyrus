@@ -1,4 +1,5 @@
 import io
+from collections.abc import Collection
 
 import discord
 
@@ -10,6 +11,7 @@ from cogs.chatbot.services.custom_profile_parser import (
     InvalidCustomProfileDirectiveError,
     parse_custom_profile_directive,
 )
+from core.runtime_environment import RuntimeEnvironment
 
 CUSTOM_PROFILE_MODELS = {"system_default", "gpt-5.6-terra", "gpt-5.6-luna"}
 
@@ -21,8 +23,9 @@ class CustomProfileNotFoundError(LookupError):
 class CustomProfileUseCases:
     """明示されたoptionを1回分の生成設定へ解決します。"""
 
-    def __init__(self, repository: CustomProfileRepository) -> None:
+    def __init__(self, repository: CustomProfileRepository, runtime_environment: RuntimeEnvironment) -> None:
         self._repository = repository
+        self._runtime_environment = runtime_environment
 
     async def resolve(
         self,
@@ -31,12 +34,14 @@ class CustomProfileUseCases:
         message_id: int,
         bot_user_id: int,
         directly_mentioned: bool,
+        bot_role_ids: Collection[int] = (),
     ) -> CustomProfile | None:
         """投稿のoption指定を検証し、DBのプロファイルと結合します。"""
         directive = parse_custom_profile_directive(
             content,
             bot_user_id=bot_user_id,
             directly_mentioned=directly_mentioned,
+            bot_role_ids=bot_role_ids,
         )
         if directive is None:
             return None
@@ -60,6 +65,8 @@ class CustomProfileUseCases:
         model: str,
     ) -> None:
         """管理権限を確認し、プロファイルを作成または更新します。"""
+        if not await self._validate_shared_write(interaction):
+            return
         if not await self._validate_admin(interaction):
             return
         normalized_name = profile_name.lower()
@@ -88,6 +95,8 @@ class CustomProfileUseCases:
 
     async def disable(self, interaction: discord.Interaction, profile_name: str) -> None:
         """管理権限を確認し、プロファイルを無効化します。"""
+        if not await self._validate_shared_write(interaction):
+            return
         if not await self._validate_admin(interaction):
             return
         normalized_name = profile_name.lower()
@@ -138,6 +147,16 @@ class CustomProfileUseCases:
             return
         lines = [f"- {profile.name}: {profile.model}" for profile in profiles]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    async def _validate_shared_write(self, interaction: discord.Interaction) -> bool:
+        """デバッグBotから本番共通のプロファイルを変更させません。"""
+        if self._runtime_environment.is_production:
+            return True
+        await interaction.response.send_message(
+            "デバッグ環境では、本番と共有するカスタムプロファイルを変更できません。",
+            ephemeral=True,
+        )
+        return False
 
     @staticmethod
     async def _validate_admin(interaction: discord.Interaction) -> bool:

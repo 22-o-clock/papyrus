@@ -10,11 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from cogs.api_usage.models import ReportMeasurementState
 from cogs.api_usage.openai_usage import JST, OpenAIOrganizationUsageClient, OpenAIUsageSummary
 from cogs.api_usage.repositories.report import ApiUsageReportDatabase
-from cogs.api_usage.services.message_delivery import ApiUsageReportMessageDelivery
+from cogs.api_usage.services.message_delivery import ApiUsageReportMessageDelivery, ReportMessageOwnershipError
 from cogs.api_usage.services.report_builder import aggregate_feature_usages, build_usage_embed
 from cogs.chatbot.observability import configure_chatbot_api_usage, get_measurement_error_count
 from cogs.chatbot.repositories.api_usage import UTC
 from core.exception.exception import ArgumentError, MissingRequiredRoleError
+from core.runtime_environment import RuntimeEnvironment, get_runtime_environment
 
 logger = getLogger(__name__)
 OPENAI_RETRY_INTERVAL = datetime.timedelta(hours=1)
@@ -41,13 +42,10 @@ class ApiUsageReportUseCases:
 
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._database = ApiUsageReportDatabase(session_factory)
+        self._runtime_environment: RuntimeEnvironment = get_runtime_environment()
         self._usage_repository = configure_chatbot_api_usage(session_factory)
-        self._admin_role_id = int(os.environ["BOT_ADMIN"])
-        target_id = os.getenv("API_USAGE_REPORT_THREAD_ID") or os.getenv("API_USAGE_REPORT_CHANNEL_ID")
-        if target_id is None:
-            message = "API_USAGE_REPORT_THREAD_ID or API_USAGE_REPORT_CHANNEL_ID is required"
-            raise RuntimeError(message)
-        self._target_id = int(target_id)
+        self._admin_role_id = int(os.environ["ROLE_ID_BOT_ADMIN"])
+        self._target_id = self._runtime_environment.api_usage_report_target_id
         self._client = OpenAIOrganizationUsageClient(
             os.environ["OPENAI_ADMIN_API_KEY"],
             project_id=os.environ["OPENAI_USAGE_PROJECT_ID"],
@@ -63,6 +61,8 @@ class ApiUsageReportUseCases:
 
     async def process_scheduled_reports(self, now: datetime.datetime | None = None) -> None:
         """設定時刻後の欠損補完、前日投稿、前々日再集計を行う。"""
+        if self._runtime_environment.is_debug:
+            return
         current_time = now or datetime.datetime.now(JST)
         configuration = await self._database.get_configuration()
         if not should_run_daily_report(current_time, configuration.report_hour, configuration.report_minute):
@@ -78,8 +78,17 @@ class ApiUsageReportUseCases:
         self._require_admin(interaction)
         report_date = self._parse_report_date(date)
         await interaction.response.defer(ephemeral=True, thinking=True)
-        async with self._report_lock:
-            await self._post_or_update_report(report_date)
+        try:
+            async with self._report_lock:
+                await self._post_or_update_report(report_date)
+        except ReportMessageOwnershipError:
+            logger.exception("Refused to overwrite another Bot's API usage report")
+            await interaction.followup.send(
+                "投稿先または配送記録が別のBotのAPI usageレポートを指しています。"
+                "本番とデバッグで別の投稿先を設定してください。",
+                ephemeral=True,
+            )
+            return
         await interaction.followup.send(
             f"{report_date:%Y-%m-%d} 09:00 ~ "
             f"{report_date + datetime.timedelta(days=1):%Y-%m-%d} 09:00 JST のレポートを投稿または更新しました。",
@@ -89,6 +98,12 @@ class ApiUsageReportUseCases:
     async def schedule(self, interaction: Interaction, hour: int, minute: int) -> None:
         """管理者が毎日の投稿時刻をJSTで変更する。"""
         self._require_admin(interaction)
+        if self._runtime_environment.is_debug:
+            await interaction.response.send_message(
+                "デバッグ環境では、本番と共有するAPI usage投稿時刻を変更できません。",
+                ephemeral=True,
+            )
+            return
         if not 0 <= hour <= MAXIMUM_HOUR or not 0 <= minute <= MAXIMUM_MINUTE:
             message = "時は0-23、分は0-59で指定してください。"
             raise ArgumentError(message)
@@ -111,11 +126,15 @@ class ApiUsageReportUseCases:
             if last_delivery is not None
             else "なし"
         )
+        environment_note = (
+            "\n実行環境: debug (自動投稿停止、手動投稿のみ)" if self._runtime_environment.is_debug else "\n実行環境: production"
+        )
         await interaction.response.send_message(
             f"現在: {now:%Y-%m-%d %H:%M JST}\n"
             f"投稿時刻: {configuration.report_hour:02d}:{configuration.report_minute:02d} JST\n"
             f"投稿先: <#{self._target_id}>\n最終成功: {last_text}\n"
-            f"次の対象期間: {next_date:%Y-%m-%d} 09:00 ~ {next_end_date:%Y-%m-%d} 09:00 JST",
+            f"次の対象期間: {next_date:%Y-%m-%d} 09:00 ~ {next_end_date:%Y-%m-%d} 09:00 JST"
+            f"{environment_note}",
             ephemeral=True,
         )
 

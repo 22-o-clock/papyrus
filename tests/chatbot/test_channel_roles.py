@@ -16,6 +16,22 @@ class FakeDatabaseEnvironmentRepository:
     async def set_env(self, key: str, value: str) -> None:
         self.values[key] = value
 
+    async def update_json_mapping_entry(self, key: str, entry_key: str, value: str | None) -> None:
+        loaded = json.loads(self.values.get(key, "{}"))
+        if value is None:
+            loaded.pop(entry_key, None)
+        else:
+            loaded[entry_key] = value
+        self.values[key] = json.dumps(loaded)
+
+    async def update_json_string_set_member(self, key: str, member: str, *, enabled: bool) -> None:
+        loaded = set(json.loads(self.values.get(key, "[]")))
+        if enabled:
+            loaded.add(member)
+        else:
+            loaded.discard(member)
+        self.values[key] = json.dumps(sorted(loaded))
+
 
 class ChannelRoleManagerTest(unittest.IsolatedAsyncioTestCase):
     async def test_returns_assistant_when_channel_is_not_configured(self) -> None:
@@ -50,27 +66,27 @@ class ChannelRoleManagerTest(unittest.IsolatedAsyncioTestCase):
         if role is not ChannelRole.ASSISTANT:
             self.fail("不正な役割で安全な既定値にフォールバックしていません")
 
-    async def test_thread_inherits_parent_channel_role(self) -> None:
+    async def test_thread_does_not_inherit_parent_channel_role(self) -> None:
         environment_repository = FakeDatabaseEnvironmentRepository({CHANNEL_ROLES_KEY: '{"100": "chat"}'})
         manager = ChannelRoleManager(environment_repository)
 
-        role = await manager.get_role(channel_id=200, parent_channel_id=100)
+        role = await manager.get_role(channel_id=200)
 
-        if role is not ChannelRole.CHAT:
-            self.fail("未設定スレッドが親チャンネルの役割を継承していません")
+        if role is not ChannelRole.ASSISTANT:
+            self.fail("未設定スレッドが親チャンネルの役割を継承しています")
 
-    async def test_thread_override_takes_priority_over_parent(self) -> None:
+    async def test_thread_uses_its_own_role(self) -> None:
         environment_repository = FakeDatabaseEnvironmentRepository(
-            {CHANNEL_ROLES_KEY: '{"100": "chat", "200": "assistant"}'},
+            {CHANNEL_ROLES_KEY: '{"100": "assistant", "200": "chat"}'},
         )
         manager = ChannelRoleManager(environment_repository)
 
-        role = await manager.get_role(channel_id=200, parent_channel_id=100)
+        role = await manager.get_role(channel_id=200)
 
-        if role is not ChannelRole.ASSISTANT:
-            self.fail("スレッド固有の役割が親チャンネルより優先されていません")
+        if role is not ChannelRole.CHAT:
+            self.fail("スレッド固有の役割を取得できません")
 
-    async def test_clear_thread_override_restores_inheritance(self) -> None:
+    async def test_clear_thread_role_restores_default(self) -> None:
         environment_repository = FakeDatabaseEnvironmentRepository(
             {CHANNEL_ROLES_KEY: '{"100": "chat", "200": "assistant"}'},
         )
@@ -80,5 +96,5 @@ class ChannelRoleManagerTest(unittest.IsolatedAsyncioTestCase):
 
         if await manager.get_configured_role(channel_id=200) is not None:
             self.fail("スレッド固有の役割を解除できません")
-        if await manager.get_role(channel_id=200, parent_channel_id=100) is not ChannelRole.CHAT:
-            self.fail("固有設定の解除後に親チャンネルの役割を継承していません")
+        if await manager.get_role(channel_id=200) is not ChannelRole.ASSISTANT:
+            self.fail("固有設定の解除後に既定値へ戻っていません")
