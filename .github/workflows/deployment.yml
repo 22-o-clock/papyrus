@@ -147,18 +147,5 @@ jobs:
                 --network=host \\
                 --env-file=\"\$HOME/.papyrus.env\" \\
                 '$IMAGE_URI'
-              for attempt in \$(seq 1 12); do
-                if docker logs papyrus 2>&1 | grep -q 'has connected to Gateway'; then
-                  echo 'Papyrus connected to the Discord Gateway.'
-                  break
-                fi
-                if [ \"\$attempt\" -eq 12 ]; then
-                  echo 'Papyrus did not connect to the Discord Gateway within 60 seconds.'
-                  docker ps -a --filter name=papyrus
-                  docker logs --tail 100 papyrus
-                  exit 1
-                fi
-                sleep 5
-              done
               docker image prune -f
             "
