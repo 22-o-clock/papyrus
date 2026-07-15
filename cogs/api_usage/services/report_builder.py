@@ -17,7 +17,8 @@ MEMORY_OPERATIONS = {
     "memory_admin_embedding",
 }
 FEATURE_LABELS = {
-    "draft_generation": "応答生成・行動判断",
+    "response_judgment": "応答要否判定",
+    "draft_generation": "応答生成",
     "attachment_analysis": "添付ファイル解析",
     "memory_extraction": "長期記憶の抽出",
     "memory_reconciliation": "長期記憶の整合判定",
@@ -26,6 +27,7 @@ FEATURE_LABELS = {
     "memory_admin_embedding": "管理更新用Embedding",
 }
 ITEM_LABELS = {
+    "response_judgment": "判定",
     "draft_generation": "応答",
     "attachment_analysis": "添付",
     "memory_extraction": "メッセージ",

@@ -143,7 +143,7 @@ class ApiUsageAggregationTest(TestCase):
             cached_input_tokens=1_000_000,
             output_tokens=1_000_000,
         )
-        row.usage_date = datetime.date(2026, 7, 16)
+        row.usage_date = datetime.date(2026, 7, 15)
 
         usage = aggregate_feature_usages([row])[0]
 
@@ -184,6 +184,30 @@ class ApiUsageAggregationTest(TestCase):
 
 
 class ApiUsageEmbedTest(TestCase):
+    def test_embed_labels_judgment_and_generation_separately(self) -> None:
+        report_date = datetime.date(2026, 7, 15)
+        rows = [
+            create_usage("response_judgment", "gpt-5.4-nano", input_tokens=1_000),
+            create_usage("draft_generation", "gpt-5.6-terra", input_tokens=1_000),
+        ]
+        for row in rows:
+            row.usage_date = report_date
+        features = aggregate_feature_usages(rows)
+
+        embed = build_usage_embed(
+            report_date,
+            features,
+            None,
+            ReportMeasurementState(started_at=None, error_count=0),
+        )
+
+        field_names = [str(field.name or "") for field in embed.fields]
+        ensure(any(name.startswith("応答要否判定 —") for name in field_names))
+        ensure(any(name.startswith("応答生成 —") for name in field_names))
+        ensure(all("応答生成・行動判断" not in name for name in field_names))
+        judgment_field = next(field for field in embed.fields if str(field.name or "").startswith("応答要否判定 —"))
+        ensure_contains("判定 1件", str(judgment_field.value))
+
     def test_embed_prioritizes_feature_costs_and_long_term_memory_breakdown(self) -> None:
         report_date = datetime.date(2026, 7, 14)
         features = aggregate_feature_usages(
