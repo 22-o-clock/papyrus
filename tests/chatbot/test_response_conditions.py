@@ -37,7 +37,7 @@ from cogs.chatbot.use_cases.admin_validation import (
     parse_memory_admin_target,
     validate_exported_memory_ids,
 )
-from cogs.chatbot.use_cases.conversation import ConversationUseCases
+from cogs.chatbot.use_cases.conversation import ConversationUseCases, get_mentioned_bot_role_ids
 from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
 
@@ -161,6 +161,48 @@ class ShouldRespondTest(unittest.TestCase):
 
         if not result:
             self.fail("chatの通常投稿で応答判断を開始しません")
+
+
+class BotRoleMentionTest(unittest.TestCase):
+    def test_detects_mentioned_same_name_role_assigned_to_bot(self) -> None:
+        same_name_role = SimpleNamespace(id=10, name="Papyrus")
+        message = SimpleNamespace(
+            guild=SimpleNamespace(me=SimpleNamespace(roles=[same_name_role])),
+            role_mentions=[same_name_role],
+        )
+        bot_user = SimpleNamespace(id=1, name="Papyrus")
+
+        result = get_mentioned_bot_role_ids(cast("Message", message), cast("discord.ClientUser", bot_user))
+
+        if result != {10}:
+            self.fail("Botに付与された同名ロールへのメンションを検出できません")
+
+    def test_ignores_unassigned_role_with_same_name(self) -> None:
+        assigned_role = SimpleNamespace(id=10, name="Papyrus")
+        mentioned_role = SimpleNamespace(id=20, name="Papyrus")
+        message = SimpleNamespace(
+            guild=SimpleNamespace(me=SimpleNamespace(roles=[assigned_role])),
+            role_mentions=[mentioned_role],
+        )
+        bot_user = SimpleNamespace(id=1, name="Papyrus")
+
+        result = get_mentioned_bot_role_ids(cast("Message", message), cast("discord.ClientUser", bot_user))
+
+        if result:
+            self.fail("Botに付与されていない同名ロールへのメンションを誤検出しています")
+
+    def test_ignores_assigned_role_with_different_name(self) -> None:
+        role = SimpleNamespace(id=10, name="Another Role")
+        message = SimpleNamespace(
+            guild=SimpleNamespace(me=SimpleNamespace(roles=[role])),
+            role_mentions=[role],
+        )
+        bot_user = SimpleNamespace(id=1, name="Papyrus")
+
+        result = get_mentioned_bot_role_ids(cast("Message", message), cast("discord.ClientUser", bot_user))
+
+        if result:
+            self.fail("Bot名と異なる付与ロールへのメンションを誤検出しています")
 
 
 class ChannelRolePermissionTest(unittest.TestCase):

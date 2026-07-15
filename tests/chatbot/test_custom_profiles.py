@@ -30,6 +30,17 @@ class CustomProfileParserTest(unittest.TestCase):
         if parsed.content != "いつまでも終わらない仕事について一句読んで":
             self.fail("option名に続く同じ行の本文を分離できません")
 
+    def test_parses_directive_after_bot_role_mention(self) -> None:
+        parsed = parse_custom_profile_directive(
+            "<@&456> option poet\n本文です",
+            bot_user_id=123,
+            directly_mentioned=True,
+            bot_role_ids={456},
+        )
+
+        if parsed is None or parsed.name != "poet" or parsed.content != "本文です":
+            self.fail("Botの同名ロールへのメンション後にあるoption指定を分離できません")
+
     def test_ignores_option_without_direct_mention(self) -> None:
         parsed = parse_custom_profile_directive(
             "option poet\n本文です",

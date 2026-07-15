@@ -60,6 +60,17 @@ from .settings import SettingsUseCases
 logger = getLogger(__name__)
 
 
+def get_mentioned_bot_role_ids(message: Message, bot_user: discord.ClientUser) -> set[int]:
+    """Botに付与された同名ロールのうち、投稿でメンションされたIDを返します。"""
+    guild = message.guild
+    bot_member = guild.me if guild is not None else None
+    if bot_member is None:
+        return set()
+
+    bot_role_ids = {role.id for role in bot_member.roles if role.name == bot_user.name}
+    return {role.id for role in message.role_mentions if role.id in bot_role_ids}
+
+
 class ConversationUseCases:
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
@@ -276,7 +287,9 @@ class ConversationUseCases:
 
         parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
         role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
-        mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
+        directly_mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
+        mentioned_bot_role_ids = get_mentioned_bot_role_ids(message, bot_user)
+        mentioned_bot = directly_mentioned_bot or bool(mentioned_bot_role_ids)
         replied_to_bot = await self._is_reply_to_bot(message)
         is_explicit_call = mentioned_bot or replied_to_bot
         custom_profile: CustomProfile | None = None
@@ -287,6 +300,7 @@ class ConversationUseCases:
                     message_id=message.id,
                     bot_user_id=bot_user.id,
                     directly_mentioned=True,
+                    bot_role_ids=mentioned_bot_role_ids,
                 )
             except InvalidCustomProfileDirectiveError as exc:
                 await message.reply(self._custom_profile_directive_error_message(exc))

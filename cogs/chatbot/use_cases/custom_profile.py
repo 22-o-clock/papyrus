@@ -1,4 +1,5 @@
 import io
+from collections.abc import Collection
 
 import discord
 
@@ -31,12 +32,14 @@ class CustomProfileUseCases:
         message_id: int,
         bot_user_id: int,
         directly_mentioned: bool,
+        bot_role_ids: Collection[int] = (),
     ) -> CustomProfile | None:
         """投稿のoption指定を検証し、DBのプロファイルと結合します。"""
         directive = parse_custom_profile_directive(
             content,
             bot_user_id=bot_user_id,
             directly_mentioned=directly_mentioned,
+            bot_role_ids=bot_role_ids,
         )
         if directive is None:
             return None
