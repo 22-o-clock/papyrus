@@ -329,8 +329,7 @@ class ConversationUseCases:
         if bot_user is None:
             return
 
-        parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
-        role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
+        role = await self.channel_role_manager.get_role(message.channel.id)
         directly_mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
         mentioned_bot_role_ids = get_mentioned_bot_role_ids(message, bot_user)
         mentioned_bot = directly_mentioned_bot or bool(mentioned_bot_role_ids)
@@ -509,8 +508,7 @@ class ConversationUseCases:
         except asyncio.CancelledError:
             return
 
-        parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
-        role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
+        role = await self.channel_role_manager.get_role(message.channel.id)
         if role is not ChannelRole.CHAT:
             return
 
@@ -841,8 +839,7 @@ class ConversationUseCases:
     ) -> None:
         """要否判定後に回答を生成し、文脈が更新されていなければ送信します。"""
         generation_revision = state.generation_revision
-        parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
-        role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
+        role = await self.channel_role_manager.get_role(message.channel.id)
         resolved_member_aliases = await self._resolve_member_aliases(message.channel.id)
         required_reply_to_message_id = message.id if is_explicit_call else None
         response_mode = await self._select_response_mode(
@@ -1036,8 +1033,7 @@ class ConversationUseCases:
         """明示依頼以外のchat役割でシャドーモードを適用するか判定します。"""
         if is_explicit_call:
             return False
-        parent_channel_id = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
-        role = await self.channel_role_manager.get_role(message.channel.id, parent_channel_id)
+        role = await self.channel_role_manager.get_role(message.channel.id)
         return role is ChannelRole.CHAT and await self.shadow_mode_manager.is_enabled(message.channel.id)
 
     async def _save_shadow_candidate(self, message: Message, response: LLMMessage) -> None:

@@ -33,22 +33,17 @@ class ChannelRoleManager:
     def __init__(self, environment_repository: DatabaseEnvironmentRepositoryProtocol) -> None:
         self._environment_repository = environment_repository
 
-    async def get_role(self, channel_id: int, parent_channel_id: int | None = None) -> ChannelRole:
-        """チャンネルの役割を取得し、未設定のスレッドでは親チャンネルから継承します。"""
+    async def get_role(self, channel_id: int) -> ChannelRole:
+        """チャンネル自体の役割を取得し、未設定なら既定値を返します。"""
         roles = await self._load_roles()
-        for candidate_channel_id in (channel_id, parent_channel_id):
-            if candidate_channel_id is None:
-                continue
-            configured_role = roles.get(str(candidate_channel_id))
-            if configured_role is None:
-                continue
-
+        configured_role = roles.get(str(channel_id))
+        if configured_role is not None:
             try:
                 return ChannelRole(configured_role)
             except ValueError:
                 logger.warning(
                     "Unknown chatbot channel role (channel_id=%s, role=%r)",
-                    candidate_channel_id,
+                    channel_id,
                     configured_role,
                 )
 
@@ -72,7 +67,7 @@ class ChannelRoleManager:
         await self._environment_repository.update_json_mapping_entry(CHANNEL_ROLES_KEY, str(channel_id), role.value)
 
     async def clear_role(self, channel_id: int) -> None:
-        """チャンネル固有の役割を削除し、既定値または親チャンネルの継承へ戻します。"""
+        """チャンネル固有の役割を削除し、既定値へ戻します。"""
         await self._environment_repository.update_json_mapping_entry(CHANNEL_ROLES_KEY, str(channel_id), None)
 
     async def _load_roles(self) -> dict[str, str]:

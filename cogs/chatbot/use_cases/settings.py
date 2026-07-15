@@ -81,12 +81,10 @@ class SettingsUseCases:
             await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
             return
         is_thread = isinstance(interaction.channel, discord.Thread)
-        parent_id = interaction.channel.parent_id if is_thread else None
         configured = await self._role_manager.get_configured_role(channel_id)
-        role = await self._role_manager.get_role(channel_id, parent_id)
-        source = "このスレッド固有の設定" if configured is not None else "親チャンネルからの継承"
-        if not is_thread:
-            source = "このチャンネルの設定" if configured is not None else "既定値"
+        role = await self._role_manager.get_role(channel_id)
+        target_name = "スレッド" if is_thread else "チャンネル"
+        source = f"この{target_name}の設定" if configured is not None else "既定値"
         await interaction.response.send_message(
             f"このチャンネルのChatbotの役割は `{role.value}` です。設定元: {source}。",
             ephemeral=True,
@@ -165,12 +163,11 @@ class SettingsUseCases:
             )
             return
         await self._role_manager.clear_role(channel_id)
-        role = await self._role_manager.get_role(channel_id, interaction.channel.parent_id if is_thread else None)
+        role = await self._role_manager.get_role(channel_id)
         target_name = "スレッド" if is_thread else "チャンネル"
-        source = "親チャンネルから継承" if is_thread else "既定値を使用"
         await interaction.response.send_message(
             f"{interaction.user.mention} がこの{target_name}固有の設定を解除しました。"
-            f"現在は `{role.value}` です。設定元: {source}。"
+            f"現在は `{role.value}` です。設定元: 既定値。"
         )
 
     async def set_shadow_mode(self, interaction: discord.Interaction, *, enabled: bool) -> None:
