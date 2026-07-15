@@ -1,4 +1,3 @@
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -13,8 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
+from core.runtime_environment import BotEnvironment
 
 TALKDATA_SCHEMA = "talkdata"
+TALKDATA_TEST_SCHEMA = "talkdata_test"
+
+
+def get_talkdata_schema(environment: BotEnvironment) -> str:
+    """実行環境に対応するTalkData専用スキーマ名を返す。"""
+    return TALKDATA_TEST_SCHEMA if environment is BotEnvironment.DEBUG else TALKDATA_SCHEMA
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,9 +75,13 @@ class DiscordMessage(Base):
 
 
 class TalkDataDatabase:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        environment: BotEnvironment,
+    ) -> None:
         self._session_factory = session_factory
-        self._database_schema = "talkdata_test" if os.getenv("DEBUG") == "True" else "talkdata"
+        self._database_schema = get_talkdata_schema(environment)
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
