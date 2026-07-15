@@ -18,6 +18,7 @@ from cogs.talkdata.database import (
     TalkDataNotFoundError,
 )
 from core.exception import MissingRequiredRoleError
+from core.runtime_environment import get_runtime_environment
 
 logger = getLogger(__name__)
 JST = timezone(timedelta(hours=9))
@@ -127,8 +128,8 @@ async def insert_channel_history(session: AsyncSession, channel: MessageChannel)
 class TalkData(commands.Cog):
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
-        self.db = TalkDataDatabase(session_factory)
-        self.admin_role_id = int(os.environ["BOT_ADMIN"])
+        self.db = TalkDataDatabase(session_factory, get_runtime_environment().environment)
+        self.admin_role_id = int(os.environ["ROLE_ID_BOT_ADMIN"])
         self.failed_connection_checks = 0
         self.message_history_menu = app_commands.ContextMenu(
             name="get_message_history",
