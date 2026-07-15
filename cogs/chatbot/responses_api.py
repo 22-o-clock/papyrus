@@ -15,12 +15,37 @@ from pydantic import BaseModel, Field, model_validator
 
 from .channel_roles import ChannelRole
 from .models.custom_profile import CustomProfile
+from .models.response_judgment import (
+    CooldownStage,
+    ResponseJudgment,
+    ResponseMode,
+)
 from .observability import observe_chatbot_api_call
-from .prompt import draft_generator_prompt, memory_extraction_prompt, memory_reconciliation_prompt
+from .prompt import (
+    draft_generator_prompt,
+    memory_extraction_prompt,
+    memory_reconciliation_prompt,
+    response_judgment_prompt,
+)
 
 logger = getLogger(__name__)
 
 DRAFT_GENERATOR_MODEL = "gpt-5.6-terra"
+RESPONSE_JUDGMENT_MODEL = "gpt-5.4-nano"
+RESPONSE_JUDGMENT_TIMEOUT_SECONDS = 60.0
+COOLDOWN_STAGE_INSTRUCTIONS = {
+    CooldownStage.RECENT: (
+        "Botが2分以内に反応済みです。明確に回答を求められており、"
+        "テキストで答える必要がある場合だけtextを選び、それ以外はnoneにしてください。"
+    ),
+    CooldownStage.RECOVERING: (
+        "Botの反応から2分以上15分未満です。明確な回答要求、明らかに有益な回答・訂正、"
+        "または自然な短い感情反応だけを許可してください。感情反応はreactionを選んでください。"
+    ),
+    CooldownStage.READY: (
+        "Botの反応から15分以上経過しているか、まだ反応していません。通常の基準でnone、reaction、textを選んでください。"
+    ),
+}
 CUSTOM_PROFILE_DEFAULT_MODEL = "gpt-5.6"
 MEMORY_EXTRACTION_MODEL = "gpt-5.6-terra"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
@@ -480,6 +505,70 @@ class LLMMessage(BaseModel):
         )
 
 
+class GeneratedTextResponse(BaseModel):
+    """高品質モデルが生成するテキスト応答。"""
+
+    action: Literal["reply", "message"]
+    content: str
+    reply_to_message_id: int | None = None
+
+    @model_validator(mode="after")
+    def validate_action_fields(self) -> Self:
+        """返信時だけ有効な対象メッセージIDを要求します。"""
+        if not self.content.strip():
+            msg = "text response requires content"
+            raise ValueError(msg)
+        if self.action == "reply" and self.reply_to_message_id is None:
+            msg = "reply response requires reply_to_message_id"
+            raise ValueError(msg)
+        return self
+
+
+class GeneratedReactionResponse(BaseModel):
+    """高品質モデルが生成するリアクション。"""
+
+    reply_to_message_id: int
+    reaction_emoji: str
+
+
+class GeneratedRequiredReply(BaseModel):
+    """明示呼びかけに対して必ず返すテキスト。"""
+
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseGenerationOptions:
+    """高品質モデルへ渡す応答生成条件。"""
+
+    response_mode: ResponseMode
+    required_reply_to_message_id: int | None = None
+    is_unanswered_question: bool = False
+    long_term_memory_context: str = ""
+    custom_profile: CustomProfile | None = None
+    resolved_member_aliases: dict[str, int] | None = None
+
+
+def _serialize_response_context(
+    short_term_memory: ShortTermMemory,
+    *,
+    resolved_member_aliases: dict[str, int],
+    content_overrides: dict[int, str] | None = None,
+) -> str:
+    """会話と、会話中で解決済みの別名だけをモデル入力へまとめます。"""
+    return json.dumps(
+        {
+            "messages": json.loads(short_term_memory.to_json(content_overrides=content_overrides)),
+            "resolved_member_aliases": [
+                {"alias": alias, "target_user_id": target_user_id}
+                for alias, target_user_id in sorted(resolved_member_aliases.items())
+            ],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 class LongTermMemoryCandidate(BaseModel):
     """会話から抽出した根拠付き長期記憶候補。"""
 
@@ -599,6 +688,60 @@ class LongTermMemoryExtractor:
         return api_response.output_parsed
 
 
+class ResponseJudge:
+    """短期会話から自発反応の要否と大分類だけを安価に判定します。"""
+
+    def __init__(self, client: AsyncOpenAI) -> None:
+        self.client = client
+
+    async def judge(
+        self,
+        short_term_memory: ShortTermMemory,
+        channel_role: ChannelRole,
+        *,
+        cooldown_stage: CooldownStage,
+        is_unanswered_question: bool,
+        resolved_member_aliases: dict[str, int],
+    ) -> ResponseJudgment:
+        """外部ツールや長期記憶を使わずに自発反応の必要性を返します。"""
+        input_payload = json.dumps(
+            {
+                "channel_role": channel_role.value,
+                "cooldown_stage": cooldown_stage.value,
+                "is_unanswered_question": is_unanswered_question,
+                **json.loads(
+                    _serialize_response_context(
+                        short_term_memory,
+                        resolved_member_aliases=resolved_member_aliases,
+                    )
+                ),
+            },
+            ensure_ascii=False,
+        )
+        try:
+            api_response = await observe_chatbot_api_call(
+                "response_judgment",
+                RESPONSE_JUDGMENT_MODEL,
+                self.client.responses.parse(
+                    model=RESPONSE_JUDGMENT_MODEL,
+                    reasoning={"effort": "none"},
+                    instructions=response_judgment_prompt.RESPONSE_JUDGMENT_INSTRUCTIONS.format(
+                        cooldown_instruction=COOLDOWN_STAGE_INSTRUCTIONS[cooldown_stage]
+                    ),
+                    input=input_payload,
+                    text_format=ResponseJudgment,
+                    timeout=RESPONSE_JUDGMENT_TIMEOUT_SECONDS,
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to judge spontaneous chatbot response")
+            return ResponseJudgment(response_mode=ResponseMode.NONE)
+        if api_response.output_parsed is None:
+            logger.warning("Failed to parse spontaneous chatbot response judgment")
+            return ResponseJudgment(response_mode=ResponseMode.NONE)
+        return api_response.output_parsed
+
+
 class DraftGenerator:
     """回答のドラフト生成を担当するクラス。OpenAI APIを使用して回答のドラフトを生成します。"""
 
@@ -617,19 +760,14 @@ class DraftGenerator:
         self,
         short_term_memory: ShortTermMemory,
         channel_role: ChannelRole,
-        *,
-        is_unanswered_question: bool,
-        long_term_memory_context: str = "",
-        custom_profile: CustomProfile | None = None,
+        options: ResponseGenerationOptions,
     ) -> LLMMessage:
         """メッセージのドラフト回答を生成します。
 
         Args:
             short_term_memory: メッセージ履歴
             channel_role: 対象チャンネルでのChatbotの役割
-            is_unanswered_question: 人間からの回答を待った宛先のない質問への回答か
-            long_term_memory_context: 検索済みの長期記憶コンテキスト
-            custom_profile: 明示的なoption指定がある場合だけ適用するプロファイル
+            options: 応答種別、返信先、追加コンテキストなどの生成条件
 
         Returns:
             生成されたドラフト回答を含むLLMMessageオブジェクト
@@ -637,10 +775,15 @@ class DraftGenerator:
         """
         # 履歴内の画像とPDFは、入力サイズを制御する方針が決まるまで直接の返信元だけを対象とする。
 
+        custom_profile = options.custom_profile
         content_overrides = (
             {custom_profile.request_message_id: custom_profile.request_content} if custom_profile is not None else None
         )
-        serialized_memory = short_term_memory.to_json(content_overrides=content_overrides)
+        serialized_memory = _serialize_response_context(
+            short_term_memory,
+            resolved_member_aliases=options.resolved_member_aliases or {},
+            content_overrides=content_overrides,
+        )
         llm_input: list[dict[str, Any]] = [
             {
                 "role": "user",
@@ -649,7 +792,7 @@ class DraftGenerator:
                         "type": "input_text",
                         "text": (
                             serialized_memory
-                            + (f"\n\n長期記憶:\n{long_term_memory_context}" if long_term_memory_context else "")
+                            + (f"\n\n長期記憶:\n{options.long_term_memory_context}" if options.long_term_memory_context else "")
                         ),
                     }
                 ],
@@ -670,15 +813,18 @@ class DraftGenerator:
         if request_message.pdf_url:
             llm_input[0]["content"].append({"type": "input_file", "file_url": request_message.pdf_url})
 
+        prompt_template, delivery_instruction, response_format = self._get_response_configuration(options)
+
         instructions = (
-            draft_generator_prompt.DRAFT_INSTRUCTIONS.format(
+            prompt_template.format(
                 bot_name=self.bot_name,
                 channel_role=channel_role.value,
+                delivery_instruction=delivery_instruction,
                 unanswered_question_instruction=(
                     "- この回答は、人間からの回答を待った宛先のない質問へのものです。"
                     "短く明確に答えられる場合だけ応答してください。"
-                    "詳しい調査や長い説明が必要ならsilenceを選んでください。"
-                    if is_unanswered_question
+                    "詳しい調査や長い説明が必要でも、まず短い要点を返してください。"
+                    if options.is_unanswered_question
                     else ""
                 ),
             )
@@ -713,20 +859,62 @@ class DraftGenerator:
                         "container": {"type": "auto"},
                     },
                 ],
-                text_format=LLMMessage,
+                text_format=response_format,
             ),
             custom_profile=(custom_profile.name if custom_profile is not None else None),
         )
 
-        if api_response.output_parsed is None:
-            logger.warning("Failed to parse LLM response into LLMMessage")
-            return LLMMessage(action=ResponseAction.SILENCE, shadow_reason=ShadowReason.NO_HELPFUL_CONTRIBUTION)
+        return self._to_llm_message(api_response.output_parsed, options.required_reply_to_message_id)
 
-        return api_response.output_parsed
+    @staticmethod
+    def _get_response_configuration(
+        options: ResponseGenerationOptions,
+    ) -> tuple[str, str, type[BaseModel]]:
+        """応答条件に対応するプロンプト、配信指示、構造化出力型を返します。"""
+        if options.required_reply_to_message_id is not None:
+            return (
+                draft_generator_prompt.TEXT_RESPONSE_INSTRUCTIONS,
+                f"- DiscordメッセージID {options.required_reply_to_message_id} への返信本文だけを生成してください。",
+                GeneratedRequiredReply,
+            )
+        if options.response_mode is ResponseMode.REACTION:
+            return draft_generator_prompt.REACTION_RESPONSE_INSTRUCTIONS, "", GeneratedReactionResponse
+        if options.response_mode is ResponseMode.TEXT:
+            return (
+                draft_generator_prompt.TEXT_RESPONSE_INSTRUCTIONS,
+                "- 特定の発言へ返答する場合はreply、会話全体へ返答する場合はmessageを選んでください。",
+                GeneratedTextResponse,
+            )
+        msg = "draft generation requires a positive response mode"
+        raise ValueError(msg)
+
+    @staticmethod
+    def _to_llm_message(parsed: BaseModel | None, required_reply_to_message_id: int | None) -> LLMMessage:
+        """生成専用の構造化出力をDiscord実行用の共通形式へ変換します。"""
+        if isinstance(parsed, GeneratedRequiredReply):
+            return LLMMessage(
+                action=ResponseAction.REPLY,
+                content=parsed.content,
+                reply_to_message_id=required_reply_to_message_id,
+            )
+        if isinstance(parsed, GeneratedReactionResponse):
+            return LLMMessage(
+                action=ResponseAction.REACTION,
+                reply_to_message_id=parsed.reply_to_message_id,
+                reaction_emoji=parsed.reaction_emoji,
+            )
+        if isinstance(parsed, GeneratedTextResponse):
+            return LLMMessage(
+                action=ResponseAction(parsed.action),
+                content=parsed.content,
+                reply_to_message_id=parsed.reply_to_message_id,
+            )
+        msg = "failed to parse high-quality chatbot response"
+        raise RuntimeError(msg)
 
 
 class ResponsePipeline:
-    """短期記憶から一段階で最終回答を生成するクラス。"""
+    """安価な要否判定と高品質な最終生成を扱う応答パイプライン。"""
 
     def __init__(self, client: AsyncOpenAI, bot_name: str) -> None:
         """クラスを初期化します。
@@ -737,6 +925,7 @@ class ResponsePipeline:
 
         """
         self.draft_generator = DraftGenerator(client, bot_name)
+        self.response_judge = ResponseJudge(client)
         self.short_term_memory = ShortTermMemory()
         self.bot_name = bot_name
 
@@ -753,18 +942,13 @@ class ResponsePipeline:
     async def generate_response(
         self,
         channel_role: ChannelRole,
-        *,
-        is_unanswered_question: bool,
-        long_term_memory_context: str = "",
-        custom_profile: CustomProfile | None = None,
+        options: ResponseGenerationOptions,
     ) -> LLMMessage:
         """短期記憶から最終回答を生成します。
 
         Args:
             channel_role: 対象チャンネルでのChatbotの役割
-            is_unanswered_question: 人間からの回答を待った宛先のない質問への回答か
-            long_term_memory_context: 検索済みの長期記憶コンテキスト
-            custom_profile: 明示的なoption指定がある場合だけ適用するプロファイル
+            options: 応答種別、返信先、追加コンテキストなどの生成条件
 
         Returns:
             最終回答を含むLLMMessageオブジェクト
@@ -773,7 +957,22 @@ class ResponsePipeline:
         return await self.draft_generator.draft(
             self.short_term_memory,
             channel_role,
+            options,
+        )
+
+    async def judge_response(
+        self,
+        channel_role: ChannelRole,
+        *,
+        cooldown_stage: CooldownStage,
+        is_unanswered_question: bool,
+        resolved_member_aliases: dict[str, int],
+    ) -> ResponseJudgment:
+        """短期文脈に対する自発反応の要否を判定します。"""
+        return await self.response_judge.judge(
+            self.short_term_memory,
+            channel_role,
+            cooldown_stage=cooldown_stage,
             is_unanswered_question=is_unanswered_question,
-            long_term_memory_context=long_term_memory_context,
-            custom_profile=custom_profile,
+            resolved_member_aliases=resolved_member_aliases,
         )

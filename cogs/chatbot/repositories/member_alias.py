@@ -125,6 +125,12 @@ def find_user_ids_by_member_alias(text_value: str, active_aliases: dict[str, int
     return {target_user_id for alias, target_user_id in active_aliases.items() if alias in normalized_text}
 
 
+def find_member_aliases(text_value: str, active_aliases: dict[str, int]) -> dict[str, int]:
+    """会話に実際に含まれる有効な別名と対象メンバーIDを返します。"""
+    normalized_text = normalize_member_alias(text_value)
+    return {alias: target_user_id for alias, target_user_id in active_aliases.items() if alias in normalized_text}
+
+
 class ChatbotMemberAliasRepository:
     """メンバー別名の確定状態と根拠を管理します。"""
 

@@ -50,6 +50,7 @@ MODEL_PRICES: dict[str, tuple[ModelPrice, ...]] = {
         ),
     ),
     "gpt-5.4-mini": (ModelPrice(datetime.date(2026, 7, 13), Decimal("0.75"), Decimal("0.075"), Decimal("4.50")),),
+    "gpt-5.4-nano": (ModelPrice(datetime.date(2026, 7, 16), Decimal("0.20"), Decimal("0.02"), Decimal("1.25")),),
     "text-embedding-3-large": (ModelPrice(datetime.date(2026, 7, 13), Decimal("0.13"), Decimal("0.13"), Decimal()),),
 }
 WEB_SEARCH_PER_CALL = Decimal("0.01")

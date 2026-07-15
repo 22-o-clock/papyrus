@@ -16,15 +16,14 @@ from cogs.chatbot.constants import (
     CHAT_REACTION_COOLDOWN_SECONDS,
     CHAT_TEXT_COOLDOWN_SECONDS,
 )
-from cogs.chatbot.models import ChannelProcessingState
+from cogs.chatbot.models import ChannelProcessingState, CooldownStage
 from cogs.chatbot.responses_api import LLMMessage, MessageInMemory, ResponseAction
 from cogs.chatbot.services.history_sync import get_history_sync_after
 from cogs.chatbot.services.response_policy import (
     can_change_channel_role,
-    can_execute_spontaneous_action,
-    can_start_spontaneous_generation,
     claim_response_slot,
     get_available_referenced_author_id,
+    get_cooldown_stage,
     get_response_debounce_seconds,
     get_unanswered_question_wait_minutes,
     is_generation_current,
@@ -40,7 +39,9 @@ from cogs.chatbot.use_cases.admin_validation import (
 from cogs.chatbot.use_cases.conversation import (
     ConversationUseCases,
     get_mentioned_bot_role_ids,
+    should_defer_unanswered_question,
     should_enqueue_long_term_memory,
+    should_skip_history_sync,
 )
 from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
@@ -89,6 +90,15 @@ class HistorySyncRangeTest(unittest.TestCase):
 
         if get_history_sync_after(now - timedelta(days=60), now) != now - timedelta(days=30):
             self.fail("保存済みチャンネルの履歴取得が30日を超えています")
+
+
+class HistorySyncModeTest(unittest.TestCase):
+    def test_skips_history_sync_only_for_explicit_true(self) -> None:
+        if not should_skip_history_sync("true"):
+            self.fail("手動テスト用の履歴同期省略フラグを認識できません")
+        for value in (None, "", "false", "1"):
+            if should_skip_history_sync(value):
+                self.fail("明示的なtrue以外で履歴同期が省略されます")
 
 
 class MemoryAdminInputTest(unittest.TestCase):
@@ -295,6 +305,38 @@ class ChannelProcessingStateTest(unittest.TestCase):
         if second_state.pending_messages:
             self.fail("別チャンネル間で保留メッセージを共有しています")
 
+    def test_regular_message_does_not_replace_active_explicit_call(self) -> None:
+        state = ChannelProcessingState()
+        explicit_message = make_discord_message(author_id=100)
+        regular_message = make_discord_message(author_id=200)
+        claim_response_slot(
+            state,
+            explicit_message,
+            is_explicit_call=True,
+            is_unanswered_question=False,
+        )
+
+        claim_response_slot(
+            state,
+            regular_message,
+            is_explicit_call=False,
+            is_unanswered_question=False,
+        )
+
+        if state.queued_response_message is not explicit_message or not state.queued_response_is_explicit_call:
+            self.fail("生成中の通常投稿によって明示呼びかけの応答必須状態が失われています")
+
+    def test_latest_explicit_call_replaces_previous_required_call(self) -> None:
+        state = ChannelProcessingState()
+        first_message = make_discord_message(author_id=100)
+        latest_message = make_discord_message(author_id=200)
+        claim_response_slot(state, first_message, is_explicit_call=True, is_unanswered_question=False)
+
+        claim_response_slot(state, latest_message, is_explicit_call=True, is_unanswered_question=False)
+
+        if state.queued_response_message is not latest_message or not state.queued_response_is_explicit_call:
+            self.fail("複数の明示呼びかけが最新の投稿へ集約されていません")
+
 
 class ResponseDebounceTest(unittest.TestCase):
     def test_assistant_uses_short_fixed_delay(self) -> None:
@@ -310,60 +352,47 @@ class ResponseDebounceTest(unittest.TestCase):
             self.fail("chatの待機時間が設定範囲を外れています")
 
 
-class SpontaneousActionCooldownTest(unittest.TestCase):
-    def test_text_action_waits_for_text_cooldown(self) -> None:
-        now = 1_000.0
+class CooldownStageTest(unittest.TestCase):
+    def test_uses_recent_stage_during_first_two_minutes(self) -> None:
+        stage = get_cooldown_stage(last_action_at=999.0, now=1_000.0)
 
-        allowed = can_execute_spontaneous_action(
-            ResponseAction.REPLY,
-            last_action_at=now - CHAT_TEXT_COOLDOWN_SECONDS + 1,
-            now=now,
+        if stage is not CooldownStage.RECENT:
+            self.fail("Bot反応直後が最も厳しい判定段階になっていません")
+
+    def test_uses_recovering_stage_between_two_and_fifteen_minutes(self) -> None:
+        stage = get_cooldown_stage(last_action_at=1_000.0 - CHAT_REACTION_COOLDOWN_SECONDS, now=1_000.0)
+
+        if stage is not CooldownStage.RECOVERING:
+            self.fail("2分経過後が回復中の判定段階になっていません")
+
+    def test_uses_ready_stage_after_fifteen_minutes(self) -> None:
+        stage = get_cooldown_stage(last_action_at=1_000.0 - CHAT_TEXT_COOLDOWN_SECONDS, now=1_000.0)
+
+        if stage is not CooldownStage.READY:
+            self.fail("15分経過後に通常の判定段階へ戻りません")
+
+    def test_uses_ready_stage_before_first_bot_action(self) -> None:
+        if get_cooldown_stage(last_action_at=None, now=1_000.0) is not CooldownStage.READY:
+            self.fail("Botが未反応のチャンネルでクールダウンが適用されています")
+
+
+class UnansweredQuestionDeferralTest(unittest.TestCase):
+    def test_defers_only_current_initial_unaddressed_question(self) -> None:
+        if not should_defer_unanswered_question(
+            delayed_attempt=False,
+            generation_current=True,
+            unaddressed=True,
+        ):
+            self.fail("初回のnone判定後に宛先のない質問を回答待ちへ移せません")
+
+        excluded_cases = (
+            {"delayed_attempt": True, "generation_current": True, "unaddressed": True},
+            {"delayed_attempt": False, "generation_current": False, "unaddressed": True},
+            {"delayed_attempt": False, "generation_current": True, "unaddressed": False},
         )
-
-        if allowed:
-            self.fail("自発テキスト投稿がクールダウン中にも実行されます")
-
-    def test_reaction_uses_shorter_cooldown(self) -> None:
-        now = 1_000.0
-
-        allowed = can_execute_spontaneous_action(
-            ResponseAction.REACTION,
-            last_action_at=now - CHAT_REACTION_COOLDOWN_SECONDS,
-            now=now,
-        )
-
-        if not allowed:
-            self.fail("リアクションが短いクールダウン後にも実行されません")
-
-    def test_silence_is_not_limited_by_cooldown(self) -> None:
-        allowed = can_execute_spontaneous_action(
-            ResponseAction.SILENCE,
-            last_action_at=999.0,
-            now=1_000.0,
-        )
-
-        if not allowed:
-            self.fail("沈黙がクールダウンによって妨げられています")
-
-
-class SpontaneousGenerationTest(unittest.TestCase):
-    def test_skips_generation_while_reaction_is_on_cooldown(self) -> None:
-        can_start = can_start_spontaneous_generation(
-            last_action_at=999.0,
-            now=1_000.0,
-        )
-
-        if can_start:
-            self.fail("リアクションも抑制される期間に自発生成を開始します")
-
-    def test_starts_generation_after_reaction_cooldown(self) -> None:
-        can_start = can_start_spontaneous_generation(
-            last_action_at=1_000.0 - CHAT_REACTION_COOLDOWN_SECONDS,
-            now=1_000.0,
-        )
-
-        if not can_start:
-            self.fail("リアクションが可能な時点で自発生成を開始しません")
+        for case in excluded_cases:
+            if should_defer_unanswered_question(**case):
+                self.fail("遅延済み、更新済み、または宛先ありの質問が再待機されます")
 
 
 class ConversationResetTest(unittest.TestCase):
@@ -476,10 +505,11 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
             message,
             LLMMessage(action=ResponseAction.MESSAGE, content="https://example.com"),
             state,
-            is_explicit_call=True,
         )
 
         channel.send.assert_awaited_once_with("https://example.com", suppress_embeds=True)
+        if state.last_action_at is None:
+            self.fail("通常投稿の成功後にクールダウンが更新されていません")
 
     async def test_suppresses_embeds_for_reply(self) -> None:
         cog = object.__new__(ConversationUseCases)
@@ -501,7 +531,8 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
                 reply_to_message_id=reply_to_message_id,
             ),
             state,
-            is_explicit_call=True,
         )
 
         target_message.reply.assert_awaited_once_with("https://example.com", suppress_embeds=True)
+        if state.last_action_at is None:
+            self.fail("明示replyの成功後にクールダウンが更新されていません")

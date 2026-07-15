@@ -9,9 +9,18 @@ import discord
 from discord import Message
 
 from cogs.chatbot.channel_roles import ChannelRole
-from cogs.chatbot.models import CustomProfile
+from cogs.chatbot.models import (
+    CooldownStage,
+    CustomProfile,
+    ResponseJudgment,
+    ResponseMode,
+)
 from cogs.chatbot.responses_api import (
+    RESPONSE_JUDGMENT_TIMEOUT_SECONDS,
     AttachmentInMemory,
+    GeneratedReactionResponse,
+    GeneratedRequiredReply,
+    GeneratedTextResponse,
     LLMMessage,
     LongTermMemoryExtractor,
     LongTermMemoryReconciler,
@@ -19,6 +28,7 @@ from cogs.chatbot.responses_api import (
     ReactionInMemory,
     ReactionUserInMemory,
     ResponseAction,
+    ResponseGenerationOptions,
     ResponsePipeline,
     ShortTermMemory,
 )
@@ -262,7 +272,7 @@ class LLMMessageTest(unittest.TestCase):
 
 
 class FakeResponses:
-    """一段階生成のAPI呼び出し回数を記録します。"""
+    """判定・生成APIの呼び出し回数と設定を記録します。"""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -270,11 +280,30 @@ class FakeResponses:
     async def parse(self, **kwargs: object) -> SimpleNamespace:
         """最終回答を返し、呼び出し引数を保存します。"""
         self.calls.append(kwargs)
-        return SimpleNamespace(output_parsed=LLMMessage(action=ResponseAction.MESSAGE, content="短い返答"))
+        response_format = kwargs["text_format"]
+        if response_format is ResponseJudgment:
+            output = ResponseJudgment(response_mode=ResponseMode.TEXT)
+        elif response_format is GeneratedRequiredReply:
+            output = GeneratedRequiredReply(content="短い返答")
+        elif response_format is GeneratedReactionResponse:
+            output = GeneratedReactionResponse(reply_to_message_id=1, reaction_emoji="👍")
+        else:
+            output = GeneratedTextResponse(action="message", content="短い返答")
+        return SimpleNamespace(output_parsed=output)
+
+
+class FailingResponses:
+    """API障害を再現します。"""
+
+    async def parse(self, **kwargs: object) -> SimpleNamespace:
+        """判定APIの失敗を送出します。"""
+        del kwargs
+        msg = "API failure"
+        raise RuntimeError(msg)
 
 
 class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
-    async def test_generates_final_response_with_one_model_call(self) -> None:
+    async def test_judges_response_with_nano_without_tools(self) -> None:
         responses = FakeResponses()
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
         pipeline = ResponsePipeline(client, "Bot")
@@ -282,16 +311,116 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
             make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="起きた"))
         )
 
-        generated = await pipeline.generate_response(ChannelRole.CHAT, is_unanswered_question=False)
+        judgment = await pipeline.judge_response(
+            ChannelRole.CHAT,
+            cooldown_stage=CooldownStage.RECOVERING,
+            is_unanswered_question=False,
+            resolved_member_aliases={"てすたろう": 10},
+        )
+
+        if judgment.response_mode is not ResponseMode.TEXT:
+            self.fail("nanoの応答要否判定を取得できません")
+        call = responses.calls[0]
+        if call["model"] != "gpt-5.4-nano" or call["reasoning"] != {"effort": "none"}:
+            self.fail("応答要否判定がnanoの最小推論で実行されていません")
+        if "tools" in call:
+            self.fail("応答要否判定へ外部ツールが渡されています")
+        if call["timeout"] != RESPONSE_JUDGMENT_TIMEOUT_SECONDS:
+            self.fail("応答要否判定のタイムアウトが60秒ではありません")
+        if "てすたろう" not in str(call["input"]) or "recovering" not in str(call["input"]):
+            self.fail("判定入力に解決済み別名またはクールダウン段階がありません")
+
+    async def test_judgment_failure_closes_without_expensive_fallback(self) -> None:
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=FailingResponses()))
+        pipeline = ResponsePipeline(client, "Bot")
+        await pipeline.add_message_to_memory(
+            make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="起きた"))
+        )
+
+        judgment = await pipeline.judge_response(
+            ChannelRole.CHAT,
+            cooldown_stage=CooldownStage.READY,
+            is_unanswered_question=False,
+            resolved_member_aliases={},
+        )
+
+        if judgment.response_mode is not ResponseMode.NONE:
+            self.fail("nano障害時に自発反応がfail-closedになっていません")
+
+    async def test_generates_final_text_response_with_terra(self) -> None:
+        responses = FakeResponses()
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        pipeline = ResponsePipeline(client, "Bot")
+        await pipeline.add_message_to_memory(
+            make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="起きた"))
+        )
+
+        generated = await pipeline.generate_response(
+            ChannelRole.CHAT,
+            ResponseGenerationOptions(
+                response_mode=ResponseMode.TEXT,
+                resolved_member_aliases={"てすたろう": 10},
+            ),
+        )
 
         if generated.content != "短い返答":
-            self.fail("一段階で生成した回答が最終結果になっていません")
+            self.fail("Terraで生成した回答が最終結果になっていません")
         if len(responses.calls) != 1:
             self.fail("最終回答の生成でモデルが複数回呼び出されています")
         if responses.calls[0]["model"] != "gpt-5.6-terra":
             self.fail("最終回答がTerraで生成されていません")
         if responses.calls[0]["reasoning"] != {"effort": "medium"}:
             self.fail("通常会話の推論強度が既存のmediumから変更されています")
+        if "てすたろう" not in str(responses.calls[0]["input"]):
+            self.fail("高品質モデルへ会話中の解決済み別名が渡されていません")
+        instructions = str(responses.calls[0]["instructions"])
+        if "テキストでの応答が必要だと判定済み" not in instructions:
+            self.fail("text生成で専用プロンプトが使用されていません")
+        if "リアクションでの反応が適切だと判定済み" in instructions or "silence" in instructions:
+            self.fail("text生成へ不要なreactionまたはsilenceの選択指示が混入しています")
+
+    async def test_explicit_call_is_fixed_to_trigger_reply(self) -> None:
+        responses = FakeResponses()
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        pipeline = ResponsePipeline(client, "Bot")
+        trigger_message_id = 123
+        await pipeline.add_message_to_memory(
+            make_message(MessageSpec(message_id=trigger_message_id, author_id=10, author_name="発言者", content="@Bot 教えて"))
+        )
+
+        generated = await pipeline.generate_response(
+            ChannelRole.ASSISTANT,
+            ResponseGenerationOptions(
+                response_mode=ResponseMode.TEXT,
+                required_reply_to_message_id=trigger_message_id,
+            ),
+        )
+
+        if generated.action is not ResponseAction.REPLY or generated.reply_to_message_id != trigger_message_id:
+            self.fail("明示呼びかけへの応答がトリガー投稿へのreplyに固定されていません")
+        if responses.calls[0]["text_format"] is not GeneratedRequiredReply:
+            self.fail("明示呼びかけでreply以外を生成できるスキーマが使われています")
+
+    async def test_reaction_judgment_limits_generation_to_reaction(self) -> None:
+        responses = FakeResponses()
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        pipeline = ResponsePipeline(client, "Bot")
+        await pipeline.add_message_to_memory(
+            make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="やった！"))
+        )
+
+        generated = await pipeline.generate_response(
+            ChannelRole.CHAT,
+            ResponseGenerationOptions(response_mode=ResponseMode.REACTION),
+        )
+
+        if generated.action is not ResponseAction.REACTION:
+            self.fail("reaction判定後にテキスト応答が生成されました")
+        instructions = str(responses.calls[0]["instructions"])
+        if "リアクションでの反応が適切だと判定済み" not in instructions:
+            self.fail("reaction生成で専用プロンプトが使用されていません")
+        if "日本語のテキストで回答" in instructions or "silence" in instructions:
+            self.fail("reaction生成へ不要なtextまたはsilenceの選択指示が混入しています")
 
     async def test_applies_system_default_profile_only_to_current_request(self) -> None:
         responses = FakeResponses()
@@ -317,8 +446,7 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
 
         await pipeline.generate_response(
             ChannelRole.CHAT,
-            is_unanswered_question=False,
-            custom_profile=profile,
+            ResponseGenerationOptions(response_mode=ResponseMode.TEXT, custom_profile=profile),
         )
 
         call = responses.calls[0]
@@ -341,13 +469,15 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
 
         await pipeline.generate_response(
             ChannelRole.CHAT,
-            is_unanswered_question=False,
-            custom_profile=CustomProfile(
-                name="jargon",
-                instructions="専門用語を使う。",
-                model="gpt-5.6-luna",
-                request_message_id=1,
-                request_content="依頼",
+            ResponseGenerationOptions(
+                response_mode=ResponseMode.TEXT,
+                custom_profile=CustomProfile(
+                    name="jargon",
+                    instructions="専門用語を使う。",
+                    model="gpt-5.6-luna",
+                    request_message_id=1,
+                    request_content="依頼",
+                ),
             ),
         )
 
@@ -383,13 +513,15 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
 
         await pipeline.generate_response(
             ChannelRole.CHAT,
-            is_unanswered_question=False,
-            custom_profile=CustomProfile(
-                name="poet",
-                instructions="詩的な表現を使用する。",
-                model="system_default",
-                request_message_id=1,
-                request_content="詩にしてください",
+            ResponseGenerationOptions(
+                response_mode=ResponseMode.TEXT,
+                custom_profile=CustomProfile(
+                    name="poet",
+                    instructions="詩的な表現を使用する。",
+                    model="system_default",
+                    request_message_id=1,
+                    request_content="詩にしてください",
+                ),
             ),
         )
 

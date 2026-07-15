@@ -135,6 +135,20 @@ class ApiUsageAggregationTest(TestCase):
 
         ensure_equal(usage.model_cost, Decimal("0.25"))
 
+    def test_nano_judgment_uses_configured_token_prices(self) -> None:
+        row = create_usage(
+            "response_judgment",
+            "gpt-5.4-nano",
+            input_tokens=2_000_000,
+            cached_input_tokens=1_000_000,
+            output_tokens=1_000_000,
+        )
+        row.usage_date = datetime.date(2026, 7, 16)
+
+        usage = aggregate_feature_usages([row])[0]
+
+        ensure_equal(usage.model_cost, Decimal("1.47"))
+
     def test_unknown_model_is_explicitly_marked(self) -> None:
         usage = aggregate_feature_usages([create_usage("draft_generation", "unknown-model", input_tokens=10_000)])[0]
 

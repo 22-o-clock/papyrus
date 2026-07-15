@@ -2,6 +2,7 @@ import unittest
 
 from cogs.chatbot.repositories.member_alias import (
     determine_member_alias_status,
+    find_member_aliases,
     find_user_ids_by_member_alias,
     normalize_member_alias,
 )
@@ -35,6 +36,14 @@ class MemberAliasTest(unittest.TestCase):
 
         if find_user_ids_by_member_alias("英語が得意な人は誰ですか", aliases):
             self.fail("会話にない別名からメンバーが追加されました")
+
+    def test_returns_only_aliases_mentioned_in_context(self) -> None:
+        aliases = {"てすたろう": 123456789, "さぶろう": 987654321}
+
+        matched = find_member_aliases("てすたろうさんに聞きました", aliases)
+
+        if matched != {"てすたろう": 123456789}:
+            self.fail("モデル入力へ会話にない別名まで渡されています")
 
 
 if __name__ == "__main__":
