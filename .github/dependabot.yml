@@ -1,0 +1,30 @@
+version: 2
+
+multi-ecosystem-groups:
+  monthly-dependencies:
+    schedule:
+      interval: "monthly"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    patterns:
+      - "*"
+    multi-ecosystem-group: "monthly-dependencies"
+    versioning-strategy: "increase"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    patterns:
+      - "*"
+    multi-ecosystem-group: "monthly-dependencies"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-patch"
