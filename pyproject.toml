@@ -25,6 +25,12 @@ dependencies = [
 [dependency-groups]
 dev = ["ruff>=0.14.13", "ty>=0.0.12"]
 
+[tool.uv]
+# discord.py 2.7.1のvoice extraがPyNaCl 1.6系を除外するため、修正版を上流の次期制約に合わせて許可する。
+override-dependencies = [
+    { package = { name = "discord-py", version = "2.7.1" }, dependencies = ["pynacl>=1.6.2,<1.7"] },
+]
+
 [tool.ruff]
 extend-exclude = ["cogs/chatbot/prompt"]
 line-length = 128
