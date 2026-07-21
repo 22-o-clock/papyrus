@@ -33,7 +33,11 @@ from cogs.chatbot.responses_api import (
 )
 from cogs.chatbot.services.history_sync import get_history_sync_after
 from cogs.chatbot.services.message_delivery import reply_with_split_response, send_split_response
-from cogs.chatbot.services.reaction_context import collect_message_reactions, preserve_known_reactors
+from cogs.chatbot.services.reaction_context import (
+    collect_message_reactions,
+    preserve_known_reactors,
+    resolve_reaction_emoji,
+)
 from cogs.chatbot.services.response_policy import (
     activate_response,
     claim_response_slot,
@@ -91,6 +95,15 @@ def get_mentioned_bot_role_ids(message: Message, bot_user: discord.ClientUser) -
 def should_enqueue_long_term_memory(message: Message) -> bool:
     """本人へ帰属できる人間の投稿だけを長期記憶抽出へ渡します。"""
     return not message.author.bot and not message.message_snapshots
+
+
+def _collect_available_custom_emojis(message: Message, response_mode: ResponseMode) -> tuple[str, ...]:
+    """リアクション生成時にLLMへ提示する、利用可能なサーバーのカスタム絵文字一覧を返します。"""
+    if response_mode is not ResponseMode.REACTION or message.guild is None:
+        return ()
+    return tuple(
+        f"<{'a' if emoji.animated else ''}:{emoji.name}:{emoji.id}>" for emoji in message.guild.emojis if emoji.available
+    )
 
 
 class ConversationUseCases:
@@ -873,6 +886,7 @@ class ConversationUseCases:
                     long_term_memory_context=long_term_memory_context,
                     custom_profile=custom_profile,
                     resolved_member_aliases=resolved_member_aliases,
+                    available_custom_emojis=_collect_available_custom_emojis(message, response_mode),
                 ),
             )
 
@@ -1022,7 +1036,8 @@ class ConversationUseCases:
             if reaction_emoji is None:
                 logger.warning("Generated reaction has no emoji (message_id=%s)", reply_to_message_id)
                 return
-            await target_message.add_reaction(reaction_emoji)
+            resolved_emoji = resolve_reaction_emoji(message.guild, reaction_emoji)
+            await target_message.add_reaction(resolved_emoji)
             state.last_action_at = now
             return
 
