@@ -445,7 +445,7 @@ class LLMMessage(BaseModel):
         content: メッセージの内容
         action: Discord上で実行する応答方法
         reply_to_message_id: 返信先のDiscordメッセージID。通常投稿の場合はNone
-        reaction_emoji: リアクションに使用するUnicode絵文字
+        reaction_emoji: リアクションに使用するUnicode絵文字、またはサーバーのカスタム絵文字表記(`<:name:id>`)
 
     """
 
@@ -547,6 +547,7 @@ class ResponseGenerationOptions:
     long_term_memory_context: str = ""
     custom_profile: CustomProfile | None = None
     resolved_member_aliases: dict[str, int] | None = None
+    available_custom_emojis: tuple[str, ...] = ()
 
 
 def _serialize_response_context(
@@ -830,6 +831,12 @@ class DraftGenerator:
             )
             + REACTION_CONTEXT_INSTRUCTIONS
         )
+        if options.response_mode is ResponseMode.REACTION and options.available_custom_emojis:
+            instructions += (
+                "\n\n# 利用可能なカスタム絵文字\n\n"
+                "reaction_emojiには、Unicode絵文字に加えて以下のサーバー絵文字を表記のまま設定できます。"
+                "一覧にない絵文字は使用できません。\n" + "\n".join(options.available_custom_emojis)
+            )
         model = DRAFT_GENERATOR_MODEL
         reasoning_effort = "medium"
         if custom_profile is not None:

@@ -11,6 +11,7 @@ from cogs.chatbot.services.reaction_context import (
     REACTION_REACTOR_LIMIT,
     collect_message_reactions,
     preserve_known_reactors,
+    resolve_reaction_emoji,
 )
 
 CUSTOM_EMOJI_ID = 123
@@ -73,6 +74,50 @@ class ReactionContextTest(unittest.IsolatedAsyncioTestCase):
 
         if len(reactions) != 1 or reactions[0].emoji_name != "👍" or reactions[0].count != 1:
             self.fail("Gateway由来のUnicodeリアクション総数を保持できていません")
+
+    def test_resolves_unicode_emoji_as_is(self) -> None:
+        guild = cast("discord.Guild", SimpleNamespace(emojis=[]))
+
+        resolved = resolve_reaction_emoji(guild, "👍")
+
+        if resolved != "👍":
+            self.fail("Unicode絵文字がそのまま解決されていません")
+
+    def test_resolves_custom_emoji_mention_to_guild_emoji(self) -> None:
+        snowflake_id = 123456789012345678
+        party_emoji = SimpleNamespace(id=snowflake_id, name="party", animated=True)
+        guild = cast("discord.Guild", SimpleNamespace(emojis=[party_emoji]))
+
+        resolved = resolve_reaction_emoji(guild, f"<a:party:{snowflake_id}>")
+
+        if resolved is not party_emoji:
+            self.fail("メンション表記からサーバーのカスタム絵文字が解決されていません")
+
+    def test_resolves_bare_custom_emoji_name_to_guild_emoji(self) -> None:
+        party_emoji = SimpleNamespace(id=123456789012345678, name="party", animated=True)
+        guild = cast("discord.Guild", SimpleNamespace(emojis=[party_emoji]))
+
+        resolved = resolve_reaction_emoji(guild, ":party:")
+
+        if resolved is not party_emoji:
+            self.fail("ベア名表記からサーバーのカスタム絵文字が解決されていません")
+
+    def test_falls_back_to_partial_emoji_when_mentioned_id_is_unknown(self) -> None:
+        guild = cast("discord.Guild", SimpleNamespace(emojis=[]))
+        unknown_id = 987654321098765432
+
+        resolved = resolve_reaction_emoji(guild, f"<:ghost:{unknown_id}>")
+
+        if not isinstance(resolved, discord.PartialEmoji) or resolved.id != unknown_id:
+            self.fail("未知のカスタム絵文字IDがPartialEmojiへ解決されていません")
+
+    def test_falls_back_to_raw_text_when_bare_name_is_unknown(self) -> None:
+        guild = cast("discord.Guild", SimpleNamespace(emojis=[]))
+
+        resolved = resolve_reaction_emoji(guild, "unknown_emoji")
+
+        if resolved != "unknown_emoji":
+            self.fail("未知のベア名がそのまま返されていません")
 
     def test_preserves_known_users_when_reactor_fetch_is_incomplete(self) -> None:
         previous_reactor = ReactionUserInMemory(user_id=10, display_name="既知の利用者", is_bot=False)
