@@ -6,7 +6,7 @@ from logging import getLogger
 import discord
 from discord import Message
 from discord.ext import commands
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cogs.chatbot.channel_roles import ChannelRole, ChannelRoleManager
@@ -65,6 +65,11 @@ from .settings import SettingsUseCases
 
 logger = getLogger(__name__)
 
+GENERIC_GENERATION_FAILURE_MESSAGE = "回答の生成に失敗しました。しばらくしてからもう一度お試しください。"
+INSUFFICIENT_QUOTA_MESSAGE = (
+    "OpenAI APIの利用クォータが不足しているため、回答を生成できません。管理者が請求設定または利用上限を確認してください。"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class _ResponseSelectionRequest:
@@ -79,6 +84,13 @@ class _ResponseSelectionRequest:
 def should_defer_unanswered_question(*, delayed_attempt: bool, generation_current: bool, unaddressed: bool) -> bool:
     """初回の有効な判定で反応不要だった宛先のない質問だけを待機対象にします。"""
     return not delayed_attempt and generation_current and unaddressed
+
+
+def get_generation_failure_message(error: Exception) -> str:
+    """利用者が対処可能なOpenAIエラーだけを具体的な案内へ変換します。"""
+    if isinstance(error, RateLimitError) and error.code == "insufficient_quota":
+        return INSUFFICIENT_QUOTA_MESSAGE
+    return GENERIC_GENERATION_FAILURE_MESSAGE
 
 
 def get_mentioned_bot_role_ids(message: Message, bot_user: discord.ClientUser) -> set[int]:
@@ -896,7 +908,7 @@ class ConversationUseCases:
                     generated_response = await generate_response()
             else:
                 generated_response = await generate_response()
-        except Exception:
+        except Exception as error:
             logger.exception(
                 "Failed to generate chatbot response (channel_id=%s, trigger_message_id=%s, explicit=%s)",
                 message.channel.id,
@@ -905,7 +917,7 @@ class ConversationUseCases:
             )
             if is_explicit_call and is_generation_current(state, generation_revision):
                 try:
-                    await message.reply("回答の生成に失敗しました。しばらくしてからもう一度お試しください。")
+                    await message.reply(get_generation_failure_message(error))
                 except discord.HTTPException:
                     logger.exception(
                         "Failed to notify explicit chatbot response failure (trigger_message_id=%s)",
