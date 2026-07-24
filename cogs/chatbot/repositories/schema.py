@@ -56,6 +56,13 @@ async def create_chatbot_tables(engine: AsyncEngine) -> None:
                 "ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ"
             )
         )
+        await connection.execute(
+            text(
+                "ALTER TABLE IF EXISTS chatbot.api_usage_daily "
+                "ADD COLUMN IF NOT EXISTS cache_write_input_tokens BIGINT NOT NULL DEFAULT 0, "
+                "ADD COLUMN IF NOT EXISTS long_context_cache_write_input_tokens BIGINT NOT NULL DEFAULT 0"
+            )
+        )
     await create_tables_for(engine, ChatbotBase.metadata, schema=CHATBOT_DATABASE_SCHEMA)
     async with engine.begin() as connection:
         await connection.execute(

@@ -67,6 +67,7 @@ async def observe_chatbot_api_call[T](
     input_tokens = _integer_attribute(usage, "input_tokens", "prompt_tokens")
     output_tokens = _integer_attribute(usage, "output_tokens", "completion_tokens")
     cached_input_tokens = _nested_integer_attribute(usage, "input_tokens_details", "cached_tokens")
+    cache_write_input_tokens = _nested_integer_attribute(usage, "input_tokens_details", "cache_write_tokens")
     web_search_calls, code_interpreter_sessions = _count_response_tools(response)
     is_long_context = model.startswith("gpt-5.6-") and input_tokens > LONG_CONTEXT_INPUT_TOKEN_THRESHOLD
     await _record_increment(
@@ -77,9 +78,11 @@ async def observe_chatbot_api_call[T](
             item_count=item_count,
             input_tokens=input_tokens,
             cached_input_tokens=cached_input_tokens,
+            cache_write_input_tokens=cache_write_input_tokens,
             output_tokens=output_tokens,
             long_context_input_tokens=input_tokens if is_long_context else 0,
             long_context_cached_input_tokens=cached_input_tokens if is_long_context else 0,
+            long_context_cache_write_input_tokens=cache_write_input_tokens if is_long_context else 0,
             long_context_output_tokens=output_tokens if is_long_context else 0,
             web_search_calls=web_search_calls,
             code_interpreter_sessions=code_interpreter_sessions,
