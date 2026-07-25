@@ -53,6 +53,9 @@ API利用量は同じOpenAI Projectの実費と一致させるため、本番と
 - デバッグ環境では `/api_usage schedule` を使用できません。`status` は利用できます。
 - 保存済みメッセージが別Botの投稿だった場合は、配送記録を上書きせず設定エラーとして停止します。
 
+OpenAI API callを追加・変更するときの計測、単価、Usage API照合、テスト手順は
+[`docs/openai-api-usage-maintenance.md`](docs/openai-api-usage-maintenance.md)を参照してください。
+
 ### TalkData
 
 TalkDataは本番とデバッグでスキーマを分離します。メッセージの自動保存とTalkDataの操作は、実行環境に
