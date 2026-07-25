@@ -6,22 +6,19 @@ Papyrusで利用できる操作と、メッセージやDiscordイベントを契
 
 ### Chatbot
 
-- `/show_chatbot_role`: 現在のチャンネルのChatbot役割を表示します。
-- `/set_chatbot_role`: 現在のチャンネルのChatbot役割を変更します。
-- `/reset_chatbot_role`: 現在のチャンネル固有のChatbot役割を解除します。
-- `/set_chatbot_reset_minutes`: 会話をリセットするまでの時間を変更します。
-- `/set_chatbot_question_wait`: 宛先のない質問へ応答するまでの待機範囲を変更します。
-- `/upsert_chatbot_profile`: カスタムプロファイルを保存します。
-- `/disable_chatbot_profile`: カスタムプロファイルを無効化します。
-- `/show_chatbot_profile`: カスタムプロファイルを表示します。
-- `/list_chatbot_profiles`: 有効なカスタムプロファイルを一覧表示します。
-- `/set_chatbot_shadow_mode`: 応答を投稿せず評価候補として保存するモードを切り替えます。
-- `/export_chatbot_shadow_candidates`: 未評価のシャドー候補をExcelで出力します。
-- `/import_chatbot_shadow_reviews`: 評価済みのシャドー候補Excelを取り込みます。
-- `/export_chatbot_member_aliases`: メンバー別名をExcelで出力します。
-- `/import_chatbot_member_aliases`: 編集済みのメンバー別名Excelを取り込みます。
-- `/export_chatbot_memories`: 長期記憶をExcelで出力します。
-- `/import_chatbot_memories`: 編集済みの長期記憶Excelを取り込みます。
+- `/chatbot role_show`: 現在のチャンネルのChatbot役割を表示します。
+- `/chatbot role_set`: 現在のチャンネルのChatbot役割を変更します。
+- `/chatbot role_reset`: 現在のチャンネル固有のChatbot役割を解除します。
+- `/chatbot conversation_reset`: 会話をリセットするまでの時間を変更します。
+- `/chatbot question_wait`: 宛先のない質問へ応答するまでの待機範囲を変更します。
+- `/chatbot profile_save`: カスタムプロファイルを保存します。
+- `/chatbot profile_disable`: カスタムプロファイルを無効化します。
+- `/chatbot profile_show`: カスタムプロファイルを表示します。
+- `/chatbot profile_list`: 有効なカスタムプロファイルを一覧表示します。
+- `/chatbot aliases_export`: メンバー別名をExcelで出力します。
+- `/chatbot aliases_import`: 編集済みのメンバー別名Excelを取り込みます。
+- `/chatbot memories_export`: 長期記憶をExcelで出力します。
+- `/chatbot memories_import`: 編集済みの長期記憶Excelを取り込みます。
 
 ### API利用レポート
 
@@ -31,50 +28,52 @@ Papyrusで利用できる操作と、メッセージやDiscordイベントを契
 
 ### モデレーションとリアクション
 
-- `/ban`: 指定ユーザーのURL・添付投稿を制限します。
-- `/unban`: 指定ユーザーのURL・添付投稿の制限を解除します。
-- `/global_ban_config`: 禁止表現を検出した際のリアクション／自動削除を切り替えます。
-- `/reaction ban`: 指定ユーザーのリアクションを制限します。
-- `/reaction unban`: 指定ユーザーのリアクション制限を解除します。
-- `/reaction remove`: 直近の自分の投稿からリアクションを削除します。
-- `/reaction remove_myself`: 直近のBot投稿からリアクションを削除します。
+- `/moderation post_ban`: 指定ユーザーのURL・添付投稿を制限します。
+- `/moderation post_unban`: 指定ユーザーのURL・添付投稿の制限を解除します。
+- `/moderation expression_config`: 禁止表現を検出した際のリアクション／自動削除を切り替えます。
+- `/moderation reaction_ban`: 指定ユーザーのリアクションを制限します。
+- `/moderation reaction_unban`: 指定ユーザーのリアクション制限を解除します。
+- `/moderation reaction_remove`: 直近の自分の投稿からリアクションを削除します。
+- `/moderation reaction_remove_bot`: 直近のBot投稿からリアクションを削除します。
+
+### メッセージのコピー
+
+- `/copy to_new_thread`: 現在の履歴を新しいスレッドへコピーします。
+- `/copy all`: 現在の全履歴を既存のチャンネルまたはスレッドへコピーします。
+- `/copy range`: メッセージURLで指定した範囲だけをコピーします。
+
+コピーでは、投稿者名、アイコン、添付、Embed、返信関係、編集済み表示を可能な範囲で維持します。
 
 ### メッセージと履歴の管理
 
-- `/duplicate_thread`: 現在のチャンネルまたはスレッドの履歴を、新しいスレッドへ複製します。
-- `/postscript_thread`: 現在の全履歴を、既存のチャンネルまたはスレッドへ追記します。
-- `/postscript_thread_two`: メッセージURLで指定した範囲だけを追記します。
-- `/upsert_member`: サーバーのメンバー一覧をTalkDataへ登録・更新します。
-- `/upsert_channel`: サーバーのチャンネル一覧をTalkDataへ登録・更新します。
-- `/insert_messages_in_this_channel`: 現在のチャンネルの既存メッセージをTalkDataへ一括登録します。
-- `/insert_all_messages`: 全テキストチャンネルとスレッドの既存メッセージをTalkDataへ一括登録します。
-- `/get_depreciated_message`: 指定メンバーの削除・編集済みメッセージを期間指定で表示します。
+- `/talkdata member_upsert`: サーバーのメンバー一覧をTalkDataへ登録・更新します。
+- `/talkdata channel_upsert`: サーバーのチャンネル一覧をTalkDataへ登録・更新します。
+- `/talkdata messages_insert_current`: 現在のチャンネルの既存メッセージをTalkDataへ一括登録します。
+- `/talkdata messages_insert_all`: 全テキストチャンネルとスレッドの既存メッセージをTalkDataへ一括登録します。
+- `/talkdata message_history`: 指定メンバーの削除・編集済みメッセージを期間指定で表示します。
 
-メッセージの複製では、投稿者名、アイコン、添付、Embed、返信関係、編集済み表示を可能な範囲で維持します。
-
-### リマインダーと集中支援
+### リマインダー
 
 - `/remind`: 絶対時刻または相対時間を指定してリマインダーを登録します。
-- `/show_reminder`: 自分の登録済みリマインダーを表示します。
-- `/remove_reminder`: 一覧番号またはUUIDでリマインダーを削除します。
-- `/stay_focused`: 指定時間、自分の新規投稿を自動削除して集中を支援します。
+- `/reminder list`: 自分の登録済みリマインダーを表示します。
+- `/reminder remove`: 一覧番号またはUUIDでリマインダーを削除します。
 
 リマインダーの時刻には、`MM/DD HH:MM`、`HH:MM`、`3h9m` などを使用できます。
 
 ### テキストの台詞
 
-- `/amiya`: 全体または指定したアークナイツのキャラクターから、ランダムな台詞を返します。
-- `/doctor`: 「ドクター」を含む台詞を選び、実行者へのメンションに置き換えます。
-- `/doctor_yasumuna`: 指定ユーザーまたは実行者へ定型の台詞を送ります。
-- `/whose`: 台詞からアークナイツのキャラクターとボイス種別を検索します。
+- `/arknights random`: 全体または指定したキャラクターから、ランダムな台詞を返します。
+- `/arknights doctor`: 「ドクター」を含む台詞を選び、実行者へのメンションに置き換えます。
+- `/arknights doctor_rest`: 指定ユーザーまたは実行者へ定型の台詞を送ります。
+- `/arknights search`: 台詞からキャラクターとボイス種別を検索します。
 
 ### ボイスチャンネルと音声読み上げ
 
-- `/connect_vc`: Botを実行者のボイスチャンネルへ接続します。
-- `/disconnect_vc`: Botをボイスチャンネルから切断します。
-- `/pause`: 再生中のVOICEVOX音声を一時停止します。
-- `/set_speaker`: 利用可能な話者・スタイルから自分の読み上げ音声を選びます。
-- `/show_current_speaker`: 現在のVOICEVOX話者設定を表示します。
+- `/voice connect`: Botを実行者のボイスチャンネルへ接続します。
+- `/voice disconnect`: Botをボイスチャンネルから切断します。
+- `/voice pause`: 再生中のVOICEVOX音声を一時停止します。
+- `/voice speaker_set`: 利用可能な話者・スタイルから自分の読み上げ音声を選びます。
+- `/voice speaker_show`: 現在のVOICEVOX話者設定を表示します。
 
 ### その他
 

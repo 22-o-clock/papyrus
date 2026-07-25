@@ -13,6 +13,8 @@ from .use_cases.excel_management import ExcelManagementUseCases
 class ChatBot(commands.Cog):
     """DiscordイベントとChatbotユースケースを接続するController。"""
 
+    chatbot = app_commands.Group(name="chatbot", description="Chatbotの設定とデータを管理します。")
+
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.runtime_environment = get_runtime_environment()
         self.conversation_use_cases = ConversationUseCases(bot, session_factory)
@@ -52,11 +54,11 @@ class ChatBot(commands.Cog):
     async def on_raw_reaction_clear_emoji(self, payload: discord.RawReactionClearEmojiEvent) -> None:
         await self.conversation_use_cases.on_raw_reaction_change(payload.message_id, payload.channel_id)
 
-    @app_commands.command(name="show_chatbot_role", description="このチャンネルでのChatbotの役割を表示します")
+    @chatbot.command(name="role_show", description="このチャンネルでのChatbotの役割を表示します")
     async def show_chatbot_role(self, interaction: discord.Interaction) -> None:
         await self.settings_use_cases.show_role(interaction)
 
-    @app_commands.command(name="set_chatbot_reset_minutes", description="Chatbotの会話リセット時間を変更します")
+    @chatbot.command(name="conversation_reset", description="Chatbotの会話リセット時間を変更します")
     @app_commands.describe(minutes="最後の人間投稿から会話をリセットするまでの分数 (1以上)")
     async def set_chatbot_conversation_reset_minutes(
         self,
@@ -65,7 +67,7 @@ class ChatBot(commands.Cog):
     ) -> None:
         await self.settings_use_cases.set_conversation_reset_minutes(interaction, minutes)
 
-    @app_commands.command(name="set_chatbot_question_wait", description="宛先のない質問への回答待機時間を変更します")
+    @chatbot.command(name="question_wait", description="宛先のない質問への回答待機時間を変更します")
     @app_commands.describe(
         minimum_minutes="最短待機時間 (分、1以上)",
         maximum_minutes="最長待機時間 (分、最短以上)",
@@ -78,16 +80,16 @@ class ChatBot(commands.Cog):
     ) -> None:
         await self.settings_use_cases.set_question_wait(interaction, minimum_minutes, maximum_minutes)
 
-    @app_commands.command(name="set_chatbot_role", description="このチャンネルでのChatbotの役割を変更します")
+    @chatbot.command(name="role_set", description="このチャンネルでのChatbotの役割を変更します")
     @app_commands.describe(role="assistant または chat を選択します")
     async def set_chatbot_role(self, interaction: discord.Interaction, role: ChannelRole) -> None:
         await self.settings_use_cases.set_role(interaction, role)
 
-    @app_commands.command(name="reset_chatbot_role", description="このチャンネル固有のChatbot役割を解除します")
+    @chatbot.command(name="role_reset", description="このチャンネル固有のChatbot役割を解除します")
     async def reset_chatbot_role(self, interaction: discord.Interaction) -> None:
         await self.settings_use_cases.reset_role(interaction)
 
-    @app_commands.command(name="upsert_chatbot_profile", description="Chatbotのカスタムプロファイルを保存します")
+    @chatbot.command(name="profile_save", description="Chatbotのカスタムプロファイルを保存します")
     @app_commands.describe(
         profile_name="optionで指定する名前",
         instructions="基本指示へ追加するプロファイル指示",
@@ -107,7 +109,7 @@ class ChatBot(commands.Cog):
             model,
         )
 
-    @app_commands.command(name="disable_chatbot_profile", description="Chatbotのカスタムプロファイルを無効化します")
+    @chatbot.command(name="profile_disable", description="Chatbotのカスタムプロファイルを無効化します")
     @app_commands.describe(profile_name="無効化するプロファイル名")
     async def disable_chatbot_profile(
         self,
@@ -116,7 +118,7 @@ class ChatBot(commands.Cog):
     ) -> None:
         await self.custom_profile_use_cases.disable(interaction, profile_name)
 
-    @app_commands.command(name="show_chatbot_profile", description="Chatbotのカスタムプロファイルを表示します")
+    @chatbot.command(name="profile_show", description="Chatbotのカスタムプロファイルを表示します")
     @app_commands.describe(profile_name="表示するプロファイル名")
     async def show_chatbot_profile(
         self,
@@ -125,15 +127,15 @@ class ChatBot(commands.Cog):
     ) -> None:
         await self.custom_profile_use_cases.show(interaction, profile_name)
 
-    @app_commands.command(name="list_chatbot_profiles", description="有効なChatbotカスタムプロファイルを一覧表示します")
+    @chatbot.command(name="profile_list", description="有効なChatbotカスタムプロファイルを一覧表示します")
     async def list_chatbot_profiles(self, interaction: discord.Interaction) -> None:
         await self.custom_profile_use_cases.list_enabled(interaction)
 
-    @app_commands.command(name="export_chatbot_member_aliases", description="Chatbotのメンバー別名をExcelで出力します")
+    @chatbot.command(name="aliases_export", description="Chatbotのメンバー別名をExcelで出力します")
     async def export_chatbot_member_aliases(self, interaction: discord.Interaction) -> None:
         await self.excel_management_use_cases.export_chatbot_member_aliases(interaction)
 
-    @app_commands.command(name="import_chatbot_member_aliases", description="編集済みのメンバー別名Excelを取り込みます")
+    @chatbot.command(name="aliases_import", description="編集済みのメンバー別名Excelを取り込みます")
     async def import_chatbot_member_aliases(
         self,
         interaction: discord.Interaction,
@@ -143,11 +145,11 @@ class ChatBot(commands.Cog):
             return
         await self.excel_management_use_cases.import_chatbot_member_aliases(interaction, attachment)
 
-    @app_commands.command(name="export_chatbot_memories", description="Chatbotの長期記憶をExcelで出力します")
+    @chatbot.command(name="memories_export", description="Chatbotの長期記憶をExcelで出力します")
     async def export_chatbot_memories(self, interaction: discord.Interaction) -> None:
         await self.excel_management_use_cases.export_chatbot_memories(interaction)
 
-    @app_commands.command(name="import_chatbot_memories", description="編集済みの長期記憶Excelを取り込みます")
+    @chatbot.command(name="memories_import", description="編集済みの長期記憶Excelを取り込みます")
     async def import_chatbot_memories(
         self,
         interaction: discord.Interaction,

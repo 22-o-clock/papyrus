@@ -14,6 +14,8 @@ logger = getLogger(__name__)
 
 
 class ArknightsVoice(commands.Cog):
+    arknights = app_commands.Group(name="arknights", description="アークナイツの台詞を検索・投稿します。")
+
     """アークナイツのキャラクターボイスを検索・送信するCog。"""
 
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -40,8 +42,9 @@ class ArknightsVoice(commands.Cog):
         await interaction.response.send_message("ボットは起動準備中です。もう少しお待ちください 💦", ephemeral=True)
         return False
 
-    @app_commands.command(
-        description="ランダムにアークナイツのキャラクターの台詞を返します。キャラクターを指定することもできます。"
+    @arknights.command(
+        name="random",
+        description="ランダムにアークナイツのキャラクターの台詞を返します。キャラクターを指定することもできます。",
     )
     @app_commands.describe(name="キャラクター名")
     async def amiya(self, interaction: Interaction, name: str | None = None) -> None:
@@ -70,7 +73,7 @@ class ArknightsVoice(commands.Cog):
             if display_name.lower().startswith(normalized_current)
         ][:25]
 
-    @app_commands.command(description="アークナイツの「ドクター」を含む台詞をメンションに置き換えて返します。")
+    @arknights.command(name="doctor", description="「ドクター」を含む台詞をメンションに置き換えて返します。")
     @app_commands.describe(name="キャラクター名")
     async def doctor(self, interaction: Interaction, name: str | None = None) -> None:
         ch_name = self._resolve_character_name(name) if name else None
@@ -91,12 +94,12 @@ class ArknightsVoice(commands.Cog):
     async def doctor_autocomplete(self, _: Interaction, current: str) -> list[app_commands.Choice[str]]:
         return self._autocomplete_character_name(current)
 
-    @app_commands.command(description="休むなドクターの台詞を送信します。")
+    @arknights.command(name="doctor_rest", description="休むなドクターの台詞を送信します。")
     async def doctor_yasumuna(self, interaction: Interaction, user: Member | None = None) -> None:
         target = user.mention if user is not None else interaction.user.mention
         await interaction.response.send_message(f"{target}、終わってない仕事がたくさんありますから、まだ休んじゃダメですよ。")
 
-    @app_commands.command(description="指定した台詞のキャラクターとボイス種別を検索します。")
+    @arknights.command(name="search", description="台詞のキャラクターとボイス種別を検索します。")
     async def whose(self, interaction: Interaction, phrase: str) -> None:
         if self.name_match is None:
             await interaction.response.send_message("ボットは起動準備中です。もう少しお待ちください 💦", ephemeral=True)

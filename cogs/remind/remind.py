@@ -20,6 +20,8 @@ MAX_REMINDER_INDEX_LENGTH = 10
 
 
 class Notify(commands.Cog):
+    reminder = app_commands.Group(name="reminder", description="登録済みリマインダーを管理します。")
+
     pat1 = re.compile(r"^(?:(\d+)/(\d+)\s+)*(\d+):(\d+)\s+(.+)$")  # 08/31 03:09, 03:09
     pat2 = re.compile(r"^(?:(\d+)h)*(?:(\d+)m)*\s+(.+)$")  # 8h31m, 8h, 31m
 
@@ -80,7 +82,7 @@ class Notify(commands.Cog):
         await interaction.response.send_message(f"{des.strftime('%m/%d %H:%M')} に {content} のリマインダーを設定しました！")
         await self.db.add_reminder(interaction.user.id, interaction.channel_id, content, des)
 
-    @app_commands.command(name="show_reminder", description="登録されたリマインダーを表示します。")
+    @reminder.command(name="list", description="登録されたリマインダーを表示します。")
     async def show_reminder(self, interaction: Interaction) -> None:
         embed = make_simple_embed(
             Colour.dark_blue(),
@@ -100,7 +102,7 @@ class Notify(commands.Cog):
         embed = add_timestamp_footer(self.bot, embed)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="remove_reminder", description="登録されたリマインダーを削除します。")
+    @reminder.command(name="remove", description="登録されたリマインダーを削除します。")
     @app_commands.describe(indicator="リマインダーの番号を指定")
     async def remove_reminder(self, interaction: Interaction, indicator: str) -> None:
         if indicator.isdecimal() and len(indicator) <= MAX_REMINDER_INDEX_LENGTH:
