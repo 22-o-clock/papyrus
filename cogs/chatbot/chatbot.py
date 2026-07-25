@@ -67,19 +67,6 @@ class ChatBot(commands.Cog):
     ) -> None:
         await self.settings_use_cases.set_conversation_reset_minutes(interaction, minutes)
 
-    @chatbot.command(name="question_wait", description="宛先のない質問への回答待機時間を変更します")
-    @app_commands.describe(
-        minimum_minutes="最短待機時間 (分、1以上)",
-        maximum_minutes="最長待機時間 (分、最短以上)",
-    )
-    async def set_chatbot_question_wait(
-        self,
-        interaction: discord.Interaction,
-        minimum_minutes: int,
-        maximum_minutes: int,
-    ) -> None:
-        await self.settings_use_cases.set_question_wait(interaction, minimum_minutes, maximum_minutes)
-
     @chatbot.command(name="role_set", description="このチャンネルでのChatbotの役割を変更します")
     @app_commands.describe(role="assistant または chat を選択します")
     async def set_chatbot_role(self, interaction: discord.Interaction, role: ChannelRole) -> None:

@@ -17,5 +17,4 @@ class ResponseRequestOptions:
     """応答キューへ渡す生成要求固有の設定。"""
 
     is_explicit_call: bool
-    is_unanswered_question: bool
     custom_profile: CustomProfile | None = None

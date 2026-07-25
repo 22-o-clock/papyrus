@@ -518,7 +518,6 @@ class ResponseGenerationOptions:
 
     response_mode: ResponseMode
     required_reply_to_message_id: int | None = None
-    is_unanswered_question: bool = False
     long_term_memory_context: str = ""
     custom_profile: CustomProfile | None = None
     resolved_member_aliases: dict[str, int] | None = None
@@ -676,7 +675,6 @@ class ResponseJudge:
         channel_role: ChannelRole,
         *,
         cooldown_stage: CooldownStage,
-        is_unanswered_question: bool,
         resolved_member_aliases: dict[str, int],
     ) -> ResponseJudgment:
         """外部ツールや長期記憶を使わずに自発反応の必要性を返します。"""
@@ -684,7 +682,6 @@ class ResponseJudge:
             {
                 "channel_role": channel_role.value,
                 "cooldown_stage": cooldown_stage.value,
-                "is_unanswered_question": is_unanswered_question,
                 **json.loads(
                     _serialize_response_context(
                         short_term_memory,
@@ -796,13 +793,6 @@ class DraftGenerator:
                 bot_name=self.bot_name,
                 channel_role=channel_role.value,
                 delivery_instruction=delivery_instruction,
-                unanswered_question_instruction=(
-                    "- この回答は、人間からの回答を待った宛先のない質問へのものです。"
-                    "短く明確に答えられる場合だけ応答してください。"
-                    "詳しい調査や長い説明が必要でも、まず短い要点を返してください。"
-                    if options.is_unanswered_question
-                    else ""
-                ),
             )
             + REACTION_CONTEXT_INSTRUCTIONS
         )
@@ -947,7 +937,6 @@ class ResponsePipeline:
         channel_role: ChannelRole,
         *,
         cooldown_stage: CooldownStage,
-        is_unanswered_question: bool,
         resolved_member_aliases: dict[str, int],
     ) -> ResponseJudgment:
         """短期文脈に対する自発反応の要否を判定します。"""
@@ -955,6 +944,5 @@ class ResponsePipeline:
             self.short_term_memory,
             channel_role,
             cooldown_stage=cooldown_stage,
-            is_unanswered_question=is_unanswered_question,
             resolved_member_aliases=resolved_member_aliases,
         )

@@ -25,7 +25,6 @@ EXPECTED_GROUP_COMMANDS = {
         "profile_list",
         "profile_save",
         "profile_show",
-        "question_wait",
         "role_reset",
         "role_set",
         "role_show",
@@ -63,7 +62,7 @@ COMMAND_GROUPS = (
 )
 
 INDEPENDENT_COMMANDS = (Notify.remind, Speak.choice_command, Speak.hi)
-EXPECTED_SLASH_COMMAND_COUNT = 45
+EXPECTED_SLASH_COMMAND_COUNT = 44
 
 
 def ensure(condition: object) -> None:

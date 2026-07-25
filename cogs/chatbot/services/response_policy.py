@@ -10,7 +10,6 @@ from cogs.chatbot.constants import (
     CHAT_DEBOUNCE_MIN_SECONDS,
     CHAT_REACTION_COOLDOWN_SECONDS,
     CHAT_TEXT_COOLDOWN_SECONDS,
-    QUESTION_ENDING_PATTERN,
 )
 from cogs.chatbot.models.conversation import ChannelProcessingState
 from cogs.chatbot.models.custom_profile import CustomProfile
@@ -22,13 +21,11 @@ def activate_response(
     message: Message,
     *,
     is_explicit_call: bool,
-    is_unanswered_question: bool,
     custom_profile: CustomProfile | None,
 ) -> None:
     """現在処理中の応答要求と、その必須性を状態へ保持します。"""
     state.active_response_message = message
     state.active_response_is_explicit_call = is_explicit_call
-    state.active_response_is_unanswered_question = is_unanswered_question
     state.active_custom_profile = custom_profile
 
 
@@ -37,7 +34,6 @@ def claim_response_slot(
     message: Message,
     *,
     is_explicit_call: bool,
-    is_unanswered_question: bool,
     custom_profile: CustomProfile | None = None,
 ) -> bool:
     """生成枠を確保し、使用中の場合は次の返信対象としてメッセージを保持します。"""
@@ -45,18 +41,15 @@ def claim_response_slot(
         if is_explicit_call:
             state.queued_response_message = message
             state.queued_response_is_explicit_call = True
-            state.queued_response_is_unanswered_question = is_unanswered_question
             state.queued_custom_profile = custom_profile
         elif not state.queued_response_is_explicit_call:
             if state.active_response_is_explicit_call and state.active_response_message is not None:
                 state.queued_response_message = state.active_response_message
                 state.queued_response_is_explicit_call = True
-                state.queued_response_is_unanswered_question = state.active_response_is_unanswered_question
                 state.queued_custom_profile = state.active_custom_profile
             else:
                 state.queued_response_message = message
                 state.queued_response_is_explicit_call = False
-                state.queued_response_is_unanswered_question = is_unanswered_question
                 state.queued_custom_profile = custom_profile
         state.generation_revision += 1
         return False
@@ -65,7 +58,6 @@ def claim_response_slot(
         state,
         message,
         is_explicit_call=is_explicit_call,
-        is_unanswered_question=is_unanswered_question,
         custom_profile=custom_profile,
     )
     return True
@@ -101,19 +93,6 @@ def should_reset_conversation(
     if last_human_message_timestamp is None:
         return False
     return current_message_timestamp - last_human_message_timestamp >= datetime.timedelta(minutes=reset_minutes)
-
-
-def is_unaddressed_question(*, content: str, is_reply: bool, mentioned_user_ids: list[int]) -> bool:
-    """宛先のない質問として待機対象にする投稿か判定します。"""
-    if is_reply or mentioned_user_ids:
-        return False
-    normalized_content = content.replace("\uff1f", "?").strip()
-    return QUESTION_ENDING_PATTERN.search(normalized_content) is not None
-
-
-def get_unanswered_question_wait_minutes(minimum_minutes: int, maximum_minutes: int) -> int:
-    """宛先のない質問への回答を待つ時間を一様ランダムに選びます。"""
-    return random.SystemRandom().randint(minimum_minutes, maximum_minutes)
 
 
 def can_change_channel_role(*, is_thread: bool, manage_channels: bool) -> bool:

@@ -10,7 +10,6 @@ Papyrusで利用できる操作と、メッセージやDiscordイベントを契
 - `/chatbot role_set`: 現在のチャンネルのChatbot役割を変更します。
 - `/chatbot role_reset`: 現在のチャンネル固有のChatbot役割を解除します。
 - `/chatbot conversation_reset`: 会話をリセットするまでの時間を変更します。
-- `/chatbot question_wait`: 宛先のない質問へ応答するまでの待機範囲を変更します。
 - `/chatbot profile_save`: カスタムプロファイルを保存します。
 - `/chatbot profile_disable`: カスタムプロファイルを無効化します。
 - `/chatbot profile_show`: カスタムプロファイルを表示します。

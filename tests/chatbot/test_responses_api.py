@@ -314,7 +314,6 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
         judgment = await pipeline.judge_response(
             ChannelRole.CHAT,
             cooldown_stage=CooldownStage.RECOVERING,
-            is_unanswered_question=False,
             resolved_member_aliases={"てすたろう": 10},
         )
 
@@ -340,7 +339,6 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
         judgment = await pipeline.judge_response(
             ChannelRole.CHAT,
             cooldown_stage=CooldownStage.READY,
-            is_unanswered_question=False,
             resolved_member_aliases={},
         )
 

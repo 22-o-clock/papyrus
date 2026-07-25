@@ -6,11 +6,7 @@ from cogs.chatbot.channel_roles import ChannelRole, ChannelRoleManager
 from cogs.chatbot.constants import (
     CONVERSATION_RESET_MINUTES_KEY,
     DEFAULT_CONVERSATION_RESET_MINUTES,
-    DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES,
-    DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES,
     MINIMUM_CONVERSATION_RESET_MINUTES,
-    UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY,
-    UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY,
 )
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
 from cogs.chatbot.services.response_policy import can_change_channel_role
@@ -32,29 +28,13 @@ class SettingsUseCases:
         self._role_manager = role_manager
         self._runtime_environment = runtime_environment
         self.conversation_reset_minutes = DEFAULT_CONVERSATION_RESET_MINUTES
-        self.unanswered_question_minimum_wait_minutes = DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES
-        self.unanswered_question_maximum_wait_minutes = DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES
 
-    async def initialize(self) -> bool:
-        """保存済み設定を読み込み、質問待機時間が有効ならTrueを返す。"""
+    async def initialize(self) -> None:
+        """保存済みの会話リセット時間を読み込みます。"""
         self.conversation_reset_minutes = await self._load_positive_minutes(
             CONVERSATION_RESET_MINUTES_KEY,
             DEFAULT_CONVERSATION_RESET_MINUTES,
         )
-        minimum = await self._load_positive_minutes(
-            UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY,
-            DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES,
-        )
-        maximum = await self._load_positive_minutes(
-            UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY,
-            DEFAULT_UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES,
-        )
-        if minimum > maximum:
-            logger.warning("Invalid chatbot unanswered question wait range (minimum=%s, maximum=%s)", minimum, maximum)
-            return False
-        self.unanswered_question_minimum_wait_minutes = minimum
-        self.unanswered_question_maximum_wait_minutes = maximum
-        return True
 
     async def _load_positive_minutes(self, key: str, default: int) -> int:
         configured = await self._environment_repository.get_env(key)
@@ -102,30 +82,6 @@ class SettingsUseCases:
         self.conversation_reset_minutes = minutes
         await self._environment_repository.set_env(CONVERSATION_RESET_MINUTES_KEY, str(minutes))
         await interaction.response.send_message(f"Chatbotの会話リセット時間を {previous}分から {minutes}分に変更しました。")
-
-    async def set_question_wait(self, interaction: discord.Interaction, minimum: int, maximum: int) -> None:
-        if not await self._validate_shared_write(interaction):
-            return
-        if not interaction.permissions.manage_guild:
-            await interaction.response.send_message(
-                "質問への回答待機時間の変更には「サーバー管理」権限が必要です。", ephemeral=True
-            )
-            return
-        if minimum < MINIMUM_CONVERSATION_RESET_MINUTES or minimum > maximum:
-            await interaction.response.send_message(
-                "待機時間は「1以上の最短分数」と「最短以上の最長分数」で指定してください。", ephemeral=True
-            )
-            return
-        previous_minimum = self.unanswered_question_minimum_wait_minutes
-        previous_maximum = self.unanswered_question_maximum_wait_minutes
-        self.unanswered_question_minimum_wait_minutes = minimum
-        self.unanswered_question_maximum_wait_minutes = maximum
-        await self._environment_repository.set_env(UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES_KEY, str(minimum))
-        await self._environment_repository.set_env(UNANSWERED_QUESTION_MAXIMUM_WAIT_MINUTES_KEY, str(maximum))
-        await interaction.response.send_message(
-            "宛先のない質問への回答待機時間を "
-            f"{previous_minimum}〜{previous_maximum}分から {minimum}〜{maximum}分に変更しました。"
-        )
 
     async def set_role(self, interaction: discord.Interaction, role: ChannelRole) -> None:
         if not await self._validate_chatbot_channel(interaction):
