@@ -49,6 +49,7 @@ def aggregate_feature_usages(rows: list[ChatbotApiUsageDaily]) -> list[FeatureUs
         usage.item_count += row.item_count
         usage.input_tokens += row.input_tokens
         usage.cached_input_tokens += row.cached_input_tokens
+        usage.cache_write_input_tokens += row.cache_write_input_tokens
         usage.output_tokens += row.output_tokens
         usage.web_search_calls += row.web_search_calls
         usage.code_interpreter_sessions += row.code_interpreter_sessions
@@ -90,6 +91,15 @@ def build_usage_embed(
         ),
         inline=False,
     )
+    if openai_summary is not None and openai_summary.costs:
+        embed.add_field(
+            name="OpenAI請求内訳",
+            value="\n".join(
+                f"{line_item}: **{_format_usd(cost)}**"
+                for line_item, cost in sorted(openai_summary.costs.items(), key=lambda item: item[1], reverse=True)
+            ),
+            inline=False,
+        )
 
     standalone = [usage for usage in feature_usages if usage.operation not in MEMORY_OPERATIONS]
     memory_usages = [usage for usage in feature_usages if usage.operation in MEMORY_OPERATIONS]
@@ -124,13 +134,19 @@ def build_usage_embed(
     unused = [label for operation, label in FEATURE_LABELS.items() if operation not in used_operations]
     if unused:
         embed.add_field(name="利用なし", value=" / ".join(unused), inline=False)
-    warnings = _build_warnings(feature_usages, exact_total, estimated_total, measurement_state.error_count)
+    warnings = _build_warnings(
+        feature_usages,
+        openai_summary,
+        estimated_total,
+        measurement_state.error_count,
+        report_is_complete=measurement_state.is_complete,
+    )
     if warnings:
         embed.add_field(name="⚠ 確認事項", value="\n".join(warnings), inline=False)
     embed.set_footer(
         text=(
-            f"{REPORT_MARKER_PREFIX}{report_date.isoformat()} | cached input は input token の内数 | "
-            f"cache write料金は未配賦 | 単価確認 {PRICING_VERIFIED_ON:%Y-%m-%d}"
+            f"{REPORT_MARKER_PREFIX}{report_date.isoformat()} | cached/cache write input は input token の内数 | "
+            f"単価確認 {PRICING_VERIFIED_ON:%Y-%m-%d}"
         )
     )
     return embed
@@ -167,7 +183,8 @@ def _format_feature_usage(usage: FeatureUsage, estimated_total: Decimal) -> str:
             f"{item_label} {usage.item_count:,}件 / {share:.1f}%"
         ),
         (
-            f"input {usage.input_tokens:,} tokens (cached {usage.cached_input_tokens:,} tokens) / "
+            f"input {usage.input_tokens:,} tokens "
+            f"(cached {usage.cached_input_tokens:,} / cache write {usage.cache_write_input_tokens:,}) / "
             f"output {usage.output_tokens:,} tokens"
         ),
         f"model tokens {_format_usd(usage.model_cost)} — {', '.join(sorted(usage.models))}",
@@ -191,12 +208,15 @@ def _format_memory_total(usages: list[FeatureUsage]) -> str:
 
 def _build_warnings(
     usages: list[FeatureUsage],
-    exact_total: Decimal | None,
+    openai_summary: OpenAIUsageSummary | None,
     estimated_total: Decimal,
     measurement_error_count: int,
+    *,
+    report_is_complete: bool,
 ) -> list[str]:
-    """単価不足・大きな差額・計測保存失敗だけを警告する。"""
+    """単価不足・大きな差額・Usage不一致・計測保存失敗だけを警告する。"""
     warnings: list[str] = []
+    exact_total = openai_summary.total_cost if openai_summary is not None else None
     unknown_models = sorted({model for usage in usages for model in usage.unknown_price_models})
     if unknown_models:
         warnings.append(f"単価未登録モデル: {', '.join(unknown_models)} (該当model token費は推定額に未反映)")
@@ -204,9 +224,43 @@ def _build_warnings(
         difference = abs(exact_total - estimated_total)
         if difference > Decimal("0.05") and difference / exact_total > Decimal("0.10"):
             warnings.append(f"確定額との差が {_format_usd(difference)} ({difference / exact_total * 100:.1f}%) あります。")
+    if openai_summary is not None and openai_summary.usage_available and report_is_complete:
+        usage_difference = _format_openai_usage_difference(usages, openai_summary)
+        if usage_difference is not None:
+            warnings.append(usage_difference)
     if measurement_error_count:
         warnings.append(f"計測DBへの保存失敗を {measurement_error_count:,} calls 検出しました。")
     return warnings
+
+
+def _format_openai_usage_difference(
+    usages: list[FeatureUsage],
+    openai_summary: OpenAIUsageSummary,
+) -> str | None:
+    """OpenAI Usage APIとローカル計測の総量差を警告文へ整形する。"""
+    openai_usages = [*openai_summary.completion_usage, *openai_summary.embedding_usage]
+    openai_requests = sum(usage.requests for usage in openai_usages)
+    openai_input_tokens = sum(usage.input_tokens for usage in openai_usages)
+    openai_cached_input_tokens = sum(usage.cached_input_tokens for usage in openai_usages)
+    openai_output_tokens = sum(usage.output_tokens for usage in openai_usages)
+    local_requests = sum(usage.success_count for usage in usages)
+    local_input_tokens = sum(usage.input_tokens for usage in usages)
+    local_cached_input_tokens = sum(usage.cached_input_tokens for usage in usages)
+    local_output_tokens = sum(usage.output_tokens for usage in usages)
+    differences = (
+        openai_requests - local_requests,
+        openai_input_tokens - local_input_tokens,
+        openai_cached_input_tokens - local_cached_input_tokens,
+        openai_output_tokens - local_output_tokens,
+    )
+    if not any(differences):
+        return None
+    requests, input_tokens, cached_input_tokens, output_tokens = differences
+    return (
+        "OpenAI Usageとの差: "
+        f"calls {requests:+,} / input {input_tokens:+,} / "
+        f"cached {cached_input_tokens:+,} / output {output_tokens:+,} tokens"
+    )
 
 
 def _format_usd(amount: Decimal | None) -> str:

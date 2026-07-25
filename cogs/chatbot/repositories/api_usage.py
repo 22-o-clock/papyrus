@@ -25,9 +25,11 @@ class ChatbotApiUsageDaily(ChatbotBase):
     item_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    cache_write_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     long_context_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     long_context_cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    long_context_cache_write_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     long_context_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     web_search_calls: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     code_interpreter_sessions: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
@@ -55,9 +57,11 @@ class ApiUsageIncrement:
     item_count: int = 1
     input_tokens: int = 0
     cached_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
     output_tokens: int = 0
     long_context_input_tokens: int = 0
     long_context_cached_input_tokens: int = 0
+    long_context_cache_write_input_tokens: int = 0
     long_context_output_tokens: int = 0
     web_search_calls: int = 0
     code_interpreter_sessions: int = 0
@@ -88,9 +92,11 @@ class ChatbotApiUsageRepository:
             "item_count": increment.item_count,
             "input_tokens": increment.input_tokens,
             "cached_input_tokens": increment.cached_input_tokens,
+            "cache_write_input_tokens": increment.cache_write_input_tokens,
             "output_tokens": increment.output_tokens,
             "long_context_input_tokens": increment.long_context_input_tokens,
             "long_context_cached_input_tokens": increment.long_context_cached_input_tokens,
+            "long_context_cache_write_input_tokens": increment.long_context_cache_write_input_tokens,
             "long_context_output_tokens": increment.long_context_output_tokens,
             "web_search_calls": increment.web_search_calls,
             "code_interpreter_sessions": increment.code_interpreter_sessions,
@@ -113,12 +119,19 @@ class ChatbotApiUsageRepository:
                         "item_count": ChatbotApiUsageDaily.item_count + excluded.item_count,
                         "input_tokens": ChatbotApiUsageDaily.input_tokens + excluded.input_tokens,
                         "cached_input_tokens": ChatbotApiUsageDaily.cached_input_tokens + excluded.cached_input_tokens,
+                        "cache_write_input_tokens": (
+                            ChatbotApiUsageDaily.cache_write_input_tokens + excluded.cache_write_input_tokens
+                        ),
                         "output_tokens": ChatbotApiUsageDaily.output_tokens + excluded.output_tokens,
                         "long_context_input_tokens": (
                             ChatbotApiUsageDaily.long_context_input_tokens + excluded.long_context_input_tokens
                         ),
                         "long_context_cached_input_tokens": (
                             ChatbotApiUsageDaily.long_context_cached_input_tokens + excluded.long_context_cached_input_tokens
+                        ),
+                        "long_context_cache_write_input_tokens": (
+                            ChatbotApiUsageDaily.long_context_cache_write_input_tokens
+                            + excluded.long_context_cache_write_input_tokens
                         ),
                         "long_context_output_tokens": (
                             ChatbotApiUsageDaily.long_context_output_tokens + excluded.long_context_output_tokens

@@ -5,7 +5,7 @@ from decimal import Decimal
 from cogs.chatbot.repositories.api_usage import ChatbotApiUsageDaily
 
 PRICING_SOURCE_URL = "https://developers.openai.com/api/docs/pricing"
-PRICING_VERIFIED_ON = datetime.date(2026, 7, 16)
+PRICING_VERIFIED_ON = datetime.date(2026, 7, 25)
 PER_MILLION = Decimal(1_000_000)
 
 
@@ -16,9 +16,11 @@ class ModelPrice:
     effective_from: datetime.date
     input_per_million: Decimal
     cached_input_per_million: Decimal
+    cache_write_input_per_million: Decimal
     output_per_million: Decimal
     long_input_per_million: Decimal | None = None
     long_cached_input_per_million: Decimal | None = None
+    long_cache_write_input_per_million: Decimal | None = None
     long_output_per_million: Decimal | None = None
 
 
@@ -38,20 +40,85 @@ class EstimatedUsageCost:
 
 
 MODEL_PRICES: dict[str, tuple[ModelPrice, ...]] = {
+    "gpt-5.6": (
+        ModelPrice(
+            datetime.date(2026, 7, 13),
+            Decimal("5.00"),
+            Decimal("0.50"),
+            Decimal("6.25"),
+            Decimal("30.00"),
+            Decimal("10.00"),
+            Decimal("1.00"),
+            Decimal("12.50"),
+            Decimal("45.00"),
+        ),
+    ),
+    "gpt-5.6-sol": (
+        ModelPrice(
+            datetime.date(2026, 7, 13),
+            Decimal("5.00"),
+            Decimal("0.50"),
+            Decimal("6.25"),
+            Decimal("30.00"),
+            Decimal("10.00"),
+            Decimal("1.00"),
+            Decimal("12.50"),
+            Decimal("45.00"),
+        ),
+    ),
     "gpt-5.6-terra": (
         ModelPrice(
             datetime.date(2026, 7, 13),
             Decimal("2.50"),
             Decimal("0.25"),
+            Decimal("3.125"),
             Decimal("15.00"),
             Decimal("5.00"),
             Decimal("0.50"),
+            Decimal("6.25"),
             Decimal("22.50"),
         ),
     ),
-    "gpt-5.4-mini": (ModelPrice(datetime.date(2026, 7, 13), Decimal("0.75"), Decimal("0.075"), Decimal("4.50")),),
-    "gpt-5.4-nano": (ModelPrice(datetime.date(2026, 7, 15), Decimal("0.20"), Decimal("0.02"), Decimal("1.25")),),
-    "text-embedding-3-large": (ModelPrice(datetime.date(2026, 7, 13), Decimal("0.13"), Decimal("0.13"), Decimal()),),
+    "gpt-5.6-luna": (
+        ModelPrice(
+            datetime.date(2026, 7, 13),
+            Decimal("1.00"),
+            Decimal("0.10"),
+            Decimal("1.25"),
+            Decimal("6.00"),
+            Decimal("2.00"),
+            Decimal("0.20"),
+            Decimal("2.50"),
+            Decimal("9.00"),
+        ),
+    ),
+    "gpt-5.4-mini": (
+        ModelPrice(
+            datetime.date(2026, 7, 13),
+            Decimal("0.75"),
+            Decimal("0.075"),
+            Decimal("0.75"),
+            Decimal("4.50"),
+        ),
+    ),
+    "gpt-5.4-nano": (
+        ModelPrice(
+            datetime.date(2026, 7, 15),
+            Decimal("0.20"),
+            Decimal("0.02"),
+            Decimal("0.20"),
+            Decimal("1.25"),
+        ),
+    ),
+    "text-embedding-3-large": (
+        ModelPrice(
+            datetime.date(2026, 7, 13),
+            Decimal("0.13"),
+            Decimal("0.13"),
+            Decimal("0.13"),
+            Decimal(),
+        ),
+    ),
 }
 WEB_SEARCH_PER_CALL = Decimal("0.01")
 CODE_INTERPRETER_PER_SESSION = Decimal("0.03")
@@ -63,21 +130,35 @@ def estimate_usage_cost(usage: ChatbotApiUsageDaily) -> EstimatedUsageCost:
     model_cost = Decimal()
     if price is not None:
         cached_tokens = min(usage.input_tokens, usage.cached_input_tokens)
-        uncached_tokens = max(0, usage.input_tokens - cached_tokens)
+        cache_write_tokens = min(
+            max(0, usage.input_tokens - cached_tokens),
+            usage.cache_write_input_tokens,
+        )
+        uncached_tokens = max(0, usage.input_tokens - cached_tokens - cache_write_tokens)
         long_cached_tokens = min(usage.long_context_input_tokens, usage.long_context_cached_input_tokens)
-        long_uncached_tokens = max(0, usage.long_context_input_tokens - long_cached_tokens)
+        long_cache_write_tokens = min(
+            max(0, usage.long_context_input_tokens - long_cached_tokens),
+            usage.long_context_cache_write_input_tokens,
+        )
+        long_uncached_tokens = max(
+            0,
+            usage.long_context_input_tokens - long_cached_tokens - long_cache_write_tokens,
+        )
         short_cached_tokens = cached_tokens - long_cached_tokens
+        short_cache_write_tokens = cache_write_tokens - long_cache_write_tokens
         short_uncached_tokens = uncached_tokens - long_uncached_tokens
         short_output_tokens = usage.output_tokens - usage.long_context_output_tokens
         model_cost = (
             Decimal(short_uncached_tokens) * price.input_per_million
             + Decimal(short_cached_tokens) * price.cached_input_per_million
+            + Decimal(short_cache_write_tokens) * price.cache_write_input_per_million
             + Decimal(short_output_tokens) * price.output_per_million
         ) / PER_MILLION
         if price.long_input_per_million is not None:
             model_cost += (
                 Decimal(long_uncached_tokens) * price.long_input_per_million
                 + Decimal(long_cached_tokens) * (price.long_cached_input_per_million or Decimal())
+                + Decimal(long_cache_write_tokens) * (price.long_cache_write_input_per_million or Decimal())
                 + Decimal(usage.long_context_output_tokens) * (price.long_output_per_million or Decimal())
             ) / PER_MILLION
     return EstimatedUsageCost(
