@@ -16,6 +16,12 @@ def get_sample_environment_keys() -> list[str]:
     return [match.group(1) for line in lines if (match := ENVIRONMENT_ENTRY_PATTERN.match(line))]
 
 
+def get_environment_layout(path: Path) -> list[str]:
+    """値を除き、環境変数名、コメント、空行を順序付きで返す。"""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return [match.group(1) if (match := ENVIRONMENT_ENTRY_PATTERN.match(line)) else line for line in lines]
+
+
 def get_deployed_environment_keys() -> list[str]:
     """GCPコンテナ用envファイルへ書き込む環境変数名を返す。"""
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "deployment.yml").read_text(encoding="utf-8")
@@ -74,6 +80,16 @@ def ensure(condition: object, message: str = "") -> None:
 
 
 class EnvironmentConfigurationTest(unittest.TestCase):
+    def test_local_environment_matches_sample_layout(self) -> None:
+        local_environment_path = PROJECT_ROOT / ".env"
+        if not local_environment_path.exists():
+            self.skipTest(".envが存在しないため、ローカル環境との比較を省略します")
+
+        sample_layout = get_environment_layout(PROJECT_ROOT / ".env.sample")
+        local_layout = get_environment_layout(local_environment_path)
+
+        ensure(local_layout == sample_layout, ".envと.env.sampleの項目名、コメント、順序が一致していません")
+
     def test_sample_matches_validated_environment_keys(self) -> None:
         sample_keys = get_sample_environment_keys()
 

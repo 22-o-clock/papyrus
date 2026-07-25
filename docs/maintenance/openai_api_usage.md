@@ -35,4 +35,5 @@ OpenAI API callを追加・変更する場合は、機能の実装と同じ変�
 - OpenAI Usageとの差が出た場合は、call数とinput・cached・output tokenのどこに差があるか確認する。
 - 同じOpenAI ProjectをPapyrus以外から使用した費用は、ローカル計測との差額になる点に注意する。
 
-通常のテスト、静的検証、Discord手動スモークテストは `AGENTS.md` の手順に従う。
+通常のテスト、静的検証、Discord手動スモークテストは
+[`development.md`](../development.md) の手順に従う。

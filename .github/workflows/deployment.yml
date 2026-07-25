@@ -97,7 +97,7 @@ jobs:
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           LASTFM_IDS: ${{ secrets.LASTFM_IDS }}
           BOT_ENVIRONMENT: production
-          DEBUG: 'false'
+          ENABLED_COGS: all
           LOG_LEVEL: INFO
         run: |
           container_env_file="$(mktemp "${RUNNER_TEMP}/papyrus-container-env.XXXXXX")"
@@ -124,7 +124,7 @@ jobs:
             LASTFM_API_KEY "$LASTFM_API_KEY" \
             LASTFM_IDS "$LASTFM_IDS" \
             BOT_ENVIRONMENT "$BOT_ENVIRONMENT" \
-            DEBUG "$DEBUG" \
+            ENABLED_COGS "$ENABLED_COGS" \
             LOG_LEVEL "$LOG_LEVEL" > "$container_env_file"
           gcloud compute scp "$container_env_file" papyrus:/tmp/papyrus.env.next \
             --zone="${{ env.GAR_LOCATION }}-a" \

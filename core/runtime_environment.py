@@ -12,12 +12,12 @@ if TYPE_CHECKING:
 logger = getLogger(__name__)
 
 BOT_ENVIRONMENT_KEY = "BOT_ENVIRONMENT"
+ENABLED_COGS_KEY = "ENABLED_COGS"
 DEBUG_CHATBOT_CHANNEL_ID_KEY = "CHANNEL_ID_DEBUG_CHATBOT"
 PRODUCTION_API_USAGE_REPORT_TARGET_ID_KEY = "THREAD_ID_API_USAGE_REPORT"
 DEBUG_API_USAGE_REPORT_TARGET_ID_KEY = "THREAD_ID_DEBUG_API_USAGE_REPORT"
 OPTIONAL_ENVIRONMENT_KEYS = (
     "AUDIT_IMMUNITY",
-    "DEBUG",
     "LASTFM_IDS",
     "LOG_LEVEL",
 )
@@ -29,6 +29,7 @@ REQUIRED_ENVIRONMENT_KEYS = (
     "CHANNEL_ID_LOBBY",
     DEBUG_API_USAGE_REPORT_TARGET_ID_KEY,
     "DISCORD_BOT_TOKEN",
+    ENABLED_COGS_KEY,
     "LASTFM_API_KEY",
     "OPENAI_ADMIN_API_KEY",
     "OPENAI_API_KEY",
@@ -54,6 +55,22 @@ INTEGER_ENVIRONMENT_KEYS = (
 )
 
 CONFIGURED_ENVIRONMENT_KEYS = frozenset((*REQUIRED_ENVIRONMENT_KEYS, *OPTIONAL_ENVIRONMENT_KEYS, BOT_ENVIRONMENT_KEY))
+AVAILABLE_COG_NAMES = (
+    "admin",
+    "agree",
+    "audit",
+    "api_usage",
+    "chatbot",
+    "hwh",
+    "monitor",
+    "moving",
+    "remind",
+    "speak",
+    "spotify_embed",
+    "talkdata",
+    "voice",
+    "voicevox",
+)
 
 
 class BotEnvironment(StrEnum):
@@ -68,6 +85,7 @@ class RuntimeEnvironment:
     """起動時に確定した実行環境とChatbotのテスト範囲。"""
 
     environment: BotEnvironment
+    enabled_cogs: tuple[str, ...]
     chatbot_test_channel_ids: frozenset[int]
     api_usage_report_target_id: int
 
@@ -108,13 +126,15 @@ def configure_runtime_environment(environ: Mapping[str, str] | None = None) -> R
     )
     runtime = RuntimeEnvironment(
         environment=environment,
+        enabled_cogs=_parse_enabled_cogs(values[ENABLED_COGS_KEY]),
         chatbot_test_channel_ids=frozenset((int(values[DEBUG_CHATBOT_CHANNEL_ID_KEY]),)),
         api_usage_report_target_id=int(values[api_usage_report_target_key]),
     )
     _runtime_environment = runtime
     logger.info(
-        "Configured Bot runtime environment (environment=%s, chatbot_test_channel_ids=%s)",
+        "Configured Bot runtime environment (environment=%s, enabled_cogs=%s, chatbot_test_channel_ids=%s)",
         runtime.environment.value,
+        runtime.enabled_cogs,
         sorted(runtime.chatbot_test_channel_ids),
     )
     return runtime
@@ -137,8 +157,42 @@ def _validate_environment(environ: Mapping[str, str]) -> list[str]:
     except ValueError:
         errors.append(f"{BOT_ENVIRONMENT_KEY} must be production or debug")
 
+    raw_enabled_cogs = environ.get(ENABLED_COGS_KEY, "")
+    if raw_enabled_cogs.strip():
+        try:
+            _parse_enabled_cogs(raw_enabled_cogs)
+        except ValueError as error:
+            errors.append(str(error))
+
     for key in INTEGER_ENVIRONMENT_KEYS:
         value = environ.get(key, "").strip()
         if value and not value.isdecimal():
             errors.append(f"{key} must be a Discord ID")
     return errors
+
+
+def _parse_enabled_cogs(value: str) -> tuple[str, ...]:
+    """環境変数の指定を検証し、既定のロード順に並べたCog名を返します。"""
+    normalized = value.strip().casefold()
+    if normalized == "all":
+        return AVAILABLE_COG_NAMES
+    if normalized == "none":
+        return ()
+
+    requested_cogs = [name.strip().casefold() for name in value.split(",")]
+    if any(not name for name in requested_cogs):
+        message = f"{ENABLED_COGS_KEY} must be all, none, or a comma-separated list of Cog names"
+        raise ValueError(message)
+
+    duplicate_cogs = sorted({name for name in requested_cogs if requested_cogs.count(name) > 1})
+    if duplicate_cogs:
+        message = f"{ENABLED_COGS_KEY} contains duplicate Cog names: {', '.join(duplicate_cogs)}"
+        raise ValueError(message)
+
+    unknown_cogs = sorted(set(requested_cogs) - set(AVAILABLE_COG_NAMES))
+    if unknown_cogs:
+        message = f"{ENABLED_COGS_KEY} contains unknown Cog names: {', '.join(unknown_cogs)}"
+        raise ValueError(message)
+
+    requested_set = set(requested_cogs)
+    return tuple(name for name in AVAILABLE_COG_NAMES if name in requested_set)

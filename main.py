@@ -1,12 +1,14 @@
+from __future__ import annotations
+
 import json
 import os
 from logging import config, getLogger
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import dotenv
 from discord import Intents
 from discord.ext import commands
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from cogs import (
     admin,
@@ -26,29 +28,43 @@ from cogs import (
 )
 from cogs.chatbot.repositories.schema import CHATBOT_DATABASE_SCHEMA, create_chatbot_tables
 from core.db import create_session_factory, create_tables, dispose_engine, init_engine
-from core.debug_cogs import load_debug_cogs
-from core.runtime_environment import configure_runtime_environment, get_runtime_environment
+from core.runtime_environment import AVAILABLE_COG_NAMES, configure_runtime_environment, get_runtime_environment
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 
-async def load_all_cogs(
+async def load_cogs(
     bot: commands.Bot,
     session_factory: async_sessionmaker,
     chatbot_session_factory: async_sessionmaker,
+    enabled_cogs: tuple[str, ...],
 ) -> None:
-    await admin.setup(bot)
-    await agree.setup(bot)
-    await audit.setup(bot)
-    await api_usage.setup(bot, chatbot_session_factory)
-    await chatbot.setup(bot, chatbot_session_factory)
-    await hwh.setup(bot)
-    await monitor.setup(bot)
-    await moving.setup(bot)
-    await remind.setup(bot, session_factory)
-    await speak.setup(bot)
-    await spotify_embed.setup(bot)
-    await talkdata.setup(bot, session_factory)
-    await voice.setup(bot, session_factory)
-    await voicevox.setup(bot, session_factory)
+    """検証済みのCogだけを既定順にロードします。"""
+    loaders: dict[str, Callable[[], Awaitable[None]]] = {
+        "admin": lambda: admin.setup(bot),
+        "agree": lambda: agree.setup(bot),
+        "audit": lambda: audit.setup(bot),
+        "api_usage": lambda: api_usage.setup(bot, chatbot_session_factory),
+        "chatbot": lambda: chatbot.setup(bot, chatbot_session_factory),
+        "hwh": lambda: hwh.setup(bot),
+        "monitor": lambda: monitor.setup(bot),
+        "moving": lambda: moving.setup(bot),
+        "remind": lambda: remind.setup(bot, session_factory),
+        "speak": lambda: speak.setup(bot),
+        "spotify_embed": lambda: spotify_embed.setup(bot),
+        "talkdata": lambda: talkdata.setup(bot, session_factory),
+        "voice": lambda: voice.setup(bot, session_factory),
+        "voicevox": lambda: voicevox.setup(bot, session_factory),
+    }
+    if tuple(loaders) != AVAILABLE_COG_NAMES:
+        message = "Cog loader registry does not match AVAILABLE_COG_NAMES"
+        raise RuntimeError(message)
+
+    for cog_name in enabled_cogs:
+        await loaders[cog_name]()
 
 
 class MyBot(commands.Bot):
@@ -61,11 +77,8 @@ class MyBot(commands.Bot):
             search_path=f"{CHATBOT_DATABASE_SCHEMA},extensions,public",
         )
         self._chatbot_engine = chatbot_engine
-        if os.getenv("DEBUG", "").lower() == "true":
-            await load_debug_cogs(self, session_factory, chatbot_session_factory)
-        else:
-            await load_all_cogs(self, session_factory, chatbot_session_factory)
         runtime = get_runtime_environment()
+        await load_cogs(self, session_factory, chatbot_session_factory, runtime.enabled_cogs)
         if runtime.is_production:
             await create_tables()
             await create_chatbot_tables(chatbot_engine)
