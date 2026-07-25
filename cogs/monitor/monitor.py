@@ -148,7 +148,7 @@ class GateKeeper:
 
 
 class Monitor(commands.Cog):
-    reaction = app_commands.Group(name="reaction", description="リアクションを管理します。")
+    moderation = app_commands.Group(name="moderation", description="投稿とリアクションの制限を管理します。")
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -279,7 +279,7 @@ class Monitor(commands.Cog):
             message = await channel.fetch_message(payload.message_id)
             await message.remove_reaction(payload.emoji, member)
 
-    @reaction.command(name="ban", description="指定ユーザーのリアクションを制限します。")
+    @moderation.command(name="reaction_ban", description="指定ユーザーのリアクションを制限します。")
     async def reaction_ban(self, interaction: Interaction, user: Member) -> None:
         if user.id in self.reaction_banned_users:
             await interaction.response.send_message(f"{user.mention} のリアクションはすでに制限されています...", ephemeral=True)
@@ -287,7 +287,7 @@ class Monitor(commands.Cog):
         self.reaction_banned_users.add(user.id)
         await interaction.response.send_message(f"{user.mention} のリアクションを制限します...")
 
-    @reaction.command(name="unban", description="指定ユーザーのリアクション制限を解除します。")
+    @moderation.command(name="reaction_unban", description="指定ユーザーのリアクション制限を解除します。")
     async def reaction_unban(self, interaction: Interaction, user: Member) -> None:
         if user.id not in self.reaction_banned_users:
             await interaction.response.send_message(f"{user.mention} のリアクションは制限されていません...", ephemeral=True)
@@ -295,14 +295,14 @@ class Monitor(commands.Cog):
         self.reaction_banned_users.discard(user.id)
         await interaction.response.send_message(f"{user.mention} のリアクション制限を解除します...")
 
-    @reaction.command(name="remove", description="直近の自分の投稿に付いたリアクションを削除します。")
+    @moderation.command(name="reaction_remove", description="直近の自分の投稿に付いたリアクションを削除します。")
     async def remove_reactions(self, interaction: Interaction, user: Member | None = None) -> None:
         channel = self._require_text_channel(interaction.channel)
         await interaction.response.defer(thinking=True)
         await self._remove_reactions_from_history(channel, interaction.user.id, user)
         await interaction.followup.send("指定されたリアクションを削除しました 👌")
 
-    @reaction.command(name="remove_myself", description="直近のボットの投稿に付いたリアクションを削除します。")
+    @moderation.command(name="reaction_remove_bot", description="直近のボットの投稿に付いたリアクションを削除します。")
     async def remove_my_reactions(self, interaction: Interaction, user: Member | None = None) -> None:
         channel = self._require_text_channel(interaction.channel)
         if self.bot.user is None:
@@ -334,7 +334,7 @@ class Monitor(commands.Cog):
             )
         await asyncio.gather(*operations)
 
-    @app_commands.command(description="指定ユーザーのURL・添付投稿を制限します。")
+    @moderation.command(name="post_ban", description="指定ユーザーのURL・添付投稿を制限します。")
     async def ban(self, interaction: Interaction, user: Member) -> None:
         self._require_admin(interaction)
         if user.id in self.banned_users:
@@ -343,7 +343,7 @@ class Monitor(commands.Cog):
         self.banned_users.add(user.id)
         await interaction.response.send_message(f"{user.mention} の一部の投稿を制限します...")
 
-    @app_commands.command(description="指定ユーザーの投稿制限を解除します。")
+    @moderation.command(name="post_unban", description="指定ユーザーの投稿制限を解除します。")
     async def unban(self, interaction: Interaction, user: Member) -> None:
         self._require_admin(interaction)
         if user.id not in self.banned_users:
@@ -352,7 +352,7 @@ class Monitor(commands.Cog):
         self.banned_users.discard(user.id)
         await interaction.response.send_message(f"{user.mention} の投稿制限を解除します...")
 
-    @app_commands.command(description="禁止表現の検出時にリアクションするか自動削除するか切り替えます。")
+    @moderation.command(name="expression_config", description="禁止表現への対処方法を切り替えます。")
     async def global_ban_config(self, interaction: Interaction) -> None:
         self._require_admin(interaction)
         self.non_delete_mode = not self.non_delete_mode

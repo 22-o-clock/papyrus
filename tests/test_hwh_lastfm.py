@@ -1,18 +1,11 @@
 from datetime import UTC, datetime
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
-from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import AsyncMock
+from unittest import TestCase
 
 from discord import Colour
 
-from cogs.hwh.hwh import Patchwork
 from cogs.hwh.lastfm import extract_latest_track
 from core.tools.ebd import make_simple_embed
 from core.tools.utils import parse_comma_separated_values
-
-if TYPE_CHECKING:
-    from discord import Message
 
 
 class ExtractLatestTrackTest(TestCase):
@@ -54,29 +47,6 @@ class ParseCommaSeparatedValuesTest(TestCase):
     def test_strips_whitespace_and_empty_values(self) -> None:
         result = parse_comma_separated_values(" first, second ,,third ")
         if result != ["first", "second", "third"]:
-            raise AssertionError
-
-
-class StayFocusedMessageTest(IsolatedAsyncioTestCase):
-    async def test_deletes_message_without_arguments(self) -> None:
-        cog = object.__new__(Patchwork)
-        cog.prohibited_users = {1: {2}}
-        delete = AsyncMock()
-        message = cast(
-            "Message",
-            SimpleNamespace(
-                guild=SimpleNamespace(id=1),
-                author=SimpleNamespace(id=2),
-                delete=delete,
-            ),
-        )
-
-        await cog.on_message(message)
-
-        if delete.await_count != 1:
-            raise AssertionError
-        await_args = delete.await_args
-        if await_args is None or await_args.kwargs:
             raise AssertionError
 
 

@@ -1,10 +1,9 @@
-import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 from logging import getLogger
 
 import discord
-from discord import Interaction, Message, TextChannel, Thread, app_commands
+from discord import TextChannel, Thread
 from discord.ext import commands, tasks
 
 from core.runtime_environment import get_runtime_environment
@@ -38,8 +37,6 @@ class Patchwork(commands.Cog):
         self.lastfm_users = parse_comma_separated_values(os.environ.get("LASTFM_IDS"))
         self.lastfm_log_thread = int(os.environ["THREAD_ID_ANTHYME_LOG"]) if self.lastfm_users else None
         self.last_warned: dict[str, datetime] = {}
-        self.prohibited_users: dict[int, set[int]] = {}
-        self.focus_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -51,15 +48,6 @@ class Patchwork(commands.Cog):
 
     async def cog_unload(self) -> None:
         self.last_fm_update_warn.cancel()
-        for task in self.focus_tasks.values():
-            task.cancel()
-
-    @commands.Cog.listener()
-    async def on_message(self, message: Message) -> None:
-        if message.guild is None:
-            return
-        if message.author.id in self.prohibited_users.get(message.guild.id, set()):
-            await message.delete()
 
     @tasks.loop(minutes=10)
     async def last_fm_update_warn(self) -> None:
@@ -93,32 +81,6 @@ class Patchwork(commands.Cog):
             )
         )
         self.last_warned[user] = now
-
-    @app_commands.command(description="指定時間が経過するまで自身の新規投稿を禁止します。")
-    @app_commands.rename(minutes="min")
-    @app_commands.describe(minutes="投稿を禁止する分数")
-    async def stay_focused(self, interaction: Interaction, minutes: app_commands.Range[int, 1, 1440]) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
-            return
-
-        key = (interaction.guild.id, interaction.user.id)
-        if existing_task := self.focus_tasks.get(key):
-            existing_task.cancel()
-
-        self.prohibited_users.setdefault(interaction.guild.id, set()).add(interaction.user.id)
-        self.focus_tasks[key] = asyncio.create_task(self._release_focus(*key, minutes))
-        await interaction.response.send_message(f"{minutes} 分間、{interaction.user.mention} の新規投稿を禁止します 👌")
-
-    async def _release_focus(self, guild_id: int, user_id: int, minutes: int) -> None:
-        """指定時間後に投稿禁止を解除する。Cog停止時のキャンセルでは状態を破棄する。"""
-        try:
-            await asyncio.sleep(minutes * 60)
-        except asyncio.CancelledError:
-            return
-
-        self.prohibited_users.get(guild_id, set()).discard(user_id)
-        self.focus_tasks.pop((guild_id, user_id), None)
 
     @commands.Cog.listener("on_scheduled_event_create")
     async def event_create_notify(self, event: discord.ScheduledEvent) -> None:

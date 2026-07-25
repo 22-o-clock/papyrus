@@ -126,6 +126,8 @@ async def insert_channel_history(session: AsyncSession, channel: MessageChannel)
 
 
 class TalkData(commands.Cog):
+    talkdata = app_commands.Group(name="talkdata", description="保存済みのDiscordデータを管理します。")
+
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot = bot
         self.db = TalkDataDatabase(session_factory, get_runtime_environment().environment)
@@ -174,7 +176,7 @@ class TalkData(commands.Cog):
         async with self.db.session() as session:
             await insert_message(session, message)
 
-    @app_commands.command(description="サーバーのメンバー一覧をTalkDataへ登録します。")
+    @talkdata.command(name="member_upsert", description="サーバーのメンバー一覧を登録・更新します。")
     async def upsert_member(self, interaction: Interaction) -> None:
         self._require_admin(interaction)
         if interaction.guild is None:
@@ -198,7 +200,7 @@ class TalkData(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(description="サーバーのチャンネル一覧をTalkDataへ登録します。")
+    @talkdata.command(name="channel_upsert", description="サーバーのチャンネル一覧を登録・更新します。")
     async def upsert_channel(self, interaction: Interaction) -> None:
         self._require_admin(interaction)
         if interaction.guild is None:
@@ -227,7 +229,7 @@ class TalkData(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(description="現在のチャンネルの全メッセージをTalkDataへ登録します。")
+    @talkdata.command(name="messages_insert_current", description="現在のチャンネルの全メッセージを登録します。")
     async def insert_messages_in_this_channel(self, interaction: Interaction) -> None:
         self._require_admin(interaction)
         channel = _require_message_channel(interaction.channel)
@@ -236,7 +238,7 @@ class TalkData(commands.Cog):
             await insert_channel_history(session, channel)
         await interaction.followup.send("メッセージの登録が完了しました。", ephemeral=True)
 
-    @app_commands.command(description="全テキストチャンネルとスレッドのメッセージをTalkDataへ登録します。")
+    @talkdata.command(name="messages_insert_all", description="全チャンネルとスレッドのメッセージを登録します。")
     async def insert_all_messages(self, interaction: Interaction) -> None:
         self._require_admin(interaction)
         if interaction.guild is None:
@@ -271,7 +273,7 @@ class TalkData(commands.Cog):
                 body.extend(await self._format_message(session, interaction.guild.id, previous))
         await interaction.response.send_message("\n".join(body))
 
-    @app_commands.command(description="指定メンバーの削除・編集済みメッセージを表示します。")
+    @talkdata.command(name="message_history", description="指定メンバーの削除・編集済みメッセージを表示します。")
     @app_commands.describe(member="対象メンバー", start="開始時刻 YYYY-MM-DD HH-MM", end="終了時刻 YYYY-MM-DD HH-MM")
     async def get_depreciated_message(
         self,

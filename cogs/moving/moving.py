@@ -180,6 +180,8 @@ async def transport_messages_in_specified_period(
 
 
 class Moving(commands.Cog):
+    copy = app_commands.Group(name="copy", description="メッセージ履歴を別の場所へコピーします。")
+
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.admin_role_id = int(os.environ["ROLE_ID_BOT_ADMIN"])
@@ -191,7 +193,7 @@ class Moving(commands.Cog):
         error_message = "コマンドを実行するのに必要なロールがありません。"
         raise MissingRequiredRoleError(error_message)
 
-    @app_commands.command(description="現在のチャンネルまたはスレッドを新しいスレッドへ複製します。")
+    @copy.command(name="to_new_thread", description="現在の履歴を新しいスレッドへコピーします。")
     @app_commands.describe(channel="新規スレッドを作成するチャンネル", thread_name="新規スレッドの名称")
     async def duplicate_thread(self, interaction: Interaction, channel: TextChannel, thread_name: str) -> None:
         original = _require_message_channel(interaction.channel)
@@ -206,7 +208,7 @@ class Moving(commands.Cog):
         await destination.send(f"{source_name} {original.mention} を正常に複製しました 👌")
         await interaction.followup.send("お引越し終了! うまくできたかな…?")
 
-    @app_commands.command(description="現在のチャンネルまたはスレッドの全メッセージを移動先へ追記します。")
+    @copy.command(name="all", description="現在の全履歴を移動先へコピーします。")
     @app_commands.describe(destination="移動先のチャンネルまたはスレッド")
     async def postscript_thread(self, interaction: Interaction, destination: TextChannel | Thread) -> None:
         original = _require_message_channel(interaction.channel)
@@ -218,7 +220,7 @@ class Moving(commands.Cog):
         await destination.send(f"{source_name} {original.mention} のメッセージを正常に追加しました 👌")
         await interaction.followup.send("追記終了! うまくできたかな…?")
 
-    @app_commands.command(description="指定範囲のメッセージを移動先へ追記します。")
+    @copy.command(name="range", description="指定範囲のメッセージを移動先へコピーします。")
     @app_commands.describe(
         destination="移動先のチャンネルまたはスレッド",
         start_url="先頭メッセージのURL",

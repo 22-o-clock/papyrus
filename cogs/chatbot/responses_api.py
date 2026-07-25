@@ -30,7 +30,7 @@ from .prompt import (
 
 logger = getLogger(__name__)
 
-DRAFT_GENERATOR_MODEL = "gpt-5.6-terra"
+DRAFT_GENERATOR_MODEL = "gpt-5.6-luna"
 RESPONSE_JUDGMENT_MODEL = "gpt-5.4-nano"
 RESPONSE_JUDGMENT_TIMEOUT_SECONDS = 60.0
 COOLDOWN_STAGE_INSTRUCTIONS = {
@@ -46,8 +46,7 @@ COOLDOWN_STAGE_INSTRUCTIONS = {
         "Botの反応から15分以上経過しているか、まだ反応していません。通常の基準でnone、reaction、textを選んでください。"
     ),
 }
-CUSTOM_PROFILE_DEFAULT_MODEL = "gpt-5.6"
-MEMORY_EXTRACTION_MODEL = "gpt-5.6-terra"
+MEMORY_EXTRACTION_MODEL = "gpt-5.6-luna"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 REACTION_CONTEXT_INSTRUCTIONS = """
 
@@ -427,17 +426,6 @@ class ResponseAction(StrEnum):
     MESSAGE = "message"
 
 
-class ShadowReason(StrEnum):
-    """シャドー候補の行動判断を評価するための定型理由。"""
-
-    NATURAL_CONTRIBUTION = "natural_contribution"
-    HELPFUL_UNANSWERED_QUESTION = "helpful_unanswered_question"
-    AVOID_INTERRUPTING_HUMANS = "avoid_interrupting_humans"
-    NO_HELPFUL_CONTRIBUTION = "no_helpful_contribution"
-    IDENTITY_UNCERTAIN = "identity_uncertain"
-    COOLDOWN = "cooldown"
-
-
 class LLMMessage(BaseModel):
     """OpenAI APIによって生成されるメッセージのデータモデル。
 
@@ -453,7 +441,6 @@ class LLMMessage(BaseModel):
     content: str = ""
     reply_to_message_id: int | None = None
     reaction_emoji: str | None = None
-    shadow_reason: ShadowReason = ShadowReason.NATURAL_CONTRIBUTION
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> Self:
@@ -466,18 +453,6 @@ class LLMMessage(BaseModel):
             raise ValueError(msg)
         if self.action in (ResponseAction.REPLY, ResponseAction.MESSAGE) and not self.content.strip():
             msg = "text response action requires content"
-            raise ValueError(msg)
-        silence_reasons = {
-            ShadowReason.AVOID_INTERRUPTING_HUMANS,
-            ShadowReason.NO_HELPFUL_CONTRIBUTION,
-            ShadowReason.IDENTITY_UNCERTAIN,
-            ShadowReason.COOLDOWN,
-        }
-        if self.shadow_reason in silence_reasons and self.action is not ResponseAction.SILENCE:
-            msg = "the selected shadow_reason requires silence"
-            raise ValueError(msg)
-        if self.shadow_reason is ShadowReason.HELPFUL_UNANSWERED_QUESTION and self.action is ResponseAction.REACTION:
-            msg = "helpful_unanswered_question cannot use reaction"
             raise ValueError(msg)
         return self
 
@@ -498,7 +473,6 @@ class LLMMessage(BaseModel):
                 "content": self.content,
                 "reply_to_message_id": self.reply_to_message_id,
                 "reaction_emoji": self.reaction_emoji,
-                "shadow_reason": self.shadow_reason.value,
             },
             ensure_ascii=False,
             indent=2,
@@ -543,7 +517,6 @@ class ResponseGenerationOptions:
 
     response_mode: ResponseMode
     required_reply_to_message_id: int | None = None
-    is_unanswered_question: bool = False
     long_term_memory_context: str = ""
     custom_profile: CustomProfile | None = None
     resolved_member_aliases: dict[str, int] | None = None
@@ -701,7 +674,6 @@ class ResponseJudge:
         channel_role: ChannelRole,
         *,
         cooldown_stage: CooldownStage,
-        is_unanswered_question: bool,
         resolved_member_aliases: dict[str, int],
     ) -> ResponseJudgment:
         """外部ツールや長期記憶を使わずに自発反応の必要性を返します。"""
@@ -709,7 +681,6 @@ class ResponseJudge:
             {
                 "channel_role": channel_role.value,
                 "cooldown_stage": cooldown_stage.value,
-                "is_unanswered_question": is_unanswered_question,
                 **json.loads(
                     _serialize_response_context(
                         short_term_memory,
@@ -821,13 +792,6 @@ class DraftGenerator:
                 bot_name=self.bot_name,
                 channel_role=channel_role.value,
                 delivery_instruction=delivery_instruction,
-                unanswered_question_instruction=(
-                    "- この回答は、人間からの回答を待った宛先のない質問へのものです。"
-                    "短く明確に答えられる場合だけ応答してください。"
-                    "詳しい調査や長い説明が必要でも、まず短い要点を返してください。"
-                    if options.is_unanswered_question
-                    else ""
-                ),
             )
             + REACTION_CONTEXT_INSTRUCTIONS
         )
@@ -840,7 +804,7 @@ class DraftGenerator:
         model = DRAFT_GENERATOR_MODEL
         reasoning_effort = "medium"
         if custom_profile is not None:
-            model = CUSTOM_PROFILE_DEFAULT_MODEL if custom_profile.model == "system_default" else custom_profile.model
+            model = DRAFT_GENERATOR_MODEL if custom_profile.model == "system_default" else custom_profile.model
             reasoning_effort = "low"
             instructions += (
                 f"\n\nこのリクエストではカスタムプロファイル `{custom_profile.name}` が明示的に選択されています。"
@@ -972,7 +936,6 @@ class ResponsePipeline:
         channel_role: ChannelRole,
         *,
         cooldown_stage: CooldownStage,
-        is_unanswered_question: bool,
         resolved_member_aliases: dict[str, int],
     ) -> ResponseJudgment:
         """短期文脈に対する自発反応の要否を判定します。"""
@@ -980,6 +943,5 @@ class ResponsePipeline:
             self.short_term_memory,
             channel_role,
             cooldown_stage=cooldown_stage,
-            is_unanswered_question=is_unanswered_question,
             resolved_member_aliases=resolved_member_aliases,
         )

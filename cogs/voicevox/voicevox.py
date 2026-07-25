@@ -33,6 +33,8 @@ URL_PATTERN: Pattern[str] = re.compile(r"https?://")
 
 
 class Voicevox(commands.Cog):
+    voice = app_commands.Group(name="voice", description="ボイスチャンネルと読み上げ音声を管理します。")
+
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.bot: commands.Bot = bot
         self.db = VoiceVoxDatabase(session_factory)
@@ -94,7 +96,7 @@ class Voicevox(commands.Cog):
             vc.play(FFmpegPCMAudio(io.BytesIO(audio_data), pipe=True), after=lambda _: done.set())
             await done.wait()
 
-    @app_commands.command(description="botが再生している音声を一時停止します")
+    @voice.command(name="pause", description="botが再生している音声を一時停止します")
     async def pause(self, interaction: Interaction) -> None:
         try:
             vc: VoiceClient = get_voice_client_from_ctx(interaction)
@@ -104,7 +106,7 @@ class Voicevox(commands.Cog):
         vc.pause()
         await interaction.response.send_message("paused")
 
-    @app_commands.command(description="botを自身のいるボイスチャンネルに接続させます")
+    @voice.command(name="connect", description="botを自身のいるボイスチャンネルに接続させます")
     async def connect_vc(self, interaction: Interaction) -> None:
         try:
             ch: VoiceChannel | StageChannel = get_voice_channel_from_ctx(interaction)
@@ -119,7 +121,7 @@ class Voicevox(commands.Cog):
             return
         await interaction.response.send_message("connected")
 
-    @app_commands.command(description="botをボイスチャンネルから切断します")
+    @voice.command(name="disconnect", description="botをボイスチャンネルから切断します")
     async def disconnect_vc(self, interaction: Interaction) -> None:
         try:
             vc: VoiceClient = get_voice_client_from_ctx(interaction)
@@ -129,7 +131,7 @@ class Voicevox(commands.Cog):
         await vc.disconnect()
         await interaction.response.send_message("disconnected")
 
-    @app_commands.command(description="喋るキャラクターを指定します")
+    @voice.command(name="speaker_set", description="喋るキャラクターを指定します")
     async def set_speaker(self, interaction: Interaction, speaker: int) -> None:
         if speaker not in self.speakers_cache:
             await interaction.response.send_message("Invalid speaker_id", ephemeral=True)
@@ -147,7 +149,7 @@ class Voicevox(commands.Cog):
             if current.lower() in name.lower()
         ][:25]
 
-    @app_commands.command(description="現在の喋るキャラクターを表示します")
+    @voice.command(name="speaker_show", description="現在の喋るキャラクターを表示します")
     async def show_current_speaker(self, interaction: Interaction) -> None:
         speaker_id = self.character_for_member.get(interaction.user.id, DEFAULT_SPEAKER)
         speaker_name = self.speakers_cache.get(speaker_id, "Unknown Speaker")

@@ -25,9 +25,7 @@ from cogs.chatbot.services.response_policy import (
     get_available_referenced_author_id,
     get_cooldown_stage,
     get_response_debounce_seconds,
-    get_unanswered_question_wait_minutes,
     is_generation_current,
-    is_unaddressed_question,
     should_reset_conversation,
     should_respond,
 )
@@ -39,7 +37,6 @@ from cogs.chatbot.use_cases.admin_validation import (
 from cogs.chatbot.use_cases.conversation import (
     ConversationUseCases,
     get_mentioned_bot_role_ids,
-    should_defer_unanswered_question,
     should_enqueue_long_term_memory,
 )
 from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
@@ -246,13 +243,11 @@ class ChannelProcessingStateTest(unittest.TestCase):
             first_state,
             first_message,
             is_explicit_call=False,
-            is_unanswered_question=False,
         )
         second_claimed = claim_response_slot(
             second_state,
             second_message,
             is_explicit_call=False,
-            is_unanswered_question=False,
         )
 
         if not first_claimed or not second_claimed:
@@ -267,13 +262,11 @@ class ChannelProcessingStateTest(unittest.TestCase):
             state,
             first_message,
             is_explicit_call=False,
-            is_unanswered_question=False,
         )
         second_claimed = claim_response_slot(
             state,
             second_message,
             is_explicit_call=True,
-            is_unanswered_question=False,
         )
 
         if not first_claimed:
@@ -303,14 +296,12 @@ class ChannelProcessingStateTest(unittest.TestCase):
             state,
             explicit_message,
             is_explicit_call=True,
-            is_unanswered_question=False,
         )
 
         claim_response_slot(
             state,
             regular_message,
             is_explicit_call=False,
-            is_unanswered_question=False,
         )
 
         if state.queued_response_message is not explicit_message or not state.queued_response_is_explicit_call:
@@ -320,9 +311,9 @@ class ChannelProcessingStateTest(unittest.TestCase):
         state = ChannelProcessingState()
         first_message = make_discord_message(author_id=100)
         latest_message = make_discord_message(author_id=200)
-        claim_response_slot(state, first_message, is_explicit_call=True, is_unanswered_question=False)
+        claim_response_slot(state, first_message, is_explicit_call=True)
 
-        claim_response_slot(state, latest_message, is_explicit_call=True, is_unanswered_question=False)
+        claim_response_slot(state, latest_message, is_explicit_call=True)
 
         if state.queued_response_message is not latest_message or not state.queued_response_is_explicit_call:
             self.fail("複数の明示呼びかけが最新の投稿へ集約されていません")
@@ -366,25 +357,6 @@ class CooldownStageTest(unittest.TestCase):
             self.fail("Botが未反応のチャンネルでクールダウンが適用されています")
 
 
-class UnansweredQuestionDeferralTest(unittest.TestCase):
-    def test_defers_only_current_initial_unaddressed_question(self) -> None:
-        if not should_defer_unanswered_question(
-            delayed_attempt=False,
-            generation_current=True,
-            unaddressed=True,
-        ):
-            self.fail("初回のnone判定後に宛先のない質問を回答待ちへ移せません")
-
-        excluded_cases = (
-            {"delayed_attempt": True, "generation_current": True, "unaddressed": True},
-            {"delayed_attempt": False, "generation_current": False, "unaddressed": True},
-            {"delayed_attempt": False, "generation_current": True, "unaddressed": False},
-        )
-        for case in excluded_cases:
-            if should_defer_unanswered_question(**case):
-                self.fail("遅延済み、更新済み、または宛先ありの質問が再待機されます")
-
-
 class ConversationResetTest(unittest.TestCase):
     def test_resets_after_configured_interval_from_last_human_message(self) -> None:
         last_human_message_timestamp = datetime(2026, 7, 12, 9, 0, tzinfo=UTC)
@@ -407,44 +379,6 @@ class ConversationResetTest(unittest.TestCase):
 
         if should_reset:
             self.fail("過去の人間投稿がないチャンネルで会話をリセットします")
-
-
-class UnaddressedQuestionTest(unittest.TestCase):
-    def test_detects_question_mark_and_japanese_question_ending(self) -> None:
-        question_mark_result = is_unaddressed_question(
-            content="これは何ですか\uff1f",
-            is_reply=False,
-            mentioned_user_ids=[],
-        )
-        ending_result = is_unaddressed_question(
-            content="これは何ですか",
-            is_reply=False,
-            mentioned_user_ids=[],
-        )
-
-        if not question_mark_result or not ending_result:
-            self.fail("宛先のない疑問文を待機対象として検出できません")
-
-    def test_ignores_question_addressed_to_user_or_reply_target(self) -> None:
-        mentioned_user_result = is_unaddressed_question(
-            content="@誰か これは何ですか\uff1f",
-            is_reply=False,
-            mentioned_user_ids=[100],
-        )
-        reply_result = is_unaddressed_question(
-            content="これは何ですか\uff1f",
-            is_reply=True,
-            mentioned_user_ids=[],
-        )
-
-        if mentioned_user_result or reply_result:
-            self.fail("宛先のある質問を待機対象にしています")
-
-    def test_selects_wait_within_configured_range(self) -> None:
-        wait_minutes = get_unanswered_question_wait_minutes(1, 2)
-
-        if wait_minutes not in (1, 2):
-            self.fail("質問への待機時間が設定範囲を外れています")
 
 
 class ReferencedAuthorTest(unittest.TestCase):

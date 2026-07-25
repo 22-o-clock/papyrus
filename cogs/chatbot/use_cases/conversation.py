@@ -15,7 +15,6 @@ from cogs.chatbot.repositories.custom_profile import CustomProfileRepository
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
 from cogs.chatbot.repositories.long_term_memory import ChatbotLongTermMemoryRepository
 from cogs.chatbot.repositories.member_alias import ChatbotMemberAliasRepository, find_member_aliases
-from cogs.chatbot.repositories.shadow_candidate import ChatbotShadowCandidateRepository, ShadowCandidateInput
 from cogs.chatbot.repositories.short_term_message import (
     ChatbotShortTermMessageRepository,
     StoredAttachmentInput,
@@ -44,13 +43,10 @@ from cogs.chatbot.services.response_policy import (
     get_available_referenced_author_id,
     get_cooldown_stage,
     get_response_debounce_seconds,
-    get_unanswered_question_wait_minutes,
     is_generation_current,
-    is_unaddressed_question,
     should_reset_conversation,
     should_respond,
 )
-from cogs.chatbot.shadow_mode import ShadowModeManager
 from core.runtime_environment import RuntimeEnvironment, get_runtime_environment
 
 from .attachment import AttachmentUseCases
@@ -77,13 +73,7 @@ class _ResponseSelectionRequest:
 
     generation_revision: int
     is_explicit_call: bool
-    is_unanswered_question: bool
     resolved_member_aliases: dict[str, int]
-
-
-def should_defer_unanswered_question(*, delayed_attempt: bool, generation_current: bool, unaddressed: bool) -> bool:
-    """初回の有効な判定で反応不要だった宛先のない質問だけを待機対象にします。"""
-    return not delayed_attempt and generation_current and unaddressed
 
 
 def get_generation_failure_message(error: Exception) -> str:
@@ -125,14 +115,11 @@ class ConversationUseCases:
         self.response_pipelines: dict[int, ResponsePipeline] = {}
         self.environment_repository = DatabaseEnvironmentRepository(session_factory)
         self.channel_role_manager = ChannelRoleManager(self.environment_repository)
-        self.shadow_mode_manager = ShadowModeManager(self.environment_repository)
         self.settings_use_cases = SettingsUseCases(
             self.environment_repository,
             self.channel_role_manager,
-            self.shadow_mode_manager,
             self.runtime_environment,
         )
-        self.shadow_candidate_repository = ChatbotShadowCandidateRepository(session_factory)
         self.short_term_message_repository = ChatbotShortTermMessageRepository(session_factory)
         self.long_term_memory_repository = ChatbotLongTermMemoryRepository(session_factory)
         self.member_alias_repository = ChatbotMemberAliasRepository(session_factory)
@@ -232,10 +219,8 @@ class ConversationUseCases:
         return self._channel_states[channel_id]
 
     async def on_ready(self) -> None:
-        """サーバー共通の待機時間設定を読み込みます。"""
-        if not await self.settings_use_cases.initialize():
-            self._history_sync_complete.set()
-            return
+        """保存済み設定を読み込み、会話履歴を初期化します。"""
+        await self.settings_use_cases.initialize()
         self._history_sync_complete.clear()
         if self.runtime_environment.is_debug:
             logger.info("Skipped chatbot Discord history sync in debug environment")
@@ -385,8 +370,6 @@ class ConversationUseCases:
                 await message.reply("カスタムプロファイルを一時的に利用できません。しばらくしてから再度お試しください。")
                 return
 
-        await self._cancel_unanswered_question_wait(state)
-
         response_required = should_respond(
             role,
             mentioned_bot=mentioned_bot,
@@ -398,7 +381,6 @@ class ConversationUseCases:
             role,
             options=ResponseRequestOptions(
                 is_explicit_call=is_explicit_call,
-                is_unanswered_question=False,
                 custom_profile=custom_profile,
             ),
         )
@@ -428,7 +410,6 @@ class ConversationUseCases:
                         state,
                         response_message,
                         is_explicit_call=options.is_explicit_call,
-                        is_unanswered_question=options.is_unanswered_question,
                         custom_profile=options.custom_profile,
                     )
                 return
@@ -436,7 +417,6 @@ class ConversationUseCases:
             if response_message is not None and (options.is_explicit_call or not state.debounced_response_is_explicit_call):
                 state.debounced_response_message = response_message
                 state.debounced_response_is_explicit_call = options.is_explicit_call
-                state.debounced_response_is_unanswered_question = options.is_unanswered_question
                 state.debounced_custom_profile = options.custom_profile
             if state.debounced_response_message is None:
                 return
@@ -468,18 +448,15 @@ class ConversationUseCases:
 
             message = state.debounced_response_message
             is_explicit_call = state.debounced_response_is_explicit_call
-            is_unanswered_question = state.debounced_response_is_unanswered_question
             custom_profile = state.debounced_custom_profile
             state.debounce_task = None
             state.debounced_response_message = None
             state.debounced_response_is_explicit_call = False
-            state.debounced_response_is_unanswered_question = False
             state.debounced_custom_profile = None
             if message is None or not claim_response_slot(
                 state,
                 message,
                 is_explicit_call=is_explicit_call,
-                is_unanswered_question=is_unanswered_question,
                 custom_profile=custom_profile,
             ):
                 return
@@ -488,78 +465,11 @@ class ConversationUseCases:
             message,
             state,
             is_explicit_call=is_explicit_call,
-            is_unanswered_question=is_unanswered_question,
             custom_profile=custom_profile,
         )
 
-    async def _schedule_unanswered_question_wait(self, message: Message, state: ChannelProcessingState) -> None:
-        """宛先のない質問への回答を、人間の反応を優先して遅延させます。"""
-        async with state.lock:
-            if state.debounce_task is not None and not state.debounced_response_is_explicit_call:
-                state.debounce_task.cancel()
-                state.debounce_task = None
-                state.debounced_response_message = None
-                state.debounced_response_is_unanswered_question = False
-                state.debounced_custom_profile = None
-
-            wait_minutes = get_unanswered_question_wait_minutes(
-                self.settings_use_cases.unanswered_question_minimum_wait_minutes,
-                self.settings_use_cases.unanswered_question_maximum_wait_minutes,
-            )
-            task = asyncio.create_task(self._answer_unanswered_question_after_wait(message, state, wait_minutes))
-            state.unanswered_question_task = task
-            state.unanswered_question_message_id = message.id
-
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
-    async def _cancel_unanswered_question_wait(self, state: ChannelProcessingState) -> None:
-        """新しい人間投稿を受けたため、待機中の宛先のない質問への回答を取り消します。"""
-        async with state.lock:
-            if state.unanswered_question_task is not None:
-                state.unanswered_question_task.cancel()
-            state.unanswered_question_task = None
-            state.unanswered_question_message_id = None
-
-    async def _answer_unanswered_question_after_wait(
-        self,
-        message: Message,
-        state: ChannelProcessingState,
-        wait_minutes: int,
-    ) -> None:
-        """待機後も質問が有効なら、短く答えられる場合だけ回答を生成します。"""
-        try:
-            await asyncio.sleep(datetime.timedelta(minutes=wait_minutes).total_seconds())
-        except asyncio.CancelledError:
-            return
-
-        role = await self.channel_role_manager.get_role(message.channel.id)
-        if role is not ChannelRole.CHAT:
-            return
-
-        async with state.lock:
-            if state.unanswered_question_task is not asyncio.current_task():
-                return
-            state.unanswered_question_task = None
-            state.unanswered_question_message_id = None
-            if not claim_response_slot(
-                state,
-                message,
-                is_explicit_call=False,
-                is_unanswered_question=True,
-            ):
-                return
-
-        await self._process_response_queue(
-            message,
-            state,
-            is_explicit_call=False,
-            is_unanswered_question=True,
-            custom_profile=None,
-        )
-
     async def on_message_delete(self, message: Message) -> None:
-        """待機中の質問が削除された場合は、遅延した回答を取り消します。"""
+        """削除された投稿を短期保存と現在の短期記憶から除去します。"""
         if not self.runtime_environment.should_process_chatbot_channel(message.channel.id):
             return
         await self.short_term_message_repository.delete(message.id)
@@ -571,12 +481,6 @@ class ConversationUseCases:
 
         async with state.lock:
             self.response_pipelines[message.channel.id].short_term_memory.remove(message.id)
-            if state.unanswered_question_message_id != message.id:
-                return
-            if state.unanswered_question_task is not None:
-                state.unanswered_question_task.cancel()
-            state.unanswered_question_task = None
-            state.unanswered_question_message_id = None
 
     async def on_message_edit(self, before: Message, after: Message) -> None:
         """編集された投稿を短期保存と現在の短期記憶へ反映します。"""
@@ -674,13 +578,11 @@ class ConversationUseCases:
         state: ChannelProcessingState,
         *,
         is_explicit_call: bool,
-        is_unanswered_question: bool,
         custom_profile: CustomProfile | None,
     ) -> None:
         """同一チャンネルの返信要求を順番に生成し、保留メッセージを文脈へ反映します。"""
         current_message = message
         current_is_explicit_call = is_explicit_call
-        current_is_unanswered_question = is_unanswered_question
         current_custom_profile = custom_profile
         completed_normally = False
         try:
@@ -689,7 +591,6 @@ class ConversationUseCases:
                     current_message,
                     state,
                     is_explicit_call=current_is_explicit_call,
-                    is_unanswered_question=current_is_unanswered_question,
                     custom_profile=current_custom_profile,
                 )
 
@@ -697,11 +598,9 @@ class ConversationUseCases:
                     await self._flush_pending_messages(state)
                     next_message = state.queued_response_message
                     next_is_explicit_call = state.queued_response_is_explicit_call
-                    next_is_unanswered_question = state.queued_response_is_unanswered_question
                     next_custom_profile = state.queued_custom_profile
                     state.queued_response_message = None
                     state.queued_response_is_explicit_call = False
-                    state.queued_response_is_unanswered_question = False
                     state.queued_custom_profile = None
                     if next_message is None:
                         state.generating = False
@@ -710,13 +609,11 @@ class ConversationUseCases:
                         return
                     current_message = next_message
                     current_is_explicit_call = next_is_explicit_call
-                    current_is_unanswered_question = next_is_unanswered_question
                     current_custom_profile = next_custom_profile
                     activate_response(
                         state,
                         current_message,
                         is_explicit_call=current_is_explicit_call,
-                        is_unanswered_question=current_is_unanswered_question,
                         custom_profile=current_custom_profile,
                     )
         finally:
@@ -725,7 +622,6 @@ class ConversationUseCases:
                     await self._flush_pending_messages(state)
                     state.queued_response_message = None
                     state.queued_response_is_explicit_call = False
-                    state.queued_response_is_unanswered_question = False
                     state.queued_custom_profile = None
                     state.generating = False
                     self._clear_active_response(state)
@@ -735,7 +631,6 @@ class ConversationUseCases:
         """処理済みの応答要求を状態から除去します。"""
         state.active_response_message = None
         state.active_response_is_explicit_call = False
-        state.active_response_is_unanswered_question = False
         state.active_custom_profile = None
 
     async def _flush_pending_messages(self, state: ChannelProcessingState) -> None:
@@ -859,7 +754,6 @@ class ConversationUseCases:
         state: ChannelProcessingState,
         *,
         is_explicit_call: bool,
-        is_unanswered_question: bool,
         custom_profile: CustomProfile | None,
     ) -> None:
         """要否判定後に回答を生成し、文脈が更新されていなければ送信します。"""
@@ -874,17 +768,10 @@ class ConversationUseCases:
             _ResponseSelectionRequest(
                 generation_revision=generation_revision,
                 is_explicit_call=is_explicit_call,
-                is_unanswered_question=is_unanswered_question,
                 resolved_member_aliases=resolved_member_aliases,
             ),
         )
         if response_mode is None:
-            await self._defer_unanswered_question_after_none(
-                message,
-                state,
-                generation_revision=generation_revision,
-                is_unanswered_question=is_unanswered_question,
-            )
             return
 
         async def generate_response() -> LLMMessage:
@@ -894,7 +781,6 @@ class ConversationUseCases:
                 ResponseGenerationOptions(
                     response_mode=response_mode,
                     required_reply_to_message_id=required_reply_to_message_id,
-                    is_unanswered_question=is_unanswered_question,
                     long_term_memory_context=long_term_memory_context,
                     custom_profile=custom_profile,
                     resolved_member_aliases=resolved_member_aliases,
@@ -928,41 +814,9 @@ class ConversationUseCases:
         async with state.lock:
             if not is_generation_current(state, generation_revision):
                 return
-            if await self._is_shadow_mode_for_message(message, is_explicit_call=is_explicit_call):
-                await self._save_shadow_candidate(message, generated_response)
-                return
             await self.execute_response_action(message, generated_response, state)
             if is_explicit_call:
                 state.active_response_is_explicit_call = False
-
-    async def _defer_unanswered_question_after_none(
-        self,
-        message: Message,
-        state: ChannelProcessingState,
-        *,
-        generation_revision: int,
-        is_unanswered_question: bool,
-    ) -> None:
-        """初回判定で反応不要だった宛先のない質問だけを、人間の回答待ちへ移します。"""
-        unaddressed = is_unaddressed_question(
-            content=message.clean_content,
-            is_reply=message.type == discord.MessageType.reply,
-            mentioned_user_ids=[user.id for user in message.mentions],
-        )
-        async with state.lock:
-            generation_current = is_generation_current(state, generation_revision)
-        if not should_defer_unanswered_question(
-            delayed_attempt=is_unanswered_question,
-            generation_current=generation_current,
-            unaddressed=unaddressed,
-        ):
-            return
-        logger.info(
-            "Deferred unanswered question after none judgment (channel_id=%s, trigger_message_id=%s)",
-            message.channel.id,
-            message.id,
-        )
-        await self._schedule_unanswered_question_wait(message, state)
 
     async def _select_response_mode(
         self,
@@ -984,7 +838,6 @@ class ConversationUseCases:
         judgment = await self.response_pipelines[message.channel.id].judge_response(
             role,
             cooldown_stage=cooldown_stage,
-            is_unanswered_question=request.is_unanswered_question,
             resolved_member_aliases=request.resolved_member_aliases,
         )
         logger.info(
@@ -1055,27 +908,3 @@ class ConversationUseCases:
 
         await reply_with_split_response(target_message, response.content)
         state.last_action_at = now
-
-    async def _is_shadow_mode_for_message(self, message: Message, *, is_explicit_call: bool) -> bool:
-        """明示依頼以外のchat役割でシャドーモードを適用するか判定します。"""
-        if is_explicit_call:
-            return False
-        role = await self.channel_role_manager.get_role(message.channel.id)
-        return role is ChannelRole.CHAT and await self.shadow_mode_manager.is_enabled(message.channel.id)
-
-    async def _save_shadow_candidate(self, message: Message, response: LLMMessage) -> None:
-        """モデルが選んだ自発反応を、投稿せず評価用候補として保存します。"""
-        short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
-        await self.shadow_candidate_repository.save(
-            ShadowCandidateInput(
-                channel_id=message.channel.id,
-                trigger_message_id=message.id,
-                action=response.action.value,
-                reply_to_message_id=response.reply_to_message_id,
-                content=response.content,
-                reaction_emoji=response.reaction_emoji,
-                reason=response.shadow_reason.value,
-                context_message_ids=[memory_message.message_id for memory_message in short_term_memory.memory],
-                context_snapshot=[memory_message.to_dict() for memory_message in short_term_memory.memory],
-            )
-        )
