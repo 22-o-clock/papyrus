@@ -30,7 +30,7 @@ from .prompt import (
 
 logger = getLogger(__name__)
 
-DRAFT_GENERATOR_MODEL = "gpt-5.6-terra"
+DRAFT_GENERATOR_MODEL = "gpt-5.6-luna"
 RESPONSE_JUDGMENT_MODEL = "gpt-5.4-nano"
 RESPONSE_JUDGMENT_TIMEOUT_SECONDS = 60.0
 COOLDOWN_STAGE_INSTRUCTIONS = {
@@ -46,8 +46,7 @@ COOLDOWN_STAGE_INSTRUCTIONS = {
         "Botの反応から15分以上経過しているか、まだ反応していません。通常の基準でnone、reaction、textを選んでください。"
     ),
 }
-CUSTOM_PROFILE_DEFAULT_MODEL = "gpt-5.6"
-MEMORY_EXTRACTION_MODEL = "gpt-5.6-terra"
+MEMORY_EXTRACTION_MODEL = "gpt-5.6-luna"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 REACTION_CONTEXT_INSTRUCTIONS = """
 
@@ -805,7 +804,7 @@ class DraftGenerator:
         model = DRAFT_GENERATOR_MODEL
         reasoning_effort = "medium"
         if custom_profile is not None:
-            model = CUSTOM_PROFILE_DEFAULT_MODEL if custom_profile.model == "system_default" else custom_profile.model
+            model = DRAFT_GENERATOR_MODEL if custom_profile.model == "system_default" else custom_profile.model
             reasoning_effort = "low"
             instructions += (
                 f"\n\nこのリクエストではカスタムプロファイル `{custom_profile.name}` が明示的に選択されています。"

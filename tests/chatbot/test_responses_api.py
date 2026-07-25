@@ -345,7 +345,7 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
         if judgment.response_mode is not ResponseMode.NONE:
             self.fail("nano障害時に自発反応がfail-closedになっていません")
 
-    async def test_generates_final_text_response_with_terra(self) -> None:
+    async def test_generates_final_text_response_with_luna(self) -> None:
         responses = FakeResponses()
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
         pipeline = ResponsePipeline(client, "Bot")
@@ -362,11 +362,11 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
         )
 
         if generated.content != "短い返答":
-            self.fail("Terraで生成した回答が最終結果になっていません")
+            self.fail("Lunaで生成した回答が最終結果になっていません")
         if len(responses.calls) != 1:
             self.fail("最終回答の生成でモデルが複数回呼び出されています")
-        if responses.calls[0]["model"] != "gpt-5.6-terra":
-            self.fail("最終回答がTerraで生成されていません")
+        if responses.calls[0]["model"] != "gpt-5.6-luna":
+            self.fail("最終回答がLunaで生成されていません")
         if responses.calls[0]["reasoning"] != {"effort": "medium"}:
             self.fail("通常会話の推論強度が既存のmediumから変更されています")
         if "てすたろう" not in str(responses.calls[0]["input"]):
@@ -448,8 +448,8 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
         )
 
         call = responses.calls[0]
-        if call["model"] != "gpt-5.6":
-            self.fail("optionのsystem_defaultがgpt-5.6へ解決されていません")
+        if call["model"] != "gpt-5.6-luna":
+            self.fail("optionのsystem_defaultがChatbotの既定モデルへ解決されていません")
         if call["reasoning"] != {"effort": "low"}:
             self.fail("option指定時の推論強度がlowになっていません")
         if "詩的な表現を使用する。" not in str(call["instructions"]):
@@ -544,14 +544,14 @@ class ConfigRecordingResponses:
 
 
 class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
-    async def test_extracts_memories_with_terra_without_reasoning(self) -> None:
+    async def test_extracts_memories_with_luna_without_reasoning(self) -> None:
         responses = ConfigRecordingResponses(SimpleNamespace(candidates=[]))
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
 
         await LongTermMemoryExtractor(client).extract([], [])
 
-        if responses.calls[0]["model"] != "gpt-5.6-terra":
-            self.fail("記憶抽出がTerraを使用していません")
+        if responses.calls[0]["model"] != "gpt-5.6-luna":
+            self.fail("記憶抽出がLunaを使用していません")
         if responses.calls[0]["reasoning"] != {"effort": "none"}:
             self.fail("記憶抽出の推論強度がnoneになっていません")
 
@@ -583,13 +583,13 @@ class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
         if "reactions" in serialized_input["messages"][0]:
             self.fail("リアクションが長期記憶抽出へ渡されています")
 
-    async def test_reconciles_memories_with_terra_without_reasoning(self) -> None:
+    async def test_reconciles_memories_with_luna_without_reasoning(self) -> None:
         responses = ConfigRecordingResponses(SimpleNamespace(action="keep", existing_memory_ids=[]))
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
 
         await LongTermMemoryReconciler(client).reconcile({}, [{}], correction_only=False)
 
-        if responses.calls[0]["model"] != "gpt-5.6-terra":
-            self.fail("記憶の訂正・競合判定がTerraを使用していません")
+        if responses.calls[0]["model"] != "gpt-5.6-luna":
+            self.fail("記憶の訂正・競合判定がLunaを使用していません")
         if responses.calls[0]["reasoning"] != {"effort": "none"}:
             self.fail("記憶の訂正・競合判定の推論強度がnoneになっていません")
