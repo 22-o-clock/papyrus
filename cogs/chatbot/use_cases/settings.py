@@ -14,7 +14,6 @@ from cogs.chatbot.constants import (
 )
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
 from cogs.chatbot.services.response_policy import can_change_channel_role
-from cogs.chatbot.shadow_mode import ShadowModeManager
 from core.runtime_environment import RuntimeEnvironment
 
 logger = getLogger(__name__)
@@ -27,12 +26,10 @@ class SettingsUseCases:
         self,
         environment_repository: DatabaseEnvironmentRepository,
         role_manager: ChannelRoleManager,
-        shadow_mode_manager: ShadowModeManager,
         runtime_environment: RuntimeEnvironment,
     ) -> None:
         self._environment_repository = environment_repository
         self._role_manager = role_manager
-        self._shadow_mode_manager = shadow_mode_manager
         self._runtime_environment = runtime_environment
         self.conversation_reset_minutes = DEFAULT_CONVERSATION_RESET_MINUTES
         self.unanswered_question_minimum_wait_minutes = DEFAULT_UNANSWERED_QUESTION_MINIMUM_WAIT_MINUTES
@@ -169,23 +166,6 @@ class SettingsUseCases:
             f"{interaction.user.mention} がこの{target_name}固有の設定を解除しました。"
             f"現在は `{role.value}` です。設定元: 既定値。"
         )
-
-    async def set_shadow_mode(self, interaction: discord.Interaction, *, enabled: bool) -> None:
-        if not await self._validate_chatbot_channel(interaction):
-            return
-        channel_id = interaction.channel_id
-        if channel_id is None:
-            await interaction.response.send_message("チャンネル情報を取得できませんでした。", ephemeral=True)
-            return
-        is_thread = isinstance(interaction.channel, discord.Thread)
-        if not can_change_channel_role(is_thread=is_thread, manage_channels=interaction.permissions.manage_channels):
-            await interaction.response.send_message(
-                "通常チャンネルのシャドーモード変更には「チャンネルの管理」権限が必要です。", ephemeral=True
-            )
-            return
-        await self._shadow_mode_manager.set_enabled(channel_id, enabled=enabled)
-        state_text = "有効" if enabled else "無効"
-        await interaction.response.send_message(f"このチャンネルのChatbotシャドーモードを{state_text}にしました。")
 
     async def _validate_chatbot_channel(self, interaction: discord.Interaction) -> bool:
         """実行環境でChatbot処理を許可したチャンネルだけを受け付けます。"""

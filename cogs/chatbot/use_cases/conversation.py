@@ -15,7 +15,6 @@ from cogs.chatbot.repositories.custom_profile import CustomProfileRepository
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
 from cogs.chatbot.repositories.long_term_memory import ChatbotLongTermMemoryRepository
 from cogs.chatbot.repositories.member_alias import ChatbotMemberAliasRepository, find_member_aliases
-from cogs.chatbot.repositories.shadow_candidate import ChatbotShadowCandidateRepository, ShadowCandidateInput
 from cogs.chatbot.repositories.short_term_message import (
     ChatbotShortTermMessageRepository,
     StoredAttachmentInput,
@@ -50,7 +49,6 @@ from cogs.chatbot.services.response_policy import (
     should_reset_conversation,
     should_respond,
 )
-from cogs.chatbot.shadow_mode import ShadowModeManager
 from core.runtime_environment import RuntimeEnvironment, get_runtime_environment
 
 from .attachment import AttachmentUseCases
@@ -125,14 +123,11 @@ class ConversationUseCases:
         self.response_pipelines: dict[int, ResponsePipeline] = {}
         self.environment_repository = DatabaseEnvironmentRepository(session_factory)
         self.channel_role_manager = ChannelRoleManager(self.environment_repository)
-        self.shadow_mode_manager = ShadowModeManager(self.environment_repository)
         self.settings_use_cases = SettingsUseCases(
             self.environment_repository,
             self.channel_role_manager,
-            self.shadow_mode_manager,
             self.runtime_environment,
         )
-        self.shadow_candidate_repository = ChatbotShadowCandidateRepository(session_factory)
         self.short_term_message_repository = ChatbotShortTermMessageRepository(session_factory)
         self.long_term_memory_repository = ChatbotLongTermMemoryRepository(session_factory)
         self.member_alias_repository = ChatbotMemberAliasRepository(session_factory)
@@ -928,9 +923,6 @@ class ConversationUseCases:
         async with state.lock:
             if not is_generation_current(state, generation_revision):
                 return
-            if await self._is_shadow_mode_for_message(message, is_explicit_call=is_explicit_call):
-                await self._save_shadow_candidate(message, generated_response)
-                return
             await self.execute_response_action(message, generated_response, state)
             if is_explicit_call:
                 state.active_response_is_explicit_call = False
@@ -1055,27 +1047,3 @@ class ConversationUseCases:
 
         await reply_with_split_response(target_message, response.content)
         state.last_action_at = now
-
-    async def _is_shadow_mode_for_message(self, message: Message, *, is_explicit_call: bool) -> bool:
-        """明示依頼以外のchat役割でシャドーモードを適用するか判定します。"""
-        if is_explicit_call:
-            return False
-        role = await self.channel_role_manager.get_role(message.channel.id)
-        return role is ChannelRole.CHAT and await self.shadow_mode_manager.is_enabled(message.channel.id)
-
-    async def _save_shadow_candidate(self, message: Message, response: LLMMessage) -> None:
-        """モデルが選んだ自発反応を、投稿せず評価用候補として保存します。"""
-        short_term_memory = self.response_pipelines[message.channel.id].short_term_memory
-        await self.shadow_candidate_repository.save(
-            ShadowCandidateInput(
-                channel_id=message.channel.id,
-                trigger_message_id=message.id,
-                action=response.action.value,
-                reply_to_message_id=response.reply_to_message_id,
-                content=response.content,
-                reaction_emoji=response.reaction_emoji,
-                reason=response.shadow_reason.value,
-                context_message_ids=[memory_message.message_id for memory_message in short_term_memory.memory],
-                context_snapshot=[memory_message.to_dict() for memory_message in short_term_memory.memory],
-            )
-        )

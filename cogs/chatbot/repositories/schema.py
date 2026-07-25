@@ -16,7 +16,6 @@ from .long_term_memory import (
 )
 from .member_alias import ChatbotMemberAlias, ChatbotMemberAliasEvidence, ChatbotMemberAliasHistory
 from .memory_extraction_queue import ChatbotMemoryExtractionQueue
-from .shadow_candidate import ChatbotShadowCandidate, ChatbotShadowEvaluation
 from .short_term_message import ChatbotStoredAttachment, ChatbotStoredMessage, ChatbotStoredReactionSnapshot
 
 REGISTERED_MODELS: tuple[type[ChatbotBase], ...] = (
@@ -32,8 +31,6 @@ REGISTERED_MODELS: tuple[type[ChatbotBase], ...] = (
     ChatbotMemberAliasEvidence,
     ChatbotMemberAliasHistory,
     ChatbotMemoryExtractionQueue,
-    ChatbotShadowCandidate,
-    ChatbotShadowEvaluation,
     ChatbotStoredAttachment,
     ChatbotStoredMessage,
     ChatbotStoredReactionSnapshot,

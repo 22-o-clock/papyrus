@@ -427,17 +427,6 @@ class ResponseAction(StrEnum):
     MESSAGE = "message"
 
 
-class ShadowReason(StrEnum):
-    """シャドー候補の行動判断を評価するための定型理由。"""
-
-    NATURAL_CONTRIBUTION = "natural_contribution"
-    HELPFUL_UNANSWERED_QUESTION = "helpful_unanswered_question"
-    AVOID_INTERRUPTING_HUMANS = "avoid_interrupting_humans"
-    NO_HELPFUL_CONTRIBUTION = "no_helpful_contribution"
-    IDENTITY_UNCERTAIN = "identity_uncertain"
-    COOLDOWN = "cooldown"
-
-
 class LLMMessage(BaseModel):
     """OpenAI APIによって生成されるメッセージのデータモデル。
 
@@ -453,7 +442,6 @@ class LLMMessage(BaseModel):
     content: str = ""
     reply_to_message_id: int | None = None
     reaction_emoji: str | None = None
-    shadow_reason: ShadowReason = ShadowReason.NATURAL_CONTRIBUTION
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> Self:
@@ -466,18 +454,6 @@ class LLMMessage(BaseModel):
             raise ValueError(msg)
         if self.action in (ResponseAction.REPLY, ResponseAction.MESSAGE) and not self.content.strip():
             msg = "text response action requires content"
-            raise ValueError(msg)
-        silence_reasons = {
-            ShadowReason.AVOID_INTERRUPTING_HUMANS,
-            ShadowReason.NO_HELPFUL_CONTRIBUTION,
-            ShadowReason.IDENTITY_UNCERTAIN,
-            ShadowReason.COOLDOWN,
-        }
-        if self.shadow_reason in silence_reasons and self.action is not ResponseAction.SILENCE:
-            msg = "the selected shadow_reason requires silence"
-            raise ValueError(msg)
-        if self.shadow_reason is ShadowReason.HELPFUL_UNANSWERED_QUESTION and self.action is ResponseAction.REACTION:
-            msg = "helpful_unanswered_question cannot use reaction"
             raise ValueError(msg)
         return self
 
@@ -498,7 +474,6 @@ class LLMMessage(BaseModel):
                 "content": self.content,
                 "reply_to_message_id": self.reply_to_message_id,
                 "reaction_emoji": self.reaction_emoji,
-                "shadow_reason": self.shadow_reason.value,
             },
             ensure_ascii=False,
             indent=2,

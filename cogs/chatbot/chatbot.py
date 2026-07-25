@@ -129,24 +129,6 @@ class ChatBot(commands.Cog):
     async def list_chatbot_profiles(self, interaction: discord.Interaction) -> None:
         await self.custom_profile_use_cases.list_enabled(interaction)
 
-    @app_commands.command(name="set_chatbot_shadow_mode", description="このチャンネルのChatbotシャドーモードを変更します")
-    async def set_chatbot_shadow_mode(self, interaction: discord.Interaction, *, enabled: bool) -> None:
-        await self.settings_use_cases.set_shadow_mode(interaction, enabled=enabled)
-
-    @app_commands.command(name="export_chatbot_shadow_candidates", description="未評価のChatbotシャドー候補をExcelで出力します")
-    async def export_chatbot_shadow_candidates(self, interaction: discord.Interaction) -> None:
-        await self.excel_management_use_cases.export_chatbot_shadow_candidates(interaction)
-
-    @app_commands.command(name="import_chatbot_shadow_reviews", description="評価済みのChatbotシャドー候補Excelを取り込みます")
-    async def import_chatbot_shadow_evaluations(
-        self,
-        interaction: discord.Interaction,
-        attachment: discord.Attachment,
-    ) -> None:
-        if await self._reject_debug_shared_write(interaction):
-            return
-        await self.excel_management_use_cases.import_chatbot_shadow_evaluations(interaction, attachment)
-
     @app_commands.command(name="export_chatbot_member_aliases", description="Chatbotのメンバー別名をExcelで出力します")
     async def export_chatbot_member_aliases(self, interaction: discord.Interaction) -> None:
         await self.excel_management_use_cases.export_chatbot_member_aliases(interaction)
