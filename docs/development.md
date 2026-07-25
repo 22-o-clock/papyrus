@@ -16,9 +16,14 @@ debug環境は、通常運用と処理対象や副作用が競合しないよう
 実行環境は`BOT_ENVIRONMENT`で選択する。この設定は必須で、未設定、空文字、`production` / `debug` 以外の
 値ではBotを起動しない。
 
-`DEBUG`は実行環境とは別に、ロードするCogを選択する設定として扱う。全Cogをロードしてデバッグする場合は、
-`BOT_ENVIRONMENT=debug`と`DEBUG=false`を組み合わせる。`DEBUG=true`では`core/debug_cogs.py`に
-明示したCogだけをロードし、対象がなければCogをロードしない。
+`ENABLED_COGS`は実行環境とは別に、ロードするCogを選択する設定として扱う。`all`では全Cog、`none`では
+Cogを読み込まず、カンマ区切りのCog名では指定したCogだけを既定の順序で読み込む。未知のCog名、重複、空の
+要素を含む指定ではBotを起動しない。
+
+指定できるCog名は、`admin`、`agree`、`audit`、`api_usage`、`chatbot`、`hwh`、`monitor`、`moving`、
+`remind`、`speak`、`spotify_embed`、`talkdata`、`voice`、`voicevox`とする。
+
+全Cogをロードしてデバッグする場合は、`BOT_ENVIRONMENT=debug`と`ENABLED_COGS=all`を組み合わせる。
 
 起動時には各Cogの必須環境変数をまとめて検証し、不足や形式不正がある場合はDiscordやDBへ接続する前に終了する。
 
@@ -81,9 +86,9 @@ TalkDataは実行環境ごとにスキーマを分離する。
 個別のテストごとに行う必要はないが、まとまったタスクのテストが終了した段階で、テスト用Botに登録された
 スラッシュコマンドをサーバーから削除することを推奨する。
 
-`BOT_ENVIRONMENT=debug`、`DEBUG=true`でテスト用Botを起動する。現在の`core/debug_cogs.py`はCogを
-ロードしないため、空のコマンドツリーがサーバーへ同期され、テスト用Botに紐づくスラッシュコマンドが削除される。
-コマンド同期の完了をログで確認したら、Botを停止する。
+`.env`は編集せず、起動プロセスに限って`ENABLED_COGS=none`を上書きし、`BOT_ENVIRONMENT=debug`の
+テスト用Botを起動する。空のコマンドツリーがサーバーへ同期され、テスト用Botに紐づくスラッシュコマンドが
+削除される。コマンド同期の完了をログで確認したら、Botを停止する。
 
 この操作では、`DISCORD_BOT_TOKEN`が必ずテスト用Botを参照していることを確認する。本番Botのトークンでは
 実行しない。
@@ -108,6 +113,7 @@ uv run ty check <変更対象>
 - 機能や利用方法を変更した場合は、実装と同じ変更単位で関連するドキュメントも更新する。
 - スラッシュコマンド、コンテキストメニュー、自動・バックグラウンド処理などを変更した場合は
   [`features.md`](features.md) を更新する。
+- Cogを追加、削除、改名した場合は、`ENABLED_COGS`の選択肢とこのガイドのCog名一覧も更新する。
 - OpenAI API callの計測、単価、Usage APIとの照合、レポート表示を変更した場合は
   [`maintenance/openai_api_usage.md`](maintenance/openai_api_usage.md) を更新する。
 - ドキュメントを追加、削除、移動した場合は [`index.md`](index.md) の分類とリンクを更新する。
