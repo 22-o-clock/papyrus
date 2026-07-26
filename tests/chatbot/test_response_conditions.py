@@ -12,17 +12,14 @@ from cogs.chatbot.constants import (
     ASSISTANT_DEBOUNCE_SECONDS,
     CHAT_DEBOUNCE_MAX_SECONDS,
     CHAT_DEBOUNCE_MIN_SECONDS,
-    CHAT_REACTION_COOLDOWN_SECONDS,
-    CHAT_TEXT_COOLDOWN_SECONDS,
 )
-from cogs.chatbot.models import ChannelProcessingState, CooldownStage
+from cogs.chatbot.models import ChannelProcessingState
 from cogs.chatbot.responses_api import LLMMessage, MessageInMemory, ResponseAction
 from cogs.chatbot.services.history_sync import get_history_sync_after
 from cogs.chatbot.services.response_policy import (
     can_change_channel_role,
     claim_response_slot,
     get_available_referenced_author_id,
-    get_cooldown_stage,
     get_response_debounce_seconds,
     is_generation_current,
     should_reset_conversation,
@@ -278,30 +275,6 @@ class ResponseDebounceTest(unittest.TestCase):
             self.fail("chatの待機時間が設定範囲を外れています")
 
 
-class CooldownStageTest(unittest.TestCase):
-    def test_uses_recent_stage_during_first_two_minutes(self) -> None:
-        stage = get_cooldown_stage(last_action_at=999.0, now=1_000.0)
-
-        if stage is not CooldownStage.RECENT:
-            self.fail("Bot反応直後が最も厳しい判定段階になっていません")
-
-    def test_uses_recovering_stage_between_two_and_fifteen_minutes(self) -> None:
-        stage = get_cooldown_stage(last_action_at=1_000.0 - CHAT_REACTION_COOLDOWN_SECONDS, now=1_000.0)
-
-        if stage is not CooldownStage.RECOVERING:
-            self.fail("2分経過後が回復中の判定段階になっていません")
-
-    def test_uses_ready_stage_after_fifteen_minutes(self) -> None:
-        stage = get_cooldown_stage(last_action_at=1_000.0 - CHAT_TEXT_COOLDOWN_SECONDS, now=1_000.0)
-
-        if stage is not CooldownStage.READY:
-            self.fail("15分経過後に通常の判定段階へ戻りません")
-
-    def test_uses_ready_stage_before_first_bot_action(self) -> None:
-        if get_cooldown_stage(last_action_at=None, now=1_000.0) is not CooldownStage.READY:
-            self.fail("Botが未反応のチャンネルでクールダウンが適用されています")
-
-
 class ConversationResetTest(unittest.TestCase):
     def test_resets_after_configured_interval_from_last_human_message(self) -> None:
         last_human_message_timestamp = datetime(2026, 7, 12, 9, 0, tzinfo=UTC)
@@ -368,19 +341,15 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
         cog = object.__new__(ConversationUseCases)
         channel = SimpleNamespace(id=100, send=AsyncMock())
         message = cast("Message", SimpleNamespace(channel=channel))
-        state = ChannelProcessingState()
         cog.__dict__["_sent_custom_profiles"] = {}
         cog.short_term_message_repository = SimpleNamespace(set_custom_profile=AsyncMock())
 
         await cog.execute_response_action(
             message,
             LLMMessage(action=ResponseAction.MESSAGE, content="https://example.com"),
-            state,
         )
 
         channel.send.assert_awaited_once_with("https://example.com", suppress_embeds=True)
-        if state.last_action_at is None:
-            self.fail("通常投稿の成功後にクールダウンが更新されていません")
 
     async def test_suppresses_embeds_for_reply(self) -> None:
         cog = object.__new__(ConversationUseCases)
@@ -394,8 +363,6 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
         cog.response_pipelines = {100: SimpleNamespace(short_term_memory=short_term_memory)}
         cog.__dict__["_sent_custom_profiles"] = {}
         cog.short_term_message_repository = SimpleNamespace(set_custom_profile=AsyncMock())
-        state = ChannelProcessingState()
-
         await cog.execute_response_action(
             message,
             LLMMessage(
@@ -403,12 +370,9 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
                 content="https://example.com",
                 reply_to_message_id=reply_to_message_id,
             ),
-            state,
         )
 
         target_message.reply.assert_awaited_once_with("https://example.com", suppress_embeds=True)
-        if state.last_action_at is None:
-            self.fail("明示replyの成功後にクールダウンが更新されていません")
 
 
 class LongTermMemoryExclusionFlagTest(unittest.IsolatedAsyncioTestCase):

@@ -31,6 +31,7 @@ from cogs.chatbot.repositories.short_term_message import (
 )
 from cogs.chatbot.responses_api import MemoryDocumentUpdater, MemoryDocumentUpdateResult
 from cogs.chatbot.services.memory_document_format import has_required_memory_document_headings
+from cogs.chatbot.services.prompt_context import omit_empty_values
 
 logger = getLogger(__name__)
 
@@ -152,15 +153,15 @@ class LongTermMemoryUseCases:
             after_message_id=cursor.last_processed_message_id if cursor is not None else None,
             through_message_id=latest_message_id,
         )
-        analysis_messages = [message for message in messages if self._is_analysis_input(message)]
-        source_count = sum(self._is_update_source(message) for message in analysis_messages)
-        token_count = sum(self._message_token_count(message) for message in analysis_messages)
+        memory_evidence = [message for message in messages if self._is_memory_evidence(message)]
+        source_count = sum(self._is_update_source(message) for message in memory_evidence)
+        token_count = sum(self._message_token_count(message) for message in memory_evidence)
         if source_count < MEMORY_DOCUMENT_MESSAGE_TRIGGER and token_count < MEMORY_DOCUMENT_TOKEN_TRIGGER:
             return
 
         selected: list[ChatbotStoredMessage] = []
         selected_tokens = 0
-        for message in analysis_messages:
+        for message in memory_evidence:
             message_tokens = self._message_token_count(message)
             if selected and selected_tokens + message_tokens > MEMORY_DOCUMENT_NEW_CONTEXT_TOKENS:
                 break
@@ -213,10 +214,9 @@ class LongTermMemoryUseCases:
     ) -> None:
         cursor = await self._documents.get_cursor(channel_id)
         all_messages = await self._messages.get_range(channel_id, after_message_id=None, through_message_id=end_message_id)
-        included_messages = [message for message in all_messages if self._is_analysis_input(message)]
         new_messages = [
             message
-            for message in included_messages
+            for message in all_messages
             if cursor is None
             or cursor.last_processed_message_id is None
             or message.message_id > cursor.last_processed_message_id
@@ -232,7 +232,7 @@ class LongTermMemoryUseCases:
         reference_budget = max(0, MEMORY_DOCUMENT_TOTAL_CONTEXT_TOKENS - new_tokens)
         earlier = [
             message
-            for message in included_messages
+            for message in all_messages
             if cursor is not None
             and cursor.last_processed_message_id is not None
             and message.message_id <= cursor.last_processed_message_id
@@ -249,6 +249,7 @@ class LongTermMemoryUseCases:
 
         existing_documents = await self._documents.get_all()
         members = list(self._bot.get_all_members())
+        context_messages = [*reference_messages, *new_messages]
         payload: dict[str, object] = {
             "existing_documents": [
                 {
@@ -259,6 +260,7 @@ class LongTermMemoryUseCases:
                 }
                 for document in existing_documents
             ],
+            "message_authors": {str(message.author_id): message.author_name for message in context_messages},
             "reference_messages": await self._serialize_messages(reference_messages),
             "new_messages": new_payload,
             "members": [
@@ -280,7 +282,11 @@ class LongTermMemoryUseCases:
             }
             result = await self._updater.update(payload, shorten=True)
         documents = self._validate_documents(result, {member.id for member in members})
-        aliases = self._validate_aliases(result, new_messages, {member.id for member in members})
+        aliases = self._validate_aliases(
+            result,
+            [message for message in new_messages if self._is_memory_evidence(message)],
+            {member.id for member in members},
+        )
         await self._documents.complete(channel_id, end_message_id, documents, aliases)
         latest_message_id = await self._messages.get_latest_message_id(channel_id)
         if latest_message_id is not None and latest_message_id > end_message_id:
@@ -307,24 +313,31 @@ class LongTermMemoryUseCases:
                     "important_text": attachment.important_text,
                 }
             )
-        return [
+        return [self._serialize_message(message, attachments=by_message_id.get(message.message_id, [])) for message in messages]
+
+    @staticmethod
+    def _serialize_message(
+        message: ChatbotStoredMessage,
+        *,
+        attachments: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        return omit_empty_values(
             {
-                "message_id": message.message_id,
-                "author_id": message.author_id,
-                "author_name": message.author_name,
-                "content": message.content,
-                "reply_to_message_id": message.reply_to_message_id,
-                "mentioned_user_ids": message.mentioned_user_ids,
-                "created_at": message.created_at.isoformat(),
-                "is_bot": message.is_bot,
-                "is_papyrus": message.is_self,
-                "is_forwarded": message.is_forwarded,
-                "custom_profile_name": message.custom_profile_name,
-                "embeds": message.embeds,
-                "attachments": by_message_id.get(message.message_id, []),
+                "i": message.message_id,
+                "a": message.author_id,
+                "t": message.created_at.isoformat(timespec="minutes"),
+                "c": message.content,
+                "r": message.reply_to_message_id,
+                "u": message.mentioned_user_ids,
+                "b": message.is_bot,
+                "p": message.is_self,
+                "f": message.is_forwarded,
+                "g": message.is_long_term_memory_excluded,
+                "o": message.custom_profile_name,
+                "e": message.embeds,
+                "x": attachments or [],
             }
-            for message in messages
-        ]
+        )
 
     def _validate_documents(
         self,
@@ -411,20 +424,18 @@ class LongTermMemoryUseCases:
         )
 
     def _is_update_source(self, message: ChatbotStoredMessage) -> bool:
-        return self._is_analysis_input(message) and not message.is_forwarded and (not message.is_bot or message.is_self)
+        return self._is_memory_evidence(message) and not message.is_forwarded and (not message.is_bot or message.is_self)
 
     @staticmethod
-    def _is_analysis_input(message: ChatbotStoredMessage) -> bool:
+    def _is_memory_evidence(message: ChatbotStoredMessage) -> bool:
         return not message.is_long_term_memory_excluded
 
     def _message_token_count(self, message: ChatbotStoredMessage) -> int:
-        return self._token_count(
-            {
-                "author": message.author_name,
-                "content": message.content,
-                "embeds": message.embeds,
-            }
-        )
+        return self._token_count(self._serialize_message(message))
 
     def _token_count(self, value: object) -> int:
-        return len(self._encoding.encode(json.dumps(value, ensure_ascii=False, default=str)))
+        return len(
+            self._encoding.encode(
+                json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":")),
+            )
+        )

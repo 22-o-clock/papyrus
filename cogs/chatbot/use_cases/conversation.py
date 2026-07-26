@@ -43,7 +43,6 @@ from cogs.chatbot.services.response_policy import (
     activate_response,
     claim_response_slot,
     get_available_referenced_author_id,
-    get_cooldown_stage,
     get_response_debounce_seconds,
     is_generation_current,
     should_reset_conversation,
@@ -202,6 +201,8 @@ class ConversationUseCases:
                                 reply_to_message_id=stored.reply_to_message_id,
                                 mentioned_user_ids=stored.mentioned_user_ids,
                                 timestamp=stored.created_at,
+                                is_bot=stored.is_bot,
+                                is_forwarded=stored.is_forwarded,
                                 embeds=stored.embeds,
                                 attachments=attachments_by_message_id.get(stored.message_id, []),
                                 reactions=reactions_by_message_id.get(stored.message_id, []),
@@ -828,7 +829,6 @@ class ConversationUseCases:
         response_mode = await self._select_response_mode(
             message,
             state,
-            role,
             _ResponseSelectionRequest(
                 generation_revision=generation_revision,
                 is_explicit_call=is_explicit_call,
@@ -884,7 +884,6 @@ class ConversationUseCases:
             await self.execute_response_action(
                 message,
                 generated_response,
-                state,
                 custom_profile_name=custom_profile.name if custom_profile is not None else None,
             )
             if is_explicit_call:
@@ -894,7 +893,6 @@ class ConversationUseCases:
         self,
         message: Message,
         state: ChannelProcessingState,
-        role: ChannelRole,
         request: _ResponseSelectionRequest,
     ) -> ResponseMode | None:
         """明示呼びかけを優先し、それ以外は固定したクールダウン段階で判定します。"""
@@ -906,18 +904,14 @@ class ConversationUseCases:
             )
             return ResponseMode.TEXT
 
-        cooldown_stage = get_cooldown_stage(state.last_action_at, asyncio.get_running_loop().time())
         judgment = await self.response_pipelines[message.channel.id].judge_response(
-            role,
-            cooldown_stage=cooldown_stage,
             resolved_member_aliases=request.resolved_member_aliases,
         )
         logger.info(
-            "Completed chatbot response judgment (channel_id=%s, trigger_message_id=%s, response_mode=%s, cooldown_stage=%s)",
+            "Completed chatbot response judgment (channel_id=%s, trigger_message_id=%s, response_mode=%s)",
             message.channel.id,
             message.id,
             judgment.response_mode.value,
-            cooldown_stage.value,
         )
         async with state.lock:
             if is_generation_current(state, request.generation_revision):
@@ -939,7 +933,6 @@ class ConversationUseCases:
         self,
         message: Message,
         response: LLMMessage,
-        state: ChannelProcessingState,
         *,
         custom_profile_name: str | None = None,
     ) -> None:
@@ -947,12 +940,9 @@ class ConversationUseCases:
         if response.action is ResponseAction.SILENCE:
             return
 
-        now = asyncio.get_running_loop().time()
-
         if response.action is ResponseAction.MESSAGE:
             sent_messages = await send_split_response(message.channel, response.content)
             await self._record_sent_profiles(sent_messages, custom_profile_name)
-            state.last_action_at = now
             return
 
         reply_to_message_id = response.reply_to_message_id
@@ -978,9 +968,7 @@ class ConversationUseCases:
                 return
             resolved_emoji = resolve_reaction_emoji(message.guild, reaction_emoji)
             await target_message.add_reaction(resolved_emoji)
-            state.last_action_at = now
             return
 
         sent_messages = await reply_with_split_response(target_message, response.content)
         await self._record_sent_profiles(sent_messages, custom_profile_name)
-        state.last_action_at = now

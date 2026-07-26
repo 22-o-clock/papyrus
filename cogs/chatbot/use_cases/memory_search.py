@@ -34,11 +34,12 @@ class MemorySearchUseCases:
     ) -> str:
         """共有・Bot文書と、短期会話で参照された人物文書を返します。"""
         short_term_memory = self._response_pipelines[channel_id].short_term_memory
+        prompt_messages = short_term_memory.get_prompt_messages()
         target_user_ids = {
-            user_id for message in short_term_memory.memory for user_id in (message.author_id, *message.mentioned_user_ids)
+            user_id for message in prompt_messages for user_id in (message.author_id, *message.mentioned_user_ids)
         }
         reply_message_ids = {
-            message.reply_to_message_id for message in short_term_memory.memory if message.reply_to_message_id is not None
+            message.reply_to_message_id for message in prompt_messages if message.reply_to_message_id is not None
         }
         replied_messages = await self._message_repository.get_by_ids(list(reply_message_ids))
         target_user_ids.update(message.author_id for message in replied_messages)

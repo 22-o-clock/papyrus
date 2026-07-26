@@ -13,9 +13,13 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, model_validator
 
 from .channel_roles import ChannelRole
+from .constants import (
+    CONVERSATION_INACTIVITY_SECONDS,
+    SHORT_TERM_MEMORY_PROMPT_TOKENS,
+    SHORT_TERM_MEMORY_RETAINED_TOKENS,
+)
 from .models.custom_profile import CustomProfile
 from .models.response_judgment import (
-    CooldownStage,
     ResponseJudgment,
     ResponseMode,
 )
@@ -25,6 +29,7 @@ from .prompt import (
     load_prompt,
     response_judgment_prompt,
 )
+from .services.prompt_context import omit_empty_values
 
 logger = getLogger(__name__)
 
@@ -33,19 +38,6 @@ RESPONSE_JUDGMENT_MODEL = "gpt-5.4-nano"
 MEMORY_DOCUMENT_UPDATE_INSTRUCTIONS = load_prompt("long_term_memory_update.md")
 MEMORY_DOCUMENT_SHORTEN_INSTRUCTIONS = load_prompt("long_term_memory_shorten.md")
 RESPONSE_JUDGMENT_TIMEOUT_SECONDS = 60.0
-COOLDOWN_STAGE_INSTRUCTIONS = {
-    CooldownStage.RECENT: (
-        "Botが2分以内に反応済みです。明確に回答を求められており、"
-        "テキストで答える必要がある場合だけtextを選び、それ以外はnoneにしてください。"
-    ),
-    CooldownStage.RECOVERING: (
-        "Botの反応から2分以上15分未満です。明確な回答要求、明らかに有益な回答・訂正、"
-        "または自然な短い感情反応だけを許可してください。感情反応はreactionを選んでください。"
-    ),
-    CooldownStage.READY: (
-        "Botの反応から15分以上経過しているか、まだ反応していません。通常の基準でnone、reaction、textを選んでください。"
-    ),
-}
 MEMORY_DOCUMENT_UPDATE_MODEL = "gpt-5.6-luna"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 REACTION_CONTEXT_INSTRUCTIONS = """
@@ -53,7 +45,7 @@ REACTION_CONTEXT_INSTRUCTIONS = """
 # リアクション
 
 reactionsは会話の温度感を補う弱いシグナルです。内容への同意・正しさ・解決や、人物の恒久的な嗜好を断定する根拠にはしないでください。
-countは総数、reaction_type="burst"はスーパーリアクションです。
+countは総数です。
 reactors_truncatedまたはreactors_incompleteがtrueの場合、reactorsは一部のみです。
 """
 
@@ -181,6 +173,7 @@ class MessageInMemory:
         reply_to_message_id: 返信先のDiscordメッセージID
         mentioned_user_ids: メンションされたDiscordユーザーIDの一覧
         timestamp: メッセージが作成された日時
+        is_forwarded: 転送された第三者のメッセージか
         is_stale_context: 長時間前の参考情報としてのみ使うメッセージか
         image_url: メッセージに含まれる画像のURL (存在する場合)
         pdf_url: メッセージに含まれるPDFのURL (存在する場合)
@@ -196,6 +189,8 @@ class MessageInMemory:
     reply_to_message_id: int | None
     mentioned_user_ids: list[int]
     timestamp: datetime.datetime
+    is_bot: bool = False
+    is_forwarded: bool = False
     is_stale_context: bool = False
     image_url: str | None = None
     pdf_url: str | None = None
@@ -224,6 +219,32 @@ class MessageInMemory:
         }
         if include_reactions:
             result["reactions"] = [reaction.to_dict() for reaction in self.reactions]
+        return result
+
+    def to_prompt_dict(self, *, content_override: str | None = None) -> dict[str, object]:
+        """既定値と空要素を省いた、モデル入力用の短い辞書を返します。"""
+        result: dict[str, object] = {
+            "i": self.message_id,
+            "a": self.author_id,
+            "t": self.timestamp.astimezone(LOCAL_TIMEZONE).isoformat(timespec="minutes"),
+        }
+        content = self.content if content_override is None else content_override
+        if content:
+            result["c"] = content
+        if self.reply_to_message_id is not None:
+            result["r"] = self.reply_to_message_id
+        if self.mentioned_user_ids:
+            result["u"] = self.mentioned_user_ids
+        if self.is_forwarded:
+            result["f"] = True
+        if self.is_stale_context:
+            result["s"] = True
+        if self.embeds:
+            result["e"] = [omit_empty_values(embed) for embed in self.embeds]
+        if self.attachments:
+            result["x"] = [omit_empty_values(attachment.to_dict()) for attachment in self.attachments]
+        if self.reactions:
+            result["q"] = [omit_empty_values(reaction.to_dict()) for reaction in self.reactions]
         return result
 
 
@@ -275,13 +296,9 @@ class ShortTermMemory:
 
         # 2. reply_to に関する特殊処理
 
-        if message.message_snapshots:  # メッセージが転送である場合
-            forwarded_content = message.message_snapshots[0].content
-            content = (
-                "[転送された第三者の発言]\n"
-                f"この本文は転送者の{author_name}による発言ではありません。原発言者は不明です。\n"
-                f"本文: {forwarded_content}"
-            )
+        is_forwarded = bool(message.message_snapshots)
+        if is_forwarded:
+            content = message.message_snapshots[0].content
 
         if message.type == discord.MessageType.reply and message.reference and message.reference.message_id:
             reply_to_message_id = message.reference.message_id
@@ -316,6 +333,8 @@ class ShortTermMemory:
                 reply_to_message_id=reply_to_message_id,
                 mentioned_user_ids=mentioned_user_ids,
                 timestamp=timestamp,
+                is_bot=bool(getattr(message.author, "bot", False)),
+                is_forwarded=is_forwarded,
                 image_url=image_url,
                 pdf_url=pdf_url,
                 embeds=embeds,
@@ -328,32 +347,86 @@ class ShortTermMemory:
         logger.debug("Current messages in memory: %s messages", len(self.memory))
 
     def to_json(self, *, content_overrides: dict[int, str] | None = None) -> str:
-        """短期記憶内のメッセージをプロンプトに用いるJSON形式の文字列に変換します。
+        """短期記憶を、モデル入力用の疎なコンパクトJSONへ変換します。
 
         Returns:
             人物と返信先をDiscord IDで識別できるJSON表現
 
         """
-        serialized_messages = [message.to_dict() for message in self.memory]
-        for serialized_message in serialized_messages:
-            message_id = serialized_message["message_id"]
-            if content_overrides is not None and isinstance(message_id, int) and message_id in content_overrides:
-                serialized_message["content"] = content_overrides[message_id]
-        return json.dumps(serialized_messages, ensure_ascii=False, indent=2)
+        return self._serialize_prompt_messages(self.memory, content_overrides=content_overrides)
 
-    def forget(self, maximum_token: int = 5000) -> None:
+    def to_prompt_json(
+        self,
+        *,
+        maximum_token: int = SHORT_TERM_MEMORY_PROMPT_TOKENS,
+        content_overrides: dict[int, str] | None = None,
+    ) -> str:
+        """保持中の履歴を変更せず、モデル送信用の上限内に収めて返します。"""
+        messages = self.get_prompt_messages(
+            maximum_token=maximum_token,
+            content_overrides=content_overrides,
+        )
+        return self._serialize_prompt_messages(messages, content_overrides=content_overrides)
+
+    def get_prompt_messages(
+        self,
+        *,
+        maximum_token: int = SHORT_TERM_MEMORY_PROMPT_TOKENS,
+        content_overrides: dict[int, str] | None = None,
+    ) -> list[MessageInMemory]:
+        """最新投稿を必ず残しつつ、モデル送信用の短期履歴を返します。"""
+        messages = list(self.memory)
+        while len(messages) > 1:
+            serialized = self._serialize_prompt_messages(messages, content_overrides=content_overrides)
+            if len(self.encoding.encode(serialized)) <= maximum_token:
+                break
+            messages.pop(0)
+        return messages
+
+    @staticmethod
+    def _prompt_payload(
+        messages: list[MessageInMemory],
+        *,
+        content_overrides: dict[int, str] | None,
+    ) -> dict[str, object]:
+        """指定されたメッセージだけから疎なモデル入力を組み立てます。"""
+        return {
+            "a": {str(message.author_id): message.author_name for message in messages},
+            "m": [
+                message.to_prompt_dict(
+                    content_override=(
+                        content_overrides[message.message_id]
+                        if content_overrides is not None and message.message_id in content_overrides
+                        else None
+                    )
+                )
+                for message in messages
+            ],
+        }
+
+    @classmethod
+    def _serialize_prompt_messages(
+        cls,
+        messages: list[MessageInMemory],
+        *,
+        content_overrides: dict[int, str] | None,
+    ) -> str:
+        """指定されたメッセージをコンパクトJSONへ変換します。"""
+        return json.dumps(
+            cls._prompt_payload(messages, content_overrides=content_overrides),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def forget(self, maximum_token: int = SHORT_TERM_MEMORY_RETAINED_TOKENS) -> None:
         """メモリ内のメッセージを古い順に削除して、トークン数を制限以下に保ちます。
 
         Args:
-            maximum_token: 保持される最大トークン数 (デフォルト: 5000)
+            maximum_token: 内部で保持する最大トークン数
 
         """
         while self.memory:
-            text = json.dumps(
-                [m.to_dict() for m in self.memory],
-                ensure_ascii=False,
-            )
-            token_count = len(self.encoding.encode(text))
+            token_count = len(self.encoding.encode(self.to_json()))
 
             if token_count <= maximum_token:
                 break
@@ -362,14 +435,7 @@ class ShortTermMemory:
 
         logger.debug(
             "Current messages in memory: %s tokens",
-            len(
-                self.encoding.encode(
-                    json.dumps(
-                        [m.to_dict() for m in self.memory],
-                        ensure_ascii=False,
-                    )
-                )
-            ),
+            len(self.encoding.encode(self.to_json())),
         )
 
         logger.debug("Current messages in memory after pruning: %s messages", len(self.memory))
@@ -429,8 +495,26 @@ class ShortTermMemory:
         self.memory = [last_message]
 
     def restore(self, messages: list[MessageInMemory]) -> None:
-        """DBから復元したメッセージを時系列順で短期記憶へ設定します。"""
-        self.memory = sorted(messages, key=lambda message: message.timestamp)
+        """DB履歴から最後の12時間空白を再現し、現在の会話を復元します。"""
+        restored_messages: list[MessageInMemory] = []
+        last_human_message_timestamp: datetime.datetime | None = None
+        for message in sorted(messages, key=lambda candidate: candidate.timestamp):
+            if (
+                not message.is_bot
+                and last_human_message_timestamp is not None
+                and message.timestamp - last_human_message_timestamp
+                >= datetime.timedelta(seconds=CONVERSATION_INACTIVITY_SECONDS)
+            ):
+                if restored_messages:
+                    previous_message = restored_messages[-1]
+                    previous_message.is_stale_context = True
+                    restored_messages = [previous_message]
+                else:
+                    restored_messages = []
+            restored_messages.append(message)
+            if not message.is_bot:
+                last_human_message_timestamp = message.timestamp
+        self.memory = restored_messages
         self.forget()
 
 
@@ -547,17 +631,21 @@ def _serialize_response_context(
     content_overrides: dict[int, str] | None = None,
 ) -> str:
     """会話と、会話中で解決済みの別名だけをモデル入力へまとめます。"""
-    return json.dumps(
-        {
-            "messages": json.loads(short_term_memory.to_json(content_overrides=content_overrides)),
-            "resolved_member_aliases": [
-                {"alias": alias, "target_user_id": target_user_id}
-                for alias, target_user_id in sorted(resolved_member_aliases.items())
-            ],
-        },
+    context = json.loads(short_term_memory.to_prompt_json(content_overrides=content_overrides))
+    if resolved_member_aliases:
+        context["l"] = dict(sorted(resolved_member_aliases.items()))
+    serialized = json.dumps(
+        context,
         ensure_ascii=False,
-        indent=2,
+        separators=(",", ":"),
     )
+    logger.debug(
+        "Serialized chatbot response context (tokens=%s, message_count=%s, alias_count=%s)",
+        len(short_term_memory.encoding.encode(serialized)),
+        len(context["m"]),
+        len(resolved_member_aliases),
+    )
+    return serialized
 
 
 class MemberAliasCandidate(BaseModel):
@@ -607,7 +695,7 @@ class MemoryDocumentUpdater:
                 model=MEMORY_DOCUMENT_UPDATE_MODEL,
                 reasoning={"effort": "medium"},
                 instructions=instructions,
-                input=json.dumps(payload, ensure_ascii=False),
+                input=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 text_format=MemoryDocumentUpdateResult,
             ),
             item_count=1,
@@ -621,22 +709,19 @@ class MemoryDocumentUpdater:
 class ResponseJudge:
     """短期会話から自発反応の要否と大分類だけを安価に判定します。"""
 
-    def __init__(self, client: AsyncOpenAI) -> None:
+    def __init__(self, client: AsyncOpenAI, bot_name: str) -> None:
         self.client = client
+        self.bot_name = bot_name
 
     async def judge(
         self,
         short_term_memory: ShortTermMemory,
-        channel_role: ChannelRole,
         *,
-        cooldown_stage: CooldownStage,
         resolved_member_aliases: dict[str, int],
     ) -> ResponseJudgment:
         """外部ツールや長期記憶を使わずに自発反応の必要性を返します。"""
         input_payload = json.dumps(
             {
-                "channel_role": channel_role.value,
-                "cooldown_stage": cooldown_stage.value,
                 **json.loads(
                     _serialize_response_context(
                         short_term_memory,
@@ -645,6 +730,7 @@ class ResponseJudge:
                 ),
             },
             ensure_ascii=False,
+            separators=(",", ":"),
         )
         try:
             api_response = await observe_chatbot_api_call(
@@ -654,7 +740,8 @@ class ResponseJudge:
                     model=RESPONSE_JUDGMENT_MODEL,
                     reasoning={"effort": "none"},
                     instructions=response_judgment_prompt.RESPONSE_JUDGMENT_INSTRUCTIONS.format(
-                        cooldown_instruction=COOLDOWN_STAGE_INSTRUCTIONS[cooldown_stage]
+                        bot_name=self.bot_name,
+                        message_context_instructions=draft_generator_prompt.MESSAGE_CONTEXT_INSTRUCTIONS,
                     ),
                     input=input_payload,
                     text_format=ResponseJudgment,
@@ -746,8 +833,9 @@ class DraftGenerator:
         instructions = (
             prompt_template.format(
                 bot_name=self.bot_name,
-                channel_role=channel_role.value,
                 delivery_instruction=delivery_instruction,
+                message_context_instructions=draft_generator_prompt.MESSAGE_CONTEXT_INSTRUCTIONS,
+                role_instructions=self._get_role_instructions(channel_role),
             )
             + REACTION_CONTEXT_INSTRUCTIONS
         )
@@ -792,6 +880,13 @@ class DraftGenerator:
         )
 
         return self._to_llm_message(api_response.output_parsed, options.required_reply_to_message_id)
+
+    @staticmethod
+    def _get_role_instructions(channel_role: ChannelRole) -> str:
+        """選択されたチャンネル役割だけの応答方針を返します。"""
+        if channel_role is ChannelRole.ASSISTANT:
+            return draft_generator_prompt.ASSISTANT_ROLE_INSTRUCTIONS
+        return draft_generator_prompt.CHAT_ROLE_INSTRUCTIONS
 
     @staticmethod
     def _get_response_configuration(
@@ -852,7 +947,7 @@ class ResponsePipeline:
 
         """
         self.draft_generator = DraftGenerator(client, bot_name)
-        self.response_judge = ResponseJudge(client)
+        self.response_judge = ResponseJudge(client, bot_name)
         self.short_term_memory = ShortTermMemory()
         self.bot_name = bot_name
 
@@ -889,15 +984,11 @@ class ResponsePipeline:
 
     async def judge_response(
         self,
-        channel_role: ChannelRole,
         *,
-        cooldown_stage: CooldownStage,
         resolved_member_aliases: dict[str, int],
     ) -> ResponseJudgment:
         """短期文脈に対する自発反応の要否を判定します。"""
         return await self.response_judge.judge(
             self.short_term_memory,
-            channel_role,
-            cooldown_stage=cooldown_stage,
             resolved_member_aliases=resolved_member_aliases,
         )

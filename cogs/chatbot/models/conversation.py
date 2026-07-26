@@ -20,7 +20,6 @@ class ChannelProcessingState:
     debounced_response_message: Message | None = None
     debounced_response_is_explicit_call: bool = False
     generation_revision: int = 0
-    last_action_at: float | None = None
     last_human_message_timestamp: datetime.datetime | None = None
     queued_custom_profile: CustomProfile | None = None
     debounced_custom_profile: CustomProfile | None = None

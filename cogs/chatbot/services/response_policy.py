@@ -8,12 +8,9 @@ from cogs.chatbot.constants import (
     ASSISTANT_DEBOUNCE_SECONDS,
     CHAT_DEBOUNCE_MAX_SECONDS,
     CHAT_DEBOUNCE_MIN_SECONDS,
-    CHAT_REACTION_COOLDOWN_SECONDS,
-    CHAT_TEXT_COOLDOWN_SECONDS,
 )
 from cogs.chatbot.models.conversation import ChannelProcessingState
 from cogs.chatbot.models.custom_profile import CustomProfile
-from cogs.chatbot.models.response_judgment import CooldownStage
 
 
 def activate_response(
@@ -73,15 +70,6 @@ def get_response_debounce_seconds(role: ChannelRole) -> float:
 def is_generation_current(state: ChannelProcessingState, revision: int) -> bool:
     """生成開始後に、回答を作り直す必要がある返信要求が追加されていないか確認します。"""
     return state.generation_revision == revision
-
-
-def get_cooldown_stage(last_action_at: float | None, now: float) -> CooldownStage:
-    """最後のBot反応からの経過時間を自発反応の抑制度へ変換します。"""
-    if last_action_at is None or now - last_action_at >= CHAT_TEXT_COOLDOWN_SECONDS:
-        return CooldownStage.READY
-    if now - last_action_at >= CHAT_REACTION_COOLDOWN_SECONDS:
-        return CooldownStage.RECOVERING
-    return CooldownStage.RECENT
 
 
 def should_reset_conversation(
