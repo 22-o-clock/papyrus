@@ -10,6 +10,8 @@ from cogs.chatbot.repositories.api_usage import UTC, ChatbotApiUsageDaily
 
 REPORT_MARKER_PREFIX = "api-usage-report:"
 MEMORY_OPERATIONS = {
+    "memory_document_update",
+    "memory_document_shorten",
     "memory_extraction",
     "memory_reconciliation",
     "memory_embedding",
@@ -20,16 +22,20 @@ FEATURE_LABELS = {
     "response_judgment": "応答要否判定",
     "draft_generation": "応答生成",
     "attachment_analysis": "添付ファイル解析",
-    "memory_extraction": "長期記憶の抽出",
-    "memory_reconciliation": "長期記憶の整合判定",
-    "memory_embedding": "長期記憶の登録用Embedding",
-    "memory_search_embedding": "長期記憶の検索用Embedding",
-    "memory_admin_embedding": "管理更新用Embedding",
+    "memory_document_update": "長期記憶文書の更新",
+    "memory_document_shorten": "長期記憶文書の短縮再生成",
+    "memory_extraction": "旧長期記憶の抽出",
+    "memory_reconciliation": "旧長期記憶の整合判定",
+    "memory_embedding": "旧長期記憶の登録用Embedding",
+    "memory_search_embedding": "旧長期記憶の検索用Embedding",
+    "memory_admin_embedding": "旧管理更新用Embedding",
 }
 ITEM_LABELS = {
     "response_judgment": "判定",
     "draft_generation": "応答",
     "attachment_analysis": "添付",
+    "memory_document_update": "会話",
+    "memory_document_shorten": "会話",
     "memory_extraction": "メッセージ",
     "memory_reconciliation": "判定",
     "memory_embedding": "記憶",

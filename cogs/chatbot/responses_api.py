@@ -1,6 +1,5 @@
 import datetime
 import json
-import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from logging import getLogger
@@ -23,8 +22,7 @@ from .models.response_judgment import (
 from .observability import observe_chatbot_api_call
 from .prompt import (
     draft_generator_prompt,
-    memory_extraction_prompt,
-    memory_reconciliation_prompt,
+    load_prompt,
     response_judgment_prompt,
 )
 
@@ -32,6 +30,8 @@ logger = getLogger(__name__)
 
 DRAFT_GENERATOR_MODEL = "gpt-5.6-luna"
 RESPONSE_JUDGMENT_MODEL = "gpt-5.4-nano"
+MEMORY_DOCUMENT_UPDATE_INSTRUCTIONS = load_prompt("long_term_memory_update.md")
+MEMORY_DOCUMENT_SHORTEN_INSTRUCTIONS = load_prompt("long_term_memory_shorten.md")
 RESPONSE_JUDGMENT_TIMEOUT_SECONDS = 60.0
 COOLDOWN_STAGE_INSTRUCTIONS = {
     CooldownStage.RECENT: (
@@ -46,7 +46,7 @@ COOLDOWN_STAGE_INSTRUCTIONS = {
         "Botの反応から15分以上経過しているか、まだ反応していません。通常の基準でnone、reaction、textを選んでください。"
     ),
 }
-MEMORY_EXTRACTION_MODEL = "gpt-5.6-luna"
+MEMORY_DOCUMENT_UPDATE_MODEL = "gpt-5.6-luna"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 REACTION_CONTEXT_INSTRUCTIONS = """
 
@@ -199,6 +199,7 @@ class MessageInMemory:
     is_stale_context: bool = False
     image_url: str | None = None
     pdf_url: str | None = None
+    embeds: list[dict[str, object]] = field(default_factory=list)
     attachments: list[AttachmentInMemory] = field(default_factory=list)
     reactions: list[ReactionInMemory] = field(default_factory=list)
 
@@ -218,6 +219,7 @@ class MessageInMemory:
             "mentioned_user_ids": self.mentioned_user_ids,
             "timestamp": self.timestamp.astimezone(LOCAL_TIMEZONE).isoformat(),
             "is_stale_context": self.is_stale_context,
+            "embeds": self.embeds,
             "attachments": [attachment.to_dict() for attachment in self.attachments],
         }
         if include_reactions:
@@ -256,6 +258,20 @@ class ShortTermMemory:
         timestamp = message.created_at
         image_url = None
         pdf_url = None
+        embeds = [
+            {
+                "type": embed.type,
+                "url": embed.url,
+                "provider": embed.provider.name if embed.provider is not None else None,
+                "author": embed.author.name if embed.author is not None else None,
+                "title": embed.title,
+                "description": embed.description,
+                "fields": [{"name": embed_field.name, "value": embed_field.value} for embed_field in embed.fields],
+                "footer": embed.footer.text if embed.footer is not None else None,
+                "timestamp": embed.timestamp.isoformat() if embed.timestamp is not None else None,
+            }
+            for embed in getattr(message, "embeds", [])
+        ]
 
         # 2. reply_to に関する特殊処理
 
@@ -302,6 +318,7 @@ class ShortTermMemory:
                 timestamp=timestamp,
                 image_url=image_url,
                 pdf_url=pdf_url,
+                embeds=embeds,
             )
         )
 
@@ -543,123 +560,62 @@ def _serialize_response_context(
     )
 
 
-class LongTermMemoryCandidate(BaseModel):
-    """会話から抽出した根拠付き長期記憶候補。"""
-
-    target_user_id: int | None
-    external_entity_name: str | None = None
-    target_resolution: Literal["member", "external", "unresolved"]
-    kind: Literal["profile", "ongoing", "temporary", "shared"]
-    content: str
-    evidence_message_ids: list[int]
-    source_type: Literal["self_statement", "third_party", "inference"]
-    is_sensitive: bool
-
-
 class MemberAliasCandidate(BaseModel):
-    """明示的な根拠から抽出したサーバーメンバーの別名候補。"""
+    """会話全体から抽出したサーバーメンバーの別名候補。"""
 
     alias: str
     target_user_id: int
     evidence_message_ids: list[int]
 
 
-class LongTermMemoryCorrectionCandidate(BaseModel):
-    """新しい事実を伴わない明示的な否定候補。"""
+class MemoryDocumentUpdate(BaseModel):
+    """モデルが返す長期記憶Markdown文書の完成形。"""
 
+    document_key: str
+    document_type: Literal["person", "bot", "shared"]
     target_user_id: int | None
-    external_entity_name: str | None = None
-    statement: str
-    evidence_message_ids: list[int]
-    source_type: Literal["self_statement", "third_party", "inference"]
+    content: str
 
 
-class LongTermMemoryExtraction(BaseModel):
-    """一括抽出した長期記憶候補の集合。"""
+class MemoryDocumentUpdateResult(BaseModel):
+    """一回の会話分析で更新する文書と別名の集合。"""
 
-    candidates: list[LongTermMemoryCandidate]
+    updates: list[MemoryDocumentUpdate] = Field(default_factory=list)
     aliases: list[MemberAliasCandidate] = Field(default_factory=list)
-    corrections: list[LongTermMemoryCorrectionCandidate] = Field(default_factory=list)
 
 
-class MemoryReconciliation(BaseModel):
-    """新しい情報と既存記憶の関係判定。"""
-
-    action: Literal["keep", "supersede", "invalidate", "conflict"]
-    existing_memory_ids: list[uuid.UUID] = Field(default_factory=list)
-
-
-class LongTermMemoryReconciler:
-    """新しい情報が既存記憶を訂正・否定するか判定します。"""
+class MemoryDocumentUpdater:
+    """会話単位で長期記憶Markdown文書を更新します。"""
 
     def __init__(self, client: AsyncOpenAI) -> None:
         self.client = client
 
-    async def reconcile(
+    async def update(
         self,
-        new_information: dict[str, object],
-        existing_memories: list[dict[str, object]],
+        payload: dict[str, object],
         *,
-        correction_only: bool,
-    ) -> MemoryReconciliation:
-        """明確な矛盾だけを構造化された関係として返します。"""
-        if not existing_memories:
-            return MemoryReconciliation(action="keep")
+        shorten: bool = False,
+    ) -> MemoryDocumentUpdateResult:
+        """既存文書と会話を渡し、変更された文書だけを受け取ります。"""
+        instructions = MEMORY_DOCUMENT_UPDATE_INSTRUCTIONS
+        if shorten:
+            instructions += f"\n\n{MEMORY_DOCUMENT_SHORTEN_INSTRUCTIONS}"
         response = await observe_chatbot_api_call(
-            "memory_reconciliation",
-            MEMORY_EXTRACTION_MODEL,
+            "memory_document_shorten" if shorten else "memory_document_update",
+            MEMORY_DOCUMENT_UPDATE_MODEL,
             self.client.responses.parse(
-                model=MEMORY_EXTRACTION_MODEL,
-                reasoning={"effort": "none"},
-                instructions=memory_reconciliation_prompt.MEMORY_RECONCILIATION_INSTRUCTIONS,
-                input=json.dumps(
-                    {
-                        "new_information": new_information,
-                        "existing_memories": existing_memories,
-                        "correction_only": correction_only,
-                    },
-                    ensure_ascii=False,
-                ),
-                text_format=MemoryReconciliation,
+                model=MEMORY_DOCUMENT_UPDATE_MODEL,
+                reasoning={"effort": "medium"},
+                instructions=instructions,
+                input=json.dumps(payload, ensure_ascii=False),
+                text_format=MemoryDocumentUpdateResult,
             ),
+            item_count=1,
         )
-        return response.output_parsed or MemoryReconciliation(action="keep")
-
-
-class LongTermMemoryExtractor:
-    """複数のDiscord投稿から長期記憶候補を抽出します。"""
-
-    def __init__(self, client: AsyncOpenAI) -> None:
-        self.client = client
-
-    async def extract(
-        self,
-        messages: list[MessageInMemory],
-        member_references: list[dict[str, object]],
-    ) -> LongTermMemoryExtraction:
-        """投稿一覧から、根拠付きの長期記憶候補を返します。"""
-        api_response = await observe_chatbot_api_call(
-            "memory_extraction",
-            MEMORY_EXTRACTION_MODEL,
-            self.client.responses.parse(
-                model=MEMORY_EXTRACTION_MODEL,
-                reasoning={"effort": "none"},
-                instructions=memory_extraction_prompt.MEMORY_EXTRACTION_INSTRUCTIONS,
-                input=json.dumps(
-                    {
-                        "messages": [message.to_dict(include_reactions=False) for message in messages],
-                        "members": member_references,
-                    },
-                    ensure_ascii=False,
-                ),
-                text_format=LongTermMemoryExtraction,
-            ),
-            item_count=len(messages),
-        )
-        if api_response.output_parsed is None:
-            logger.warning("Failed to parse long-term memory extraction response")
-            return LongTermMemoryExtraction(candidates=[])
-        return api_response.output_parsed
+        if response.output_parsed is None:
+            logger.warning("Failed to parse memory document update response")
+            return MemoryDocumentUpdateResult()
+        return response.output_parsed
 
 
 class ResponseJudge:

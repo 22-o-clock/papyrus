@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
 
 from .base import ChatbotBase
-from .long_term_memory import ChatbotLongTermMemory
 from .short_term_message import ChatbotStoredMessage
 
 
@@ -315,7 +314,7 @@ class ChatbotMemberAliasRepository:
         normalized_alias: str,
         now: datetime.datetime,
     ) -> None:
-        """同じ別名の衝突状態を揃え、一意なら未解決記憶も結び直します。"""
+        """同じ別名の衝突状態を揃えます。"""
         result = await session.execute(
             select(ChatbotMemberAlias).where(
                 ChatbotMemberAlias.normalized_alias == normalized_alias,
@@ -328,17 +327,3 @@ class ChatbotMemberAliasRepository:
         for alias in aliases:
             alias.status = status
             alias.updated_at = now
-        if status != "active":
-            return
-        target_user_id = next(iter(target_user_ids))
-        unresolved_result = await session.execute(
-            select(ChatbotLongTermMemory).where(
-                ChatbotLongTermMemory.target_resolution == "unresolved",
-                ChatbotLongTermMemory.external_entity_name.is_not(None),
-            )
-        )
-        for memory in unresolved_result.scalars():
-            if memory.external_entity_name and normalize_member_alias(memory.external_entity_name) == normalized_alias:
-                memory.target_user_id = target_user_id
-                memory.external_entity_name = None
-                memory.target_resolution = "member"

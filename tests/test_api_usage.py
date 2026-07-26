@@ -276,8 +276,7 @@ class ApiUsageEmbedTest(TestCase):
         features = aggregate_feature_usages(
             [
                 create_usage("draft_generation", "gpt-5.6-terra", input_tokens=1_000, output_tokens=100),
-                create_usage("memory_extraction", "gpt-5.6-terra", item_count=20, input_tokens=2_000),
-                create_usage("memory_embedding", "text-embedding-3-large", item_count=3, input_tokens=500),
+                create_usage("memory_document_update", "gpt-5.6-luna", item_count=1, input_tokens=2_000),
             ]
         )
         summary = OpenAIUsageSummary(report_date=report_date, costs={"Text models": Decimal("0.1234")})
@@ -292,7 +291,7 @@ class ApiUsageEmbedTest(TestCase):
         field_names = [str(field.name or "") for field in embed.fields]
         ensure_equal(field_names[0], "コスト概要")
         ensure(any(name.startswith("長期記憶 合計") for name in field_names))
-        ensure(any("長期記憶の抽出" in name for name in field_names))
+        ensure(any("長期記憶文書の更新" in name for name in field_names))
         ensure_contains("input 1,000 tokens", "\n".join(str(field.value) for field in embed.fields))
         ensure_contains("部分集計", str(embed.fields[0].value))
         ensure_contains("api-usage-report:2026-07-14", embed.footer.text or "")

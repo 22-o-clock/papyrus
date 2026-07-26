@@ -22,9 +22,8 @@ from cogs.chatbot.responses_api import (
     GeneratedRequiredReply,
     GeneratedTextResponse,
     LLMMessage,
-    LongTermMemoryExtractor,
-    LongTermMemoryReconciler,
-    MessageInMemory,
+    MemoryDocumentUpdater,
+    MemoryDocumentUpdateResult,
     ReactionInMemory,
     ReactionUserInMemory,
     ResponseAction,
@@ -64,6 +63,7 @@ def make_message(spec: MessageSpec) -> Message:
         reference=reference,
         mentions=[SimpleNamespace(id=user_id) for user_id in spec.mentioned_user_ids],
         attachments=[],
+        embeds=[],
         channel=SimpleNamespace(id=100),
         guild=SimpleNamespace(id=200),
     )
@@ -71,6 +71,29 @@ def make_message(spec: MessageSpec) -> Message:
 
 
 class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_serializes_discord_embed_metadata(self) -> None:
+        memory = ShortTermMemory()
+        message = make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="URL"))
+        embed = discord.Embed(
+            title="展開されたタイトル",
+            description="展開された説明",
+            url="https://example.com/post",
+        )
+        embed.set_author(name="投稿者")
+        embed.add_field(name="項目", value="値")
+        cast("object", message).__setattr__("embeds", [embed])
+
+        await memory.append(message)
+
+        serialized = json.loads(memory.to_json())[0]["embeds"][0]
+        if (
+            serialized["title"] != "展開されたタイトル"
+            or serialized["description"] != "展開された説明"
+            or serialized["author"] != "投稿者"
+            or serialized["fields"] != [{"name": "項目", "value": "値"}]
+        ):
+            self.fail("Discord Embedの本文情報を短期文脈へ保存できていません")
+
     async def test_marks_forwarded_content_as_unknown_third_party_statement(self) -> None:
         memory = ShortTermMemory()
         await memory.append(
@@ -544,52 +567,22 @@ class ConfigRecordingResponses:
 
 
 class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
-    async def test_extracts_memories_with_luna_without_reasoning(self) -> None:
-        responses = ConfigRecordingResponses(SimpleNamespace(candidates=[]))
+    async def test_updates_memory_documents_with_luna_and_medium_reasoning(self) -> None:
+        responses = ConfigRecordingResponses(MemoryDocumentUpdateResult())
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
 
-        await LongTermMemoryExtractor(client).extract([], [])
+        await MemoryDocumentUpdater(client).update({"new_messages": []})
 
         if responses.calls[0]["model"] != "gpt-5.6-luna":
-            self.fail("記憶抽出がLunaを使用していません")
-        if responses.calls[0]["reasoning"] != {"effort": "none"}:
-            self.fail("記憶抽出の推論強度がnoneになっていません")
+            self.fail("長期記憶文書の更新がLunaを使用していません")
+        if responses.calls[0]["reasoning"] != {"effort": "medium"}:
+            self.fail("長期記憶文書の更新の推論強度がmediumになっていません")
 
-    async def test_excludes_reactions_from_memory_extraction(self) -> None:
-        responses = ConfigRecordingResponses(SimpleNamespace(candidates=[]))
-        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
-        message = MessageInMemory(
-            message_id=1,
-            author_id=10,
-            author_name="発言者",
-            content="本文",
-            reply_to_message_id=None,
-            mentioned_user_ids=[],
-            timestamp=datetime.datetime(2026, 7, 11, tzinfo=datetime.UTC),
-            reactions=[
-                ReactionInMemory(
-                    emoji_name="👍",
-                    emoji_id=None,
-                    animated=False,
-                    reaction_type="normal",
-                    count=1,
-                )
-            ],
-        )
-
-        await LongTermMemoryExtractor(client).extract([message], [])
-
-        serialized_input = json.loads(str(responses.calls[0]["input"]))
-        if "reactions" in serialized_input["messages"][0]:
-            self.fail("リアクションが長期記憶抽出へ渡されています")
-
-    async def test_reconciles_memories_with_luna_without_reasoning(self) -> None:
-        responses = ConfigRecordingResponses(SimpleNamespace(action="keep", existing_memory_ids=[]))
+    async def test_uses_separate_instructions_for_shortening_retry(self) -> None:
+        responses = ConfigRecordingResponses(MemoryDocumentUpdateResult())
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
 
-        await LongTermMemoryReconciler(client).reconcile({}, [{}], correction_only=False)
+        await MemoryDocumentUpdater(client).update({"proposed_result": {}}, shorten=True)
 
-        if responses.calls[0]["model"] != "gpt-5.6-luna":
-            self.fail("記憶の訂正・競合判定がLunaを使用していません")
-        if responses.calls[0]["reasoning"] != {"effort": "none"}:
-            self.fail("記憶の訂正・競合判定の推論強度がnoneになっていません")
+        if "固定見出しの不一致" not in str(responses.calls[0]["instructions"]):
+            self.fail("文字数超過時に短縮専用の指示を使用していません")

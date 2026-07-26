@@ -1,5 +1,4 @@
 import unittest
-import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -29,15 +28,9 @@ from cogs.chatbot.services.response_policy import (
     should_reset_conversation,
     should_respond,
 )
-from cogs.chatbot.use_cases.admin_validation import (
-    parse_memory_admin_expiration,
-    parse_memory_admin_target,
-    validate_exported_memory_ids,
-)
 from cogs.chatbot.use_cases.conversation import (
     ConversationUseCases,
     get_mentioned_bot_role_ids,
-    should_enqueue_long_term_memory,
 )
 from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
@@ -86,40 +79,6 @@ class HistorySyncRangeTest(unittest.TestCase):
 
         if get_history_sync_after(now - timedelta(days=60), now) != now - timedelta(days=30):
             self.fail("保存済みチャンネルの履歴取得が30日を超えています")
-
-
-class MemoryAdminInputTest(unittest.TestCase):
-    def test_resolves_selected_member(self) -> None:
-        result = parse_memory_admin_target("メンバー", "テストユーザー (123)", {"テストユーザー (123)": 123})
-
-        if result != (123, None, "member"):
-            self.fail("Excelで選択したメンバーを対象ユーザーIDへ変換できません")
-
-    def test_rejects_shared_target_with_value(self) -> None:
-        try:
-            parse_memory_admin_target("共有情報", "不要な対象", {})
-        except ValueError:
-            return
-        self.fail("共有情報に不要な対象名が指定されても拒否されません")
-
-    def test_interprets_naive_excel_datetime_as_japan_time(self) -> None:
-        excel_datetime = datetime(2026, 7, 12, 21, 0, tzinfo=UTC).replace(tzinfo=None)
-        result = parse_memory_admin_expiration(excel_datetime)
-
-        if result != datetime(2026, 7, 12, 12, 0, tzinfo=UTC):
-            self.fail("Excelの日本時間をUTCへ正しく変換できません")
-
-    def test_accepts_exported_subset_when_database_has_new_memories(self) -> None:
-        exported_id = uuid.uuid4()
-
-        validate_exported_memory_ids({exported_id}, {exported_id})
-
-    def test_rejects_deleted_exported_memory_row(self) -> None:
-        try:
-            validate_exported_memory_ids(set(), {uuid.uuid4()})
-        except ValueError:
-            return
-        self.fail("出力後に削除された記憶行が拒否されません")
 
 
 class ShouldRespondTest(unittest.TestCase):
@@ -204,20 +163,6 @@ class BotRoleMentionTest(unittest.TestCase):
 
         if result:
             self.fail("Bot名と異なる付与ロールへのメンションを誤検出しています")
-
-
-class LongTermMemoryEnqueueTest(unittest.TestCase):
-    def test_excludes_forwarded_message(self) -> None:
-        message = SimpleNamespace(author=SimpleNamespace(bot=False), message_snapshots=[SimpleNamespace(content="本文")])
-
-        if should_enqueue_long_term_memory(cast("Message", message)):
-            self.fail("転送メッセージが長期記憶抽出の対象になっています")
-
-    def test_includes_regular_human_message(self) -> None:
-        message = SimpleNamespace(author=SimpleNamespace(bot=False), message_snapshots=[])
-
-        if not should_enqueue_long_term_memory(cast("Message", message)):
-            self.fail("通常の人間の投稿が長期記憶抽出から除外されています")
 
 
 class ChannelRolePermissionTest(unittest.TestCase):
@@ -424,6 +369,8 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
         channel = SimpleNamespace(id=100, send=AsyncMock())
         message = cast("Message", SimpleNamespace(channel=channel))
         state = ChannelProcessingState()
+        cog.__dict__["_sent_custom_profiles"] = {}
+        cog.short_term_message_repository = SimpleNamespace(set_custom_profile=AsyncMock())
 
         await cog.execute_response_action(
             message,
@@ -445,6 +392,8 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
         message = cast("Message", SimpleNamespace(channel=channel))
         short_term_memory = SimpleNamespace(can_target_message=lambda message_id: message_id == reply_to_message_id)
         cog.response_pipelines = {100: SimpleNamespace(short_term_memory=short_term_memory)}
+        cog.__dict__["_sent_custom_profiles"] = {}
+        cog.short_term_message_repository = SimpleNamespace(set_custom_profile=AsyncMock())
         state = ChannelProcessingState()
 
         await cog.execute_response_action(

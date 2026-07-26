@@ -12,6 +12,8 @@ OpenAI API callを追加・変更する場合は、機能の実装と同じ変�
   `FeatureUsage` を一緒に更新する。
 - DB列を追加する場合は、`create_chatbot_tables` に既存DB用の `ADD COLUMN IF NOT EXISTS` を追加する。
 - 新しい `operation` は `FEATURE_LABELS` と `ITEM_LABELS`、必要なら `MEMORY_OPERATIONS` に追加する。
+- 長期記憶文書の通常更新は `memory_document_update`、文字数超過時の再生成は
+  `memory_document_shorten` として分けて計測する。
 
 ### 単価
 

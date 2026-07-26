@@ -1,7 +1,7 @@
 import datetime
 from dataclasses import dataclass
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Text, delete, select
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Text, delete, select, update
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
@@ -23,6 +23,10 @@ class ChatbotStoredMessage(ChatbotBase):
     mentioned_user_ids = mapped_column(JSONB, nullable=False)
     created_at = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
     is_bot = mapped_column(Boolean, nullable=False)
+    is_self = mapped_column(Boolean, nullable=False, default=False)
+    is_forwarded = mapped_column(Boolean, nullable=False, default=False)
+    custom_profile_name = mapped_column(Text, nullable=True)
+    embeds = mapped_column(JSONB, nullable=False, default=list)
 
 
 class ChatbotStoredAttachment(ChatbotBase):
@@ -74,6 +78,10 @@ class StoredMessageInput:
     mentioned_user_ids: list[int]
     created_at: datetime.datetime
     is_bot: bool
+    is_self: bool = False
+    is_forwarded: bool = False
+    custom_profile_name: str | None = None
+    embeds: list[dict[str, object]] | None = None
 
 
 @dataclass
@@ -124,6 +132,10 @@ class ChatbotShortTermMessageRepository:
                 "mentioned_user_ids": message.mentioned_user_ids,
                 "created_at": message.created_at,
                 "is_bot": message.is_bot,
+                "is_self": message.is_self,
+                "is_forwarded": message.is_forwarded,
+                "custom_profile_name": message.custom_profile_name,
+                "embeds": message.embeds or [],
             }
             statement = insert(ChatbotStoredMessage).values(**values)
             await session.execute(
@@ -131,6 +143,17 @@ class ChatbotShortTermMessageRepository:
                     index_elements=[ChatbotStoredMessage.message_id],
                     set_={key: value for key, value in values.items() if key not in {"message_id", "created_at"}},
                 )
+            )
+
+    async def set_custom_profile(self, message_ids: list[int], profile_name: str | None) -> None:
+        """送信済みBotメッセージへ生成時のカスタムプロファイルを記録します。"""
+        if not message_ids:
+            return
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                update(ChatbotStoredMessage)
+                .where(ChatbotStoredMessage.message_id.in_(message_ids))
+                .values(custom_profile_name=profile_name)
             )
 
     async def delete(self, message_id: int) -> None:
@@ -214,6 +237,40 @@ class ChatbotShortTermMessageRepository:
             )
             return list(result.scalars().all())
 
+    async def get_range(
+        self,
+        channel_id: int,
+        *,
+        after_message_id: int | None,
+        through_message_id: int | None = None,
+    ) -> list[ChatbotStoredMessage]:
+        """処理カーソルより後のメッセージをDiscord ID順で取得します。"""
+        conditions = [ChatbotStoredMessage.channel_id == channel_id]
+        if after_message_id is not None:
+            conditions.append(ChatbotStoredMessage.message_id > after_message_id)
+        if through_message_id is not None:
+            conditions.append(ChatbotStoredMessage.message_id <= through_message_id)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ChatbotStoredMessage).where(*conditions).order_by(ChatbotStoredMessage.message_id)
+            )
+            return list(result.scalars().all())
+
+    async def has_pending_attachments(self, message_ids: list[int]) -> bool:
+        """対象メッセージに解析待ちの添付が残っているか返します。"""
+        if not message_ids:
+            return False
+        async with self._session_factory() as session:
+            result = await session.scalar(
+                select(ChatbotStoredAttachment.id)
+                .where(
+                    ChatbotStoredAttachment.message_id.in_(message_ids),
+                    ChatbotStoredAttachment.analysis_status == "pending",
+                )
+                .limit(1)
+            )
+            return result is not None
+
     async def get_latest_created_at(self, channel_id: int) -> datetime.datetime | None:
         """履歴の差分取得に使う、指定チャンネルの最新保存日時を返します。"""
         async with self._session_factory() as session:
@@ -221,6 +278,16 @@ class ChatbotShortTermMessageRepository:
                 select(ChatbotStoredMessage.created_at)
                 .where(ChatbotStoredMessage.channel_id == channel_id)
                 .order_by(ChatbotStoredMessage.created_at.desc())
+                .limit(1)
+            )
+
+    async def get_latest_message_id(self, channel_id: int) -> int | None:
+        """指定チャンネルで保存済みの最新DiscordメッセージIDを返します。"""
+        async with self._session_factory() as session:
+            return await session.scalar(
+                select(ChatbotStoredMessage.message_id)
+                .where(ChatbotStoredMessage.channel_id == channel_id)
+                .order_by(ChatbotStoredMessage.message_id.desc())
                 .limit(1)
             )
 
