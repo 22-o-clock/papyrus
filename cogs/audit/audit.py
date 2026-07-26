@@ -1,11 +1,12 @@
 import os
+from collections.abc import Sequence
 from datetime import timedelta, timezone
 from enum import Enum
 from logging import getLogger
 from typing import Any
 
 import discord
-from discord import Message, TextChannel, Thread
+from discord import Attachment, File, Message, TextChannel, Thread
 from discord.ext import commands
 
 from core.runtime_environment import get_runtime_environment
@@ -16,6 +17,7 @@ logger = getLogger(__name__)
 WEBHOOK_NAME = "auditor"
 JST = timezone(timedelta(hours=9))
 REPLY_PREVIEW_LENGTH = 20
+UNAVAILABLE_REPLY_PREFIX = "> ***in reply to an unavailable message***\n"
 
 
 class Event(Enum):
@@ -54,18 +56,49 @@ async def _create_reply_prefix(message: Message) -> str:
         return ""
 
     try:
-        ref = await message.channel.fetch_message(message.reference.message_id)
-    except discord.NotFound:
-        if isinstance(message.channel, Thread) and isinstance(message.channel.parent, TextChannel):
+        try:
+            ref = await message.channel.fetch_message(message.reference.message_id)
+        except discord.NotFound:
+            if not isinstance(message.channel, Thread) or not isinstance(message.channel.parent, TextChannel):
+                raise
             ref = await message.channel.parent.fetch_message(message.reference.message_id)
-        else:
-            raise
+    except discord.HTTPException:
+        # 返信元は監査対象そのものではないため、取得不能でも本体の記録を優先する。
+        logger.warning("Failed to fetch referenced message %s for audit log", message.reference.message_id)
+        return UNAVAILABLE_REPLY_PREFIX
 
     # URLを含む文字列にリンクを付与できないのでURLは無効化している
     reply_content = ref.clean_content[:REPLY_PREVIEW_LENGTH]
     reply_content = reply_content.replace("\n", "").replace("http:/", "http: /").replace("https:/", "https: /")
     ellipsis = "…" if len(ref.clean_content) > REPLY_PREVIEW_LENGTH else ""
     return f"> [***in reply to @{ref.author.display_name}:*** {reply_content}{ellipsis}]({ref.jump_url})\n"
+
+
+async def _collect_attachment_files(attachments: Sequence[Attachment]) -> tuple[list[File], list[Attachment]]:
+    """取得できる添付だけをWebhook送信用ファイルへ変換する。"""
+    files: list[File] = []
+    unavailable_attachments: list[Attachment] = []
+    for attachment in attachments:
+        try:
+            files.append(await attachment.to_file(use_cached=True))
+        except discord.HTTPException:
+            # 削除後はCDN上の実体が失われることがあるため、他の監査情報は継続して送信する。
+            logger.warning("Failed to retrieve attachment %s for audit log", attachment.id)
+            unavailable_attachments.append(attachment)
+    return files, unavailable_attachments
+
+
+def _append_unavailable_attachment_notice(content: str, attachments: Sequence[Attachment]) -> str:
+    """取得不能だった添付の名前を監査本文へ追記する。"""
+    if not attachments:
+        return content
+    notices = "\n".join(f"> ⚠️ Attachment unavailable: {attachment.filename}" for attachment in attachments)
+    return f"{content}\n{notices}"
+
+
+def _has_auditable_edit(before: Message, after: Message) -> bool:
+    """利用者が作成する本文または添付に変更があるか判定する。"""
+    return before.content != after.content or before.attachments != after.attachments
 
 
 async def create_webhook_log_message(message: Message, event: Event) -> dict[str, Any]:
@@ -103,12 +136,15 @@ async def create_webhook_log_message(message: Message, event: Event) -> dict[str
             message.jump_url,
         )
 
+    files, unavailable_attachments = await _collect_attachment_files(message.attachments)
+    content = _append_unavailable_attachment_notice(content, unavailable_attachments)
+
     return {
         "content": content,
         # 監査対象は TextChannel/Thread のみだが、Message 型には name がないため型チェックを抑制する
         "username": message.author.display_name + " on #" + message.channel.name,  # type: ignore[union-attr]
         "avatar_url": message.author.display_avatar.url,
-        "files": [(await atch.to_file()) for atch in message.attachments],
+        "files": files,
         "embeds": message.embeds,
         "allowed_mentions": discord.AllowedMentions.none(),
     }
@@ -167,11 +203,12 @@ class Audit(commands.Cog):
 
             self.hook = None
             self.hook = await fetch_webhook(thread, name=WEBHOOK_NAME)
+            files, unavailable_attachments = await _collect_attachment_files(message.attachments)
             await self.hook.send(
-                content=message.content,
+                content=_append_unavailable_attachment_notice(message.content, unavailable_attachments),
                 username=message.author.display_name,
                 avatar_url=message.author.display_avatar.url,
-                files=[(await atch.to_file()) for atch in message.attachments],
+                files=files,
                 embeds=message.embeds,
                 allowed_mentions=discord.AllowedMentions.none(),
                 thread=thread,
@@ -198,7 +235,7 @@ class Audit(commands.Cog):
         ):
             return
 
-        if (before.content == after.content and before.attachments == []) or after.author.bot:
+        if not _has_auditable_edit(before, after) or after.author.bot:
             return
 
         if isinstance(before.channel, (TextChannel, Thread)):
