@@ -199,12 +199,13 @@ class Audit(commands.Cog):
 
         if self.hook is not None and message.webhook_id == self.hook.id and message.channel.id == self.log_thread:
             thread = await _get_or_fetch_channel(message.guild, self.log_thread)
-            await thread.send("⚠️ 監査ログを削除しないでください")
+            warning_message = await thread.send("⚠️ 監査ログを削除しないでください")
+            self.bot.dispatch("exclude_from_long_term_memory", warning_message)
 
             self.hook = None
             self.hook = await fetch_webhook(thread, name=WEBHOOK_NAME)
             files, unavailable_attachments = await _collect_attachment_files(message.attachments)
-            await self.hook.send(
+            restored_message = await self.hook.send(
                 content=_append_unavailable_attachment_notice(message.content, unavailable_attachments),
                 username=message.author.display_name,
                 avatar_url=message.author.display_avatar.url,
@@ -212,16 +213,20 @@ class Audit(commands.Cog):
                 embeds=message.embeds,
                 allowed_mentions=discord.AllowedMentions.none(),
                 thread=thread,
+                wait=True,
             )
+            self.bot.dispatch("exclude_from_long_term_memory", restored_message)
 
         elif isinstance(message.channel, (TextChannel, Thread)):
             thread = await _get_or_fetch_channel(message.guild, self.log_thread)
             hook = await self._get_hook(thread)
 
-            await hook.send(
+            log_message = await hook.send(
                 **(await create_webhook_log_message(message, Event.delete)),
                 thread=thread,
+                wait=True,
             )
+            self.bot.dispatch("exclude_from_long_term_memory", log_message)
 
     @commands.Cog.listener("on_message_edit")
     async def message_edit_log(self, before: Message, after: Message) -> None:
@@ -242,10 +247,12 @@ class Audit(commands.Cog):
             thread = await _get_or_fetch_channel(before.guild, self.log_thread)
             hook = await self._get_hook(thread)
 
-            await hook.send(
+            log_message = await hook.send(
                 **(await create_webhook_log_message(before, Event.edit)),
                 thread=thread,
+                wait=True,
             )
+            self.bot.dispatch("exclude_from_long_term_memory", log_message)
 
 
 async def setup(bot: commands.Bot) -> None:

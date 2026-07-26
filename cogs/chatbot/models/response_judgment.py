@@ -11,14 +11,6 @@ class ResponseMode(StrEnum):
     TEXT = "text"
 
 
-class CooldownStage(StrEnum):
-    """最後のBot反応からの経過時間に応じた自発反応の抑制度。"""
-
-    RECENT = "recent"
-    RECOVERING = "recovering"
-    READY = "ready"
-
-
 class ResponseJudgment(BaseModel):
     """安価なモデルによる応答形式の判定。"""
 

@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import hashlib
 from dataclasses import dataclass
 from logging import getLogger
 
@@ -10,11 +11,12 @@ from openai import AsyncOpenAI, RateLimitError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cogs.chatbot.channel_roles import ChannelRole, ChannelRoleManager
+from cogs.chatbot.constants import DEFAULT_CONVERSATION_RESET_MINUTES, EMBED_IMAGE_MAX_COUNT
 from cogs.chatbot.models import ChannelProcessingState, CustomProfile, ResponseMode, ResponseRequestOptions
 from cogs.chatbot.repositories.custom_profile import CustomProfileRepository
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
-from cogs.chatbot.repositories.long_term_memory import ChatbotLongTermMemoryRepository
 from cogs.chatbot.repositories.member_alias import ChatbotMemberAliasRepository, find_member_aliases
+from cogs.chatbot.repositories.memory_document import ChatbotMemoryDocumentRepository
 from cogs.chatbot.repositories.short_term_message import (
     ChatbotShortTermMessageRepository,
     StoredAttachmentInput,
@@ -41,7 +43,6 @@ from cogs.chatbot.services.response_policy import (
     activate_response,
     claim_response_slot,
     get_available_referenced_author_id,
-    get_cooldown_stage,
     get_response_debounce_seconds,
     is_generation_current,
     should_reset_conversation,
@@ -94,11 +95,6 @@ def get_mentioned_bot_role_ids(message: Message, bot_user: discord.ClientUser) -
     return {role.id for role in message.role_mentions if role.id in bot_role_ids}
 
 
-def should_enqueue_long_term_memory(message: Message) -> bool:
-    """本人へ帰属できる人間の投稿だけを長期記憶抽出へ渡します。"""
-    return not message.author.bot and not message.message_snapshots
-
-
 def _collect_available_custom_emojis(message: Message, response_mode: ResponseMode) -> tuple[str, ...]:
     """リアクション生成時にLLMへ提示する、利用可能なサーバーのカスタム絵文字一覧を返します。"""
     if response_mode is not ResponseMode.REACTION or message.guild is None:
@@ -116,12 +112,11 @@ class ConversationUseCases:
         self.environment_repository = DatabaseEnvironmentRepository(session_factory)
         self.channel_role_manager = ChannelRoleManager(self.environment_repository)
         self.settings_use_cases = SettingsUseCases(
-            self.environment_repository,
             self.channel_role_manager,
             self.runtime_environment,
         )
         self.short_term_message_repository = ChatbotShortTermMessageRepository(session_factory)
-        self.long_term_memory_repository = ChatbotLongTermMemoryRepository(session_factory)
+        self.long_term_memory_repository = ChatbotMemoryDocumentRepository(session_factory)
         self.member_alias_repository = ChatbotMemberAliasRepository(session_factory)
         self.custom_profile_use_cases = CustomProfileUseCases(
             CustomProfileRepository(session_factory),
@@ -133,6 +128,8 @@ class ConversationUseCases:
         self._initialization_lock = asyncio.Lock()
         self._channel_states: dict[int, ChannelProcessingState] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._sent_custom_profiles: dict[int, str | None] = {}
+        self._long_term_memory_excluded_message_ids: set[int] = set()
         self.long_term_memory_use_cases = LongTermMemoryUseCases(
             self.bot,
             self.environment_repository,
@@ -149,6 +146,7 @@ class ConversationUseCases:
             self.response_pipelines,
             self.long_term_memory_repository,
             self.member_alias_repository,
+            self.short_term_message_repository,
         )
 
     async def initialize_response_pipeline_for_channel(self, channel_id: int) -> None:
@@ -203,6 +201,9 @@ class ConversationUseCases:
                                 reply_to_message_id=stored.reply_to_message_id,
                                 mentioned_user_ids=stored.mentioned_user_ids,
                                 timestamp=stored.created_at,
+                                is_bot=stored.is_bot,
+                                is_forwarded=stored.is_forwarded,
+                                embeds=stored.embeds,
                                 attachments=attachments_by_message_id.get(stored.message_id, []),
                                 reactions=reactions_by_message_id.get(stored.message_id, []),
                             )
@@ -266,8 +267,8 @@ class ConversationUseCases:
                     channel_message_count = 0
                     async for message in channel.history(after=after, oldest_first=True, limit=None):
                         await self._append_message_to_short_term_memory(message, state)
-                        if self.runtime_environment.is_production and should_enqueue_long_term_memory(message):
-                            await self.long_term_memory_use_cases.enqueue(message.id, channel.id)
+                        if self.runtime_environment.is_production:
+                            await self._enqueue_long_term_memory(message)
                         channel_message_count += 1
                     synchronized_message_count += channel_message_count
                     if channel_message_count:
@@ -327,13 +328,13 @@ class ConversationUseCases:
             else:
                 await self._append_message_to_short_term_memory(message, state)
 
+        if self.runtime_environment.is_production:
+            await self._enqueue_long_term_memory(message)
+
         # 3. 回答を行うかの判定
         # 3.1 ボットのメッセージについては返信しない
         if message.author.bot:
             return
-
-        if self.runtime_environment.is_production and should_enqueue_long_term_memory(message):
-            await self.long_term_memory_use_cases.enqueue(message.id, message.channel.id)
 
         bot_user = self.bot.user
         if bot_user is None:
@@ -505,35 +506,19 @@ class ConversationUseCases:
                     mentioned_user_ids=stored_message.mentioned_user_ids,
                     created_at=stored_message.timestamp,
                     is_bot=after.author.bot,
+                    is_self=self._is_self_message(after),
+                    is_forwarded=bool(after.message_snapshots),
+                    is_long_term_memory_excluded=after.id in self._long_term_memory_excluded_message_ids,
+                    custom_profile_name=self._sent_custom_profiles.get(after.id),
+                    embeds=self._serialize_embeds(after),
                 )
             )
             await self._synchronize_message_reactions(after)
-            if not after.author.bot:
-                await self.short_term_message_repository.delete_attachments(after.id)
-                for attachment in after.attachments:
-                    attachment_kind = self.attachment_use_cases.get_kind(attachment.content_type)
-                    if attachment_kind is None:
-                        continue
-                    await self.short_term_message_repository.save_attachment(
-                        StoredAttachmentInput(
-                            id=attachment.id,
-                            message_id=after.id,
-                            url=attachment.url,
-                            filename=attachment.filename,
-                            content_type=attachment.content_type,
-                            kind=attachment_kind,
-                        )
-                    )
-                    self.attachment_use_cases.schedule(
-                        after.id,
-                        attachment.id,
-                        attachment.filename,
-                        attachment.url,
-                        attachment_kind,
-                    )
+            await self.short_term_message_repository.delete_attachments(after.id)
+            await self._save_message_media(after)
 
-            if self.runtime_environment.is_production and not after.author.bot:
-                await self.long_term_memory_use_cases.enqueue(after.id, after.channel.id)
+            if self.runtime_environment.is_production:
+                await self._enqueue_long_term_memory(after)
 
     async def _is_reply_to_bot(self, message: Message) -> bool:
         """受信したメッセージが、このボットの発言へのDiscord返信か判定します。
@@ -647,7 +632,7 @@ class ConversationUseCases:
         if not message.author.bot and should_reset_conversation(
             state.last_human_message_timestamp,
             message.created_at,
-            self.settings_use_cases.conversation_reset_minutes,
+            DEFAULT_CONVERSATION_RESET_MINUTES,
         ):
             short_term_memory.reset_for_new_conversation()
 
@@ -665,33 +650,113 @@ class ConversationUseCases:
                     mentioned_user_ids=stored_message.mentioned_user_ids,
                     created_at=stored_message.timestamp,
                     is_bot=message.author.bot,
+                    is_self=self._is_self_message(message),
+                    is_forwarded=bool(message.message_snapshots),
+                    is_long_term_memory_excluded=message.id in self._long_term_memory_excluded_message_ids,
+                    custom_profile_name=self._sent_custom_profiles.get(message.id),
+                    embeds=self._serialize_embeds(message),
                 )
             )
             await self._synchronize_message_reactions(message)
-            if not message.author.bot:
-                for attachment in message.attachments:
-                    attachment_kind = self.attachment_use_cases.get_kind(attachment.content_type)
-                    if attachment_kind is None:
-                        continue
-                    await self.short_term_message_repository.save_attachment(
-                        StoredAttachmentInput(
-                            id=attachment.id,
-                            message_id=message.id,
-                            url=attachment.url,
-                            filename=attachment.filename,
-                            content_type=attachment.content_type,
-                            kind=attachment_kind,
-                        )
-                    )
-                    self.attachment_use_cases.schedule(
-                        message.id,
-                        attachment.id,
-                        attachment.filename,
-                        attachment.url,
-                        attachment_kind,
-                    )
+            await self._save_message_media(message)
+            self._long_term_memory_excluded_message_ids.discard(message.id)
         if not message.author.bot:
             state.last_human_message_timestamp = message.created_at
+
+    def _is_self_message(self, message: Message) -> bool:
+        bot_user = self.bot.user
+        return bot_user is not None and message.author.id == bot_user.id
+
+    async def exclude_from_long_term_memory(self, message: Message) -> None:
+        """他機能が生成した投稿を長期記憶から除外し、イベント順の競合も吸収します。"""
+        self._long_term_memory_excluded_message_ids.add(message.id)
+        await self.short_term_message_repository.exclude_from_long_term_memory(message.id)
+        asyncio.get_running_loop().call_later(
+            60,
+            self._long_term_memory_excluded_message_ids.discard,
+            message.id,
+        )
+
+    async def _enqueue_long_term_memory(self, message: Message) -> None:
+        """人間またはPapyrus自身の投稿だけを文書更新の起点にします。"""
+        is_human = not message.author.bot
+        if message.message_snapshots or (not is_human and not self._is_self_message(message)):
+            return
+        await self.long_term_memory_use_cases.enqueue(
+            message.id,
+            message.channel.id,
+            is_human=is_human,
+            created_at=message.created_at,
+        )
+
+    @staticmethod
+    def _serialize_embeds(message: Message) -> list[dict[str, object]]:
+        """Discordが展開したEmbedを会話理解に必要な項目だけ保存します。"""
+        return [
+            {
+                "type": embed.type,
+                "url": embed.url,
+                "provider": embed.provider.name if embed.provider is not None else None,
+                "author": embed.author.name if embed.author is not None else None,
+                "title": embed.title,
+                "description": embed.description,
+                "fields": [{"name": field.name, "value": field.value} for field in embed.fields],
+                "footer": embed.footer.text if embed.footer is not None else None,
+                "timestamp": embed.timestamp.isoformat() if embed.timestamp is not None else None,
+                "image_url": embed.image.url if embed.image is not None else None,
+                "thumbnail_url": embed.thumbnail.url if embed.thumbnail is not None else None,
+            }
+            for embed in message.embeds
+        ]
+
+    async def _save_message_media(self, message: Message) -> None:
+        """通常添付とEmbed画像を保存し、重複URLを除いて解析します。"""
+        media: list[tuple[int, str, str, str | None, str]] = []
+        for attachment in message.attachments:
+            kind = self.attachment_use_cases.get_kind(attachment.content_type)
+            if kind is not None:
+                media.append((attachment.id, attachment.url, attachment.filename, attachment.content_type, kind))
+
+        seen_urls = {url for _, url, _, _, _ in media}
+        embed_image_urls: list[str] = []
+        for embed in message.embeds:
+            for image in (embed.image, embed.thumbnail):
+                url = image.url if image is not None else None
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    embed_image_urls.append(url)
+                    if len(embed_image_urls) == EMBED_IMAGE_MAX_COUNT:
+                        break
+            if len(embed_image_urls) == EMBED_IMAGE_MAX_COUNT:
+                break
+        for position, url in enumerate(embed_image_urls):
+            digest = hashlib.blake2b(f"{message.id}:{url}".encode(), digest_size=8).digest()
+            attachment_id = -(int.from_bytes(digest, "big", signed=False) & ((1 << 63) - 1))
+            media.append((attachment_id, url, f"embed-image-{position + 1}", None, "image"))
+
+        for attachment_id, url, filename, content_type, kind in media:
+            await self.short_term_message_repository.save_attachment(
+                StoredAttachmentInput(
+                    id=attachment_id,
+                    message_id=message.id,
+                    url=url,
+                    filename=filename,
+                    content_type=content_type,
+                    kind=kind,
+                )
+            )
+            self.attachment_use_cases.schedule(message.id, attachment_id, filename, url, kind)
+
+    async def _record_sent_profiles(
+        self,
+        messages: list[Message],
+        custom_profile_name: str | None,
+    ) -> None:
+        """生成済みPapyrus投稿が自己記憶の根拠になるか判別できるよう記録します。"""
+        message_ids = [message.id for message in messages]
+        for message_id in message_ids:
+            self._sent_custom_profiles[message_id] = custom_profile_name
+        await self.short_term_message_repository.set_custom_profile(message_ids, custom_profile_name)
 
     async def on_raw_reaction_change(self, message_id: int, channel_id: int) -> None:
         """リアクションイベントを応答開始条件にせず、短期文脈だけ更新します。"""
@@ -764,7 +829,6 @@ class ConversationUseCases:
         response_mode = await self._select_response_mode(
             message,
             state,
-            role,
             _ResponseSelectionRequest(
                 generation_revision=generation_revision,
                 is_explicit_call=is_explicit_call,
@@ -775,7 +839,10 @@ class ConversationUseCases:
             return
 
         async def generate_response() -> LLMMessage:
-            long_term_memory_context = await self.memory_search_use_cases.build_response_context(message.channel.id)
+            long_term_memory_context = await self.memory_search_use_cases.build_response_context(
+                message.channel.id,
+                resolved_member_aliases,
+            )
             return await self.response_pipelines[message.channel.id].generate_response(
                 role,
                 ResponseGenerationOptions(
@@ -814,7 +881,11 @@ class ConversationUseCases:
         async with state.lock:
             if not is_generation_current(state, generation_revision):
                 return
-            await self.execute_response_action(message, generated_response, state)
+            await self.execute_response_action(
+                message,
+                generated_response,
+                custom_profile_name=custom_profile.name if custom_profile is not None else None,
+            )
             if is_explicit_call:
                 state.active_response_is_explicit_call = False
 
@@ -822,7 +893,6 @@ class ConversationUseCases:
         self,
         message: Message,
         state: ChannelProcessingState,
-        role: ChannelRole,
         request: _ResponseSelectionRequest,
     ) -> ResponseMode | None:
         """明示呼びかけを優先し、それ以外は固定したクールダウン段階で判定します。"""
@@ -834,18 +904,14 @@ class ConversationUseCases:
             )
             return ResponseMode.TEXT
 
-        cooldown_stage = get_cooldown_stage(state.last_action_at, asyncio.get_running_loop().time())
         judgment = await self.response_pipelines[message.channel.id].judge_response(
-            role,
-            cooldown_stage=cooldown_stage,
             resolved_member_aliases=request.resolved_member_aliases,
         )
         logger.info(
-            "Completed chatbot response judgment (channel_id=%s, trigger_message_id=%s, response_mode=%s, cooldown_stage=%s)",
+            "Completed chatbot response judgment (channel_id=%s, trigger_message_id=%s, response_mode=%s)",
             message.channel.id,
             message.id,
             judgment.response_mode.value,
-            cooldown_stage.value,
         )
         async with state.lock:
             if is_generation_current(state, request.generation_revision):
@@ -867,17 +933,16 @@ class ConversationUseCases:
         self,
         message: Message,
         response: LLMMessage,
-        state: ChannelProcessingState,
+        *,
+        custom_profile_name: str | None = None,
     ) -> None:
         """構造化された応答行動をDiscord上で実行します。"""
         if response.action is ResponseAction.SILENCE:
             return
 
-        now = asyncio.get_running_loop().time()
-
         if response.action is ResponseAction.MESSAGE:
-            await send_split_response(message.channel, response.content)
-            state.last_action_at = now
+            sent_messages = await send_split_response(message.channel, response.content)
+            await self._record_sent_profiles(sent_messages, custom_profile_name)
             return
 
         reply_to_message_id = response.reply_to_message_id
@@ -903,8 +968,7 @@ class ConversationUseCases:
                 return
             resolved_emoji = resolve_reaction_emoji(message.guild, reaction_emoji)
             await target_message.add_reaction(resolved_emoji)
-            state.last_action_at = now
             return
 
-        await reply_with_split_response(target_message, response.content)
-        state.last_action_at = now
+        sent_messages = await reply_with_split_response(target_message, response.content)
+        await self._record_sent_profiles(sent_messages, custom_profile_name)

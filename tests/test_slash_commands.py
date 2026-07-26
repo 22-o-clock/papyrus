@@ -18,9 +18,6 @@ EXPECTED_GROUP_COMMANDS = {
     "chatbot": {
         "aliases_export",
         "aliases_import",
-        "conversation_reset",
-        "memories_export",
-        "memories_import",
         "profile_disable",
         "profile_list",
         "profile_save",
@@ -62,7 +59,7 @@ COMMAND_GROUPS = (
 )
 
 INDEPENDENT_COMMANDS = (Notify.remind, Speak.choice_command, Speak.hi)
-EXPECTED_SLASH_COMMAND_COUNT = 44
+EXPECTED_SLASH_COMMAND_COUNT = 41
 
 
 def ensure(condition: object) -> None:

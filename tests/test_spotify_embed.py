@@ -173,7 +173,10 @@ class SpotifyEmbedFallbackTest(IsolatedAsyncioTestCase):
     ) -> None:
         fetch_oembed.return_value = SpotifyOEmbed("Playlist", "https://i.scdn.co/image/abc")
         message, reply = self._message()
-        cog = SpotifyEmbedFallback(cast("commands.Bot", Mock()))
+        sent_message = SimpleNamespace(id=456)
+        reply.return_value = sent_message
+        bot = Mock()
+        cog = SpotifyEmbedFallback(cast("commands.Bot", bot))
 
         await cog.on_message(message)
 
@@ -186,3 +189,4 @@ class SpotifyEmbedFallbackTest(IsolatedAsyncioTestCase):
         kwargs = await_args.kwargs
         if kwargs["embeds"][0].title != "Playlist" or kwargs["mention_author"] is not False:
             raise AssertionError(kwargs)
+        bot.dispatch.assert_called_once_with("exclude_from_long_term_memory", sent_message)

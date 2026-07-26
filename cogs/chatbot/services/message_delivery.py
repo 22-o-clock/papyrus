@@ -23,14 +23,16 @@ def split_discord_response(content: str, maximum_length: int = DISCORD_RESPONSE_
     return chunks
 
 
-async def send_split_response(channel: discord.abc.Messageable, content: str) -> None:
+async def send_split_response(channel: discord.abc.Messageable, content: str) -> list[Message]:
     """長文応答を分割し、同じチャンネルへ順番に送信します。"""
-    for chunk in split_discord_response(content):
-        await channel.send(chunk, suppress_embeds=True)
+    return [await channel.send(chunk, suppress_embeds=True) for chunk in split_discord_response(content)]
 
 
-async def reply_with_split_response(target: discord.PartialMessage | Message, content: str) -> None:
+async def reply_with_split_response(target: discord.PartialMessage | Message, content: str) -> list[Message]:
     """長文応答を分割し、先行メッセージへの返信として連続送信します。"""
     reply_target = target
+    sent_messages: list[Message] = []
     for chunk in split_discord_response(content):
         reply_target = await reply_target.reply(chunk, suppress_embeds=True)
+        sent_messages.append(reply_target)
+    return sent_messages

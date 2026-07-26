@@ -9,8 +9,8 @@ import discord
 from discord import Message
 
 from cogs.chatbot.channel_roles import ChannelRole
+from cogs.chatbot.constants import SHORT_TERM_MEMORY_PROMPT_TOKENS
 from cogs.chatbot.models import (
-    CooldownStage,
     CustomProfile,
     ResponseJudgment,
     ResponseMode,
@@ -22,8 +22,8 @@ from cogs.chatbot.responses_api import (
     GeneratedRequiredReply,
     GeneratedTextResponse,
     LLMMessage,
-    LongTermMemoryExtractor,
-    LongTermMemoryReconciler,
+    MemoryDocumentUpdater,
+    MemoryDocumentUpdateResult,
     MessageInMemory,
     ReactionInMemory,
     ReactionUserInMemory,
@@ -64,6 +64,7 @@ def make_message(spec: MessageSpec) -> Message:
         reference=reference,
         mentions=[SimpleNamespace(id=user_id) for user_id in spec.mentioned_user_ids],
         attachments=[],
+        embeds=[],
         channel=SimpleNamespace(id=100),
         guild=SimpleNamespace(id=200),
     )
@@ -71,7 +72,30 @@ def make_message(spec: MessageSpec) -> Message:
 
 
 class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
-    async def test_marks_forwarded_content_as_unknown_third_party_statement(self) -> None:
+    async def test_serializes_discord_embed_metadata(self) -> None:
+        memory = ShortTermMemory()
+        message = make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="URL"))
+        embed = discord.Embed(
+            title="展開されたタイトル",
+            description="展開された説明",
+            url="https://example.com/post",
+        )
+        embed.set_author(name="投稿者")
+        embed.add_field(name="項目", value="値")
+        cast("object", message).__setattr__("embeds", [embed])
+
+        await memory.append(message)
+
+        serialized = json.loads(memory.to_json())["m"][0]["e"][0]
+        if (
+            serialized["title"] != "展開されたタイトル"
+            or serialized["description"] != "展開された説明"
+            or serialized["author"] != "投稿者"
+            or serialized["fields"] != [{"name": "項目", "value": "値"}]
+        ):
+            self.fail("Discord Embedの本文情報を短期文脈へ保存できていません")
+
+    async def test_marks_forwarded_content_with_sparse_flag(self) -> None:
         memory = ShortTermMemory()
         await memory.append(
             make_message(
@@ -85,14 +109,10 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        stored_content = memory.memory[0].content
+        serialized = json.loads(memory.to_json())["m"][0]
 
-        if "[転送された第三者の発言]" not in stored_content:
-            self.fail("転送メッセージが第三者の発言として明示されていません")
-        if "転送者による発言ではありません" not in stored_content:
-            self.fail("転送本文を転送者自身の発言ではないと明示できていません")
-        if "原発言者は不明" not in stored_content or "本文: 原文です" not in stored_content:
-            self.fail("取得不能な原発言者と転送本文を正しく表現できていません")
+        if serialized.get("f") is not True or serialized.get("c") != "原文です":
+            self.fail("転送メッセージを本文への説明追加ではなく明示フラグで表現できていません")
 
     async def test_serializes_distinct_user_ids_for_same_display_name(self) -> None:
         memory = ShortTermMemory()
@@ -105,10 +125,10 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
 
         serialized = json.loads(memory.to_json())
 
-        if [message["author_id"] for message in serialized] != [10, 20]:
+        if [message["a"] for message in serialized["m"]] != [10, 20]:
             self.fail("同じ表示名の発言者がユーザーIDで区別されていません")
-        if [message["author_name"] for message in serialized] != ["同じ名前", "同じ名前"]:
-            self.fail("表示名が会話生成用の情報として保持されていません")
+        if serialized["a"] != {"10": "同じ名前", "20": "同じ名前"}:
+            self.fail("表示名が発言者辞書に保持されていません")
 
     async def test_keeps_reply_message_id_and_all_mentioned_user_ids(self) -> None:
         memory = ShortTermMemory()
@@ -155,6 +175,78 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
         if memory.can_target_message(2):
             self.fail("参考情報の投稿を返信またはリアクションの対象にできます")
 
+    def test_restore_reapplies_latest_twelve_hour_conversation_gap(self) -> None:
+        memory = ShortTermMemory()
+        first_timestamp = datetime.datetime(2026, 7, 22, 9, 0, tzinfo=datetime.UTC)
+        memory.restore(
+            [
+                MessageInMemory(1, 10, "人間A", "古い話題", None, [], first_timestamp),
+                MessageInMemory(
+                    2,
+                    99,
+                    "Bot",
+                    "古い話題への返答",
+                    None,
+                    [],
+                    first_timestamp + datetime.timedelta(minutes=1),
+                    is_bot=True,
+                ),
+                MessageInMemory(
+                    3,
+                    20,
+                    "人間B",
+                    "新しい話題",
+                    None,
+                    [],
+                    first_timestamp + datetime.timedelta(hours=13),
+                ),
+                MessageInMemory(
+                    4,
+                    30,
+                    "人間C",
+                    "新しい話題の続き",
+                    None,
+                    [],
+                    first_timestamp + datetime.timedelta(hours=14),
+                ),
+            ]
+        )
+
+        if [message.message_id for message in memory.memory] != [2, 3, 4]:
+            self.fail("再起動後に12時間の会話区切りより前の履歴が復活しています")
+        if not memory.memory[0].is_stale_context:
+            self.fail("区切り直前の投稿が古い参考情報として復元されていません")
+
+    def test_prompt_context_is_limited_without_discarding_retained_history(self) -> None:
+        memory = ShortTermMemory()
+        timestamp = datetime.datetime(2026, 7, 22, 9, 0, tzinfo=datetime.UTC)
+        memory.memory = [
+            MessageInMemory(
+                message_id,
+                10,
+                "発言者",
+                f"{message_id}:" + "会話の本文です。" * 120,
+                None,
+                [],
+                timestamp + datetime.timedelta(minutes=message_id),
+            )
+            for message_id in range(1, 9)
+        ]
+        memory.forget()
+        retained_ids = [message.message_id for message in memory.memory]
+
+        prompt_json = memory.to_prompt_json()
+        prompt_ids = [message["i"] for message in json.loads(prompt_json)["m"]]
+
+        if len(memory.encoding.encode(prompt_json)) > SHORT_TERM_MEMORY_PROMPT_TOKENS:
+            self.fail("モデルへ渡す短期記憶が2,000トークンを超えています")
+        if prompt_ids == retained_ids:
+            self.fail("内部保持履歴とモデル送信用履歴が分離されていません")
+        if prompt_ids[-1] != retained_ids[-1]:
+            self.fail("モデル送信用履歴から最新の投稿が欠落しています")
+        if [message.message_id for message in memory.memory] != retained_ids:
+            self.fail("モデル送信用の切り詰めによって内部保持履歴が変更されました")
+
     async def test_serializes_completed_attachment_analysis_within_message_context(self) -> None:
         memory = ShortTermMemory()
         await memory.append(make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="添付あり")))
@@ -170,9 +262,9 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        serialized = json.loads(memory.to_json())
+        serialized = json.loads(memory.to_json())["m"]
 
-        if serialized[0]["attachments"] != [
+        if serialized[0]["x"] != [
             {
                 "attachment_id": 100,
                 "filename": "poster.png",
@@ -197,8 +289,8 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        serialized = json.loads(memory.to_json())
-        attachment = serialized[0]["attachments"][0]
+        serialized = json.loads(memory.to_json())["m"]
+        attachment = serialized[0]["x"][0]
 
         if attachment != {
             "attachment_id": 100,
@@ -227,15 +319,45 @@ class ShortTermMemoryTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        response_context = json.loads(memory.to_json())[0]
+        response_context = json.loads(memory.to_json())["m"][0]
         memory_context = memory.memory[0].to_dict(include_reactions=False)
 
-        if response_context["reactions"][0]["reactors"][0]["user_id"] != reactor_user_id:
+        if response_context["q"][0]["reactors"][0]["user_id"] != reactor_user_id:
             self.fail("発言生成用の文脈にリアクションした人物が含まれていません")
-        if not response_context["reactions"][0]["reactors_incomplete"]:
+        if not response_context["q"][0]["reactors_incomplete"]:
             self.fail("リアクション利用者の不完全取得状態が保持されていません")
         if "reactions" in memory_context:
             self.fail("長期記憶用に除外したリアクションが残っています")
+
+    async def test_omits_empty_default_fields_from_prompt_context(self) -> None:
+        memory = ShortTermMemory()
+        await memory.append(make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="了解")))
+
+        message = json.loads(memory.to_json())["m"][0]
+
+        if set(message) != {"i", "a", "t", "c"}:
+            self.fail(f"空または既定値の項目がモデル入力に残っています: {set(message)}")
+
+    async def test_compact_context_uses_materially_fewer_tokens_than_legacy_json(self) -> None:
+        memory = ShortTermMemory()
+        for message_id in range(1, 11):
+            await memory.append(
+                make_message(
+                    MessageSpec(
+                        message_id=message_id,
+                        author_id=10 + message_id % 2,
+                        author_name="発言者",
+                        content="短い会話です",
+                    )
+                )
+            )
+
+        compact_tokens = len(memory.encoding.encode(memory.to_json()))
+        legacy_json = json.dumps([message.to_dict() for message in memory.memory], ensure_ascii=False, indent=2)
+        legacy_tokens = len(memory.encoding.encode(legacy_json))
+
+        if compact_tokens >= legacy_tokens * 0.6:
+            self.fail(f"会話入力を十分に圧縮できていません: compact={compact_tokens}, legacy={legacy_tokens}")
 
 
 class LLMMessageTest(unittest.TestCase):
@@ -312,8 +434,6 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
         )
 
         judgment = await pipeline.judge_response(
-            ChannelRole.CHAT,
-            cooldown_stage=CooldownStage.RECOVERING,
             resolved_member_aliases={"てすたろう": 10},
         )
 
@@ -326,8 +446,15 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
             self.fail("応答要否判定へ外部ツールが渡されています")
         if call["timeout"] != RESPONSE_JUDGMENT_TIMEOUT_SECONDS:
             self.fail("応答要否判定のタイムアウトが60秒ではありません")
-        if "てすたろう" not in str(call["input"]) or "recovering" not in str(call["input"]):
-            self.fail("判定入力に解決済み別名またはクールダウン段階がありません")
+        if "てすたろう" not in str(call["input"]):
+            self.fail("判定入力に解決済み別名がありません")
+        instructions = str(call["instructions"])
+        if "{bot_name}" in instructions:
+            self.fail("応答要否判定プロンプトへBot名を展開できていません")
+        if "あなたはBotです" not in instructions or "最も自然な反応を選んで" not in instructions:
+            self.fail("応答要否判定の立場または目的を明示できていません")
+        if instructions.index("# response_mode") > instructions.index("# 会話入力"):
+            self.fail("response_modeの説明が会話入力の説明より後にあります")
 
     async def test_judgment_failure_closes_without_expensive_fallback(self) -> None:
         client = cast("AsyncOpenAI", SimpleNamespace(responses=FailingResponses()))
@@ -337,8 +464,6 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
         )
 
         judgment = await pipeline.judge_response(
-            ChannelRole.CHAT,
-            cooldown_stage=CooldownStage.READY,
             resolved_member_aliases={},
         )
 
@@ -372,10 +497,12 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
         if "てすたろう" not in str(responses.calls[0]["input"]):
             self.fail("高品質モデルへ会話中の解決済み別名が渡されていません")
         instructions = str(responses.calls[0]["instructions"])
-        if "テキストでの応答が必要だと判定済み" not in instructions:
+        if "自身の発言として自然にテキストで応答" not in instructions:
             self.fail("text生成で専用プロンプトが使用されていません")
         if "リアクションでの反応が適切だと判定済み" in instructions or "silence" in instructions:
             self.fail("text生成へ不要なreactionまたはsilenceの選択指示が混入しています")
+        if "## chat役割" not in instructions or "## assistant役割" in instructions:
+            self.fail("chat生成へassistant役割の指示が混入しています")
 
     async def test_explicit_call_is_fixed_to_trigger_reply(self) -> None:
         responses = FakeResponses()
@@ -398,6 +525,9 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
             self.fail("明示呼びかけへの応答がトリガー投稿へのreplyに固定されていません")
         if responses.calls[0]["text_format"] is not GeneratedRequiredReply:
             self.fail("明示呼びかけでreply以外を生成できるスキーマが使われています")
+        instructions = str(responses.calls[0]["instructions"])
+        if "## assistant役割" not in instructions or "## chat役割" in instructions:
+            self.fail("assistant生成へchat役割の指示が混入しています")
 
     async def test_reaction_judgment_limits_generation_to_reaction(self) -> None:
         responses = FakeResponses()
@@ -415,7 +545,7 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
         if generated.action is not ResponseAction.REACTION:
             self.fail("reaction判定後にテキスト応答が生成されました")
         instructions = str(responses.calls[0]["instructions"])
-        if "リアクションでの反応が適切だと判定済み" not in instructions:
+        if "自身の反応として自然なリアクションを選んで" not in instructions:
             self.fail("reaction生成で専用プロンプトが使用されていません")
         if "日本語のテキストで回答" in instructions or "silence" in instructions:
             self.fail("reaction生成へ不要なtextまたはsilenceの選択指示が混入しています")
@@ -544,52 +674,22 @@ class ConfigRecordingResponses:
 
 
 class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
-    async def test_extracts_memories_with_luna_without_reasoning(self) -> None:
-        responses = ConfigRecordingResponses(SimpleNamespace(candidates=[]))
+    async def test_updates_memory_documents_with_luna_and_medium_reasoning(self) -> None:
+        responses = ConfigRecordingResponses(MemoryDocumentUpdateResult())
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
 
-        await LongTermMemoryExtractor(client).extract([], [])
+        await MemoryDocumentUpdater(client).update({"new_messages": []})
 
         if responses.calls[0]["model"] != "gpt-5.6-luna":
-            self.fail("記憶抽出がLunaを使用していません")
-        if responses.calls[0]["reasoning"] != {"effort": "none"}:
-            self.fail("記憶抽出の推論強度がnoneになっていません")
+            self.fail("長期記憶文書の更新がLunaを使用していません")
+        if responses.calls[0]["reasoning"] != {"effort": "medium"}:
+            self.fail("長期記憶文書の更新の推論強度がmediumになっていません")
 
-    async def test_excludes_reactions_from_memory_extraction(self) -> None:
-        responses = ConfigRecordingResponses(SimpleNamespace(candidates=[]))
-        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
-        message = MessageInMemory(
-            message_id=1,
-            author_id=10,
-            author_name="発言者",
-            content="本文",
-            reply_to_message_id=None,
-            mentioned_user_ids=[],
-            timestamp=datetime.datetime(2026, 7, 11, tzinfo=datetime.UTC),
-            reactions=[
-                ReactionInMemory(
-                    emoji_name="👍",
-                    emoji_id=None,
-                    animated=False,
-                    reaction_type="normal",
-                    count=1,
-                )
-            ],
-        )
-
-        await LongTermMemoryExtractor(client).extract([message], [])
-
-        serialized_input = json.loads(str(responses.calls[0]["input"]))
-        if "reactions" in serialized_input["messages"][0]:
-            self.fail("リアクションが長期記憶抽出へ渡されています")
-
-    async def test_reconciles_memories_with_luna_without_reasoning(self) -> None:
-        responses = ConfigRecordingResponses(SimpleNamespace(action="keep", existing_memory_ids=[]))
+    async def test_uses_separate_instructions_for_shortening_retry(self) -> None:
+        responses = ConfigRecordingResponses(MemoryDocumentUpdateResult())
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
 
-        await LongTermMemoryReconciler(client).reconcile({}, [{}], correction_only=False)
+        await MemoryDocumentUpdater(client).update({"proposed_result": {}}, shorten=True)
 
-        if responses.calls[0]["model"] != "gpt-5.6-luna":
-            self.fail("記憶の訂正・競合判定がLunaを使用していません")
-        if responses.calls[0]["reasoning"] != {"effort": "none"}:
-            self.fail("記憶の訂正・競合判定の推論強度がnoneになっていません")
+        if "固定見出しの不一致" not in str(responses.calls[0]["instructions"]):
+            self.fail("文字数超過時に短縮専用の指示を使用していません")

@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from core.runtime_environment import get_runtime_environment
 
 from .channel_roles import ChannelRole
+from .use_cases.alias_excel_management import AliasExcelManagementUseCases
 from .use_cases.conversation import ConversationUseCases
-from .use_cases.excel_management import ExcelManagementUseCases
 
 
 class ChatBot(commands.Cog):
@@ -20,7 +20,7 @@ class ChatBot(commands.Cog):
         self.conversation_use_cases = ConversationUseCases(bot, session_factory)
         self.settings_use_cases = self.conversation_use_cases.settings_use_cases
         self.custom_profile_use_cases = self.conversation_use_cases.custom_profile_use_cases
-        self.excel_management_use_cases = ExcelManagementUseCases(session_factory)
+        self.excel_management_use_cases = AliasExcelManagementUseCases(session_factory)
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -29,6 +29,10 @@ class ChatBot(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:
         await self.conversation_use_cases.on_message(message)
+
+    @commands.Cog.listener()
+    async def on_exclude_from_long_term_memory(self, message: Message) -> None:
+        await self.conversation_use_cases.exclude_from_long_term_memory(message)
 
     @commands.Cog.listener()
     async def on_message_delete(self, message: Message) -> None:
@@ -57,15 +61,6 @@ class ChatBot(commands.Cog):
     @chatbot.command(name="role_show", description="このチャンネルでのChatbotの役割を表示します")
     async def show_chatbot_role(self, interaction: discord.Interaction) -> None:
         await self.settings_use_cases.show_role(interaction)
-
-    @chatbot.command(name="conversation_reset", description="Chatbotの会話リセット時間を変更します")
-    @app_commands.describe(minutes="最後の人間投稿から会話をリセットするまでの分数 (1以上)")
-    async def set_chatbot_conversation_reset_minutes(
-        self,
-        interaction: discord.Interaction,
-        minutes: int,
-    ) -> None:
-        await self.settings_use_cases.set_conversation_reset_minutes(interaction, minutes)
 
     @chatbot.command(name="role_set", description="このチャンネルでのChatbotの役割を変更します")
     @app_commands.describe(role="assistant または chat を選択します")
@@ -131,20 +126,6 @@ class ChatBot(commands.Cog):
         if await self._reject_debug_shared_write(interaction):
             return
         await self.excel_management_use_cases.import_chatbot_member_aliases(interaction, attachment)
-
-    @chatbot.command(name="memories_export", description="Chatbotの長期記憶をExcelで出力します")
-    async def export_chatbot_memories(self, interaction: discord.Interaction) -> None:
-        await self.excel_management_use_cases.export_chatbot_memories(interaction)
-
-    @chatbot.command(name="memories_import", description="編集済みの長期記憶Excelを取り込みます")
-    async def import_chatbot_memories(
-        self,
-        interaction: discord.Interaction,
-        attachment: discord.Attachment,
-    ) -> None:
-        if await self._reject_debug_shared_write(interaction):
-            return
-        await self.excel_management_use_cases.import_chatbot_memories(interaction, attachment)
 
     async def _reject_debug_shared_write(self, interaction: discord.Interaction) -> bool:
         """デバッグBotから長期保存データを管理更新させません。"""

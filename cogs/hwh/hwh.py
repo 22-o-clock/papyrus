@@ -88,7 +88,8 @@ class Patchwork(commands.Cog):
             return
         channel = await _fetch_text_channel(self.bot, self.event_notify_channel)
         embed = await self._create_event_embed(event, discord.Colour.teal(), f"🗓️ イベントの作成: {event.name}", channel)
-        await channel.send(embed=embed)
+        sent_message = await channel.send(embed=embed)
+        self.bot.dispatch("exclude_from_long_term_memory", sent_message)
 
     @commands.Cog.listener("on_scheduled_event_update")
     async def event_update_notify(self, before: discord.ScheduledEvent, after: discord.ScheduledEvent) -> None:
@@ -111,7 +112,8 @@ class Patchwork(commands.Cog):
 
         channel = await _fetch_text_channel(self.bot, self.event_notify_channel)
         embed = await self._create_event_embed(after, colour, title, channel)
-        await channel.send(embed=embed)
+        sent_message = await channel.send(embed=embed)
+        self.bot.dispatch("exclude_from_long_term_memory", sent_message)
 
     @commands.Cog.listener("on_scheduled_event_delete")
     async def event_delete_notify(self, event: discord.ScheduledEvent) -> None:
@@ -124,7 +126,8 @@ class Patchwork(commands.Cog):
             f"🗓️ イベントの中止: {event.name}",
             channel,
         )
-        await channel.send(embed=embed)
+        sent_message = await channel.send(embed=embed)
+        self.bot.dispatch("exclude_from_long_term_memory", sent_message)
 
     async def _create_event_embed(
         self,

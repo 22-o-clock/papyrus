@@ -276,8 +276,7 @@ class ApiUsageEmbedTest(TestCase):
         features = aggregate_feature_usages(
             [
                 create_usage("draft_generation", "gpt-5.6-terra", input_tokens=1_000, output_tokens=100),
-                create_usage("memory_extraction", "gpt-5.6-terra", item_count=20, input_tokens=2_000),
-                create_usage("memory_embedding", "text-embedding-3-large", item_count=3, input_tokens=500),
+                create_usage("memory_document_update", "gpt-5.6-luna", item_count=1, input_tokens=2_000),
             ]
         )
         summary = OpenAIUsageSummary(report_date=report_date, costs={"Text models": Decimal("0.1234")})
@@ -292,7 +291,7 @@ class ApiUsageEmbedTest(TestCase):
         field_names = [str(field.name or "") for field in embed.fields]
         ensure_equal(field_names[0], "コスト概要")
         ensure(any(name.startswith("長期記憶 合計") for name in field_names))
-        ensure(any("長期記憶の抽出" in name for name in field_names))
+        ensure(any("長期記憶文書の更新" in name for name in field_names))
         ensure_contains("input 1,000 tokens", "\n".join(str(field.value) for field in embed.fields))
         ensure_contains("部分集計", str(embed.fields[0].value))
         ensure_contains("api-usage-report:2026-07-14", embed.footer.text or "")
@@ -360,6 +359,7 @@ class ApiUsageObservationTest(IsolatedAsyncioTestCase):
                 input_tokens=300_000,
                 output_tokens=10_000,
                 input_tokens_details=SimpleNamespace(cached_tokens=50_000, cache_write_tokens=25_000),
+                output_tokens_details=SimpleNamespace(reasoning_tokens=8_000),
             ),
             output=[SimpleNamespace(type="web_search_call"), SimpleNamespace(type="code_interpreter_call")],
         )
@@ -367,12 +367,11 @@ class ApiUsageObservationTest(IsolatedAsyncioTestCase):
         async def request() -> object:
             return response
 
-        with patch.object(observability, "_usage_repository", repository):
-            result = await observability.observe_chatbot_api_call(
-                "draft_generation",
-                "gpt-5.6-terra",
-                request(),
-            )
+        with (
+            patch.object(observability, "_usage_repository", repository),
+            self.assertLogs("cogs.chatbot.observability", level="DEBUG") as captured_logs,
+        ):
+            result = await observability.observe_chatbot_api_call("draft_generation", "gpt-5.6-terra", request())
 
         ensure(result is response)
         increment = repository.add.await_args.args[0]
@@ -383,6 +382,13 @@ class ApiUsageObservationTest(IsolatedAsyncioTestCase):
         ensure_equal(increment.long_context_cache_write_input_tokens, 25_000)
         ensure_equal(increment.web_search_calls, 1)
         ensure_equal(increment.code_interpreter_sessions, 1)
+        usage_log = "\n".join(captured_logs.output)
+        ensure_contains("input_tokens=300000", usage_log)
+        ensure_contains("output_tokens=10000", usage_log)
+        ensure_contains("reasoning_tokens=8000", usage_log)
+        ensure_contains("total_tokens=310000", usage_log)
+        ensure_contains("web_search_calls=1", usage_log)
+        ensure_contains("code_interpreter_sessions=1", usage_log)
 
 
 class ApiUsageDeliveryTest(TestCase):

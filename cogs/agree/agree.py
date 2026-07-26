@@ -27,10 +27,12 @@ class Agree(commands.Cog):
             response = message.content + f"[2](<{message.jump_url}>)"
 
         await interaction.response.send_message(response)
+        self.bot.dispatch("exclude_from_long_term_memory", await interaction.original_response())
 
     async def disagree(self, interaction: Interaction, message: Message) -> None:
         """メッセージの末尾に「↑そんなことはないですね」を追加して返す。"""
         await interaction.response.send_message("> " + message.content + "\n↑そんなことはないですね")
+        self.bot.dispatch("exclude_from_long_term_memory", await interaction.original_response())
 
 
 async def setup(bot: commands.Bot) -> None:

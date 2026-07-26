@@ -1,5 +1,4 @@
 import unittest
-import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -13,31 +12,22 @@ from cogs.chatbot.constants import (
     ASSISTANT_DEBOUNCE_SECONDS,
     CHAT_DEBOUNCE_MAX_SECONDS,
     CHAT_DEBOUNCE_MIN_SECONDS,
-    CHAT_REACTION_COOLDOWN_SECONDS,
-    CHAT_TEXT_COOLDOWN_SECONDS,
 )
-from cogs.chatbot.models import ChannelProcessingState, CooldownStage
+from cogs.chatbot.models import ChannelProcessingState
 from cogs.chatbot.responses_api import LLMMessage, MessageInMemory, ResponseAction
 from cogs.chatbot.services.history_sync import get_history_sync_after
 from cogs.chatbot.services.response_policy import (
     can_change_channel_role,
     claim_response_slot,
     get_available_referenced_author_id,
-    get_cooldown_stage,
     get_response_debounce_seconds,
     is_generation_current,
     should_reset_conversation,
     should_respond,
 )
-from cogs.chatbot.use_cases.admin_validation import (
-    parse_memory_admin_expiration,
-    parse_memory_admin_target,
-    validate_exported_memory_ids,
-)
 from cogs.chatbot.use_cases.conversation import (
     ConversationUseCases,
     get_mentioned_bot_role_ids,
-    should_enqueue_long_term_memory,
 )
 from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
@@ -86,40 +76,6 @@ class HistorySyncRangeTest(unittest.TestCase):
 
         if get_history_sync_after(now - timedelta(days=60), now) != now - timedelta(days=30):
             self.fail("保存済みチャンネルの履歴取得が30日を超えています")
-
-
-class MemoryAdminInputTest(unittest.TestCase):
-    def test_resolves_selected_member(self) -> None:
-        result = parse_memory_admin_target("メンバー", "テストユーザー (123)", {"テストユーザー (123)": 123})
-
-        if result != (123, None, "member"):
-            self.fail("Excelで選択したメンバーを対象ユーザーIDへ変換できません")
-
-    def test_rejects_shared_target_with_value(self) -> None:
-        try:
-            parse_memory_admin_target("共有情報", "不要な対象", {})
-        except ValueError:
-            return
-        self.fail("共有情報に不要な対象名が指定されても拒否されません")
-
-    def test_interprets_naive_excel_datetime_as_japan_time(self) -> None:
-        excel_datetime = datetime(2026, 7, 12, 21, 0, tzinfo=UTC).replace(tzinfo=None)
-        result = parse_memory_admin_expiration(excel_datetime)
-
-        if result != datetime(2026, 7, 12, 12, 0, tzinfo=UTC):
-            self.fail("Excelの日本時間をUTCへ正しく変換できません")
-
-    def test_accepts_exported_subset_when_database_has_new_memories(self) -> None:
-        exported_id = uuid.uuid4()
-
-        validate_exported_memory_ids({exported_id}, {exported_id})
-
-    def test_rejects_deleted_exported_memory_row(self) -> None:
-        try:
-            validate_exported_memory_ids(set(), {uuid.uuid4()})
-        except ValueError:
-            return
-        self.fail("出力後に削除された記憶行が拒否されません")
 
 
 class ShouldRespondTest(unittest.TestCase):
@@ -204,20 +160,6 @@ class BotRoleMentionTest(unittest.TestCase):
 
         if result:
             self.fail("Bot名と異なる付与ロールへのメンションを誤検出しています")
-
-
-class LongTermMemoryEnqueueTest(unittest.TestCase):
-    def test_excludes_forwarded_message(self) -> None:
-        message = SimpleNamespace(author=SimpleNamespace(bot=False), message_snapshots=[SimpleNamespace(content="本文")])
-
-        if should_enqueue_long_term_memory(cast("Message", message)):
-            self.fail("転送メッセージが長期記憶抽出の対象になっています")
-
-    def test_includes_regular_human_message(self) -> None:
-        message = SimpleNamespace(author=SimpleNamespace(bot=False), message_snapshots=[])
-
-        if not should_enqueue_long_term_memory(cast("Message", message)):
-            self.fail("通常の人間の投稿が長期記憶抽出から除外されています")
 
 
 class ChannelRolePermissionTest(unittest.TestCase):
@@ -333,30 +275,6 @@ class ResponseDebounceTest(unittest.TestCase):
             self.fail("chatの待機時間が設定範囲を外れています")
 
 
-class CooldownStageTest(unittest.TestCase):
-    def test_uses_recent_stage_during_first_two_minutes(self) -> None:
-        stage = get_cooldown_stage(last_action_at=999.0, now=1_000.0)
-
-        if stage is not CooldownStage.RECENT:
-            self.fail("Bot反応直後が最も厳しい判定段階になっていません")
-
-    def test_uses_recovering_stage_between_two_and_fifteen_minutes(self) -> None:
-        stage = get_cooldown_stage(last_action_at=1_000.0 - CHAT_REACTION_COOLDOWN_SECONDS, now=1_000.0)
-
-        if stage is not CooldownStage.RECOVERING:
-            self.fail("2分経過後が回復中の判定段階になっていません")
-
-    def test_uses_ready_stage_after_fifteen_minutes(self) -> None:
-        stage = get_cooldown_stage(last_action_at=1_000.0 - CHAT_TEXT_COOLDOWN_SECONDS, now=1_000.0)
-
-        if stage is not CooldownStage.READY:
-            self.fail("15分経過後に通常の判定段階へ戻りません")
-
-    def test_uses_ready_stage_before_first_bot_action(self) -> None:
-        if get_cooldown_stage(last_action_at=None, now=1_000.0) is not CooldownStage.READY:
-            self.fail("Botが未反応のチャンネルでクールダウンが適用されています")
-
-
 class ConversationResetTest(unittest.TestCase):
     def test_resets_after_configured_interval_from_last_human_message(self) -> None:
         last_human_message_timestamp = datetime(2026, 7, 12, 9, 0, tzinfo=UTC)
@@ -423,17 +341,15 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
         cog = object.__new__(ConversationUseCases)
         channel = SimpleNamespace(id=100, send=AsyncMock())
         message = cast("Message", SimpleNamespace(channel=channel))
-        state = ChannelProcessingState()
+        cog.__dict__["_sent_custom_profiles"] = {}
+        cog.short_term_message_repository = SimpleNamespace(set_custom_profile=AsyncMock())
 
         await cog.execute_response_action(
             message,
             LLMMessage(action=ResponseAction.MESSAGE, content="https://example.com"),
-            state,
         )
 
         channel.send.assert_awaited_once_with("https://example.com", suppress_embeds=True)
-        if state.last_action_at is None:
-            self.fail("通常投稿の成功後にクールダウンが更新されていません")
 
     async def test_suppresses_embeds_for_reply(self) -> None:
         cog = object.__new__(ConversationUseCases)
@@ -445,8 +361,8 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
         message = cast("Message", SimpleNamespace(channel=channel))
         short_term_memory = SimpleNamespace(can_target_message=lambda message_id: message_id == reply_to_message_id)
         cog.response_pipelines = {100: SimpleNamespace(short_term_memory=short_term_memory)}
-        state = ChannelProcessingState()
-
+        cog.__dict__["_sent_custom_profiles"] = {}
+        cog.short_term_message_repository = SimpleNamespace(set_custom_profile=AsyncMock())
         await cog.execute_response_action(
             message,
             LLMMessage(
@@ -454,9 +370,22 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
                 content="https://example.com",
                 reply_to_message_id=reply_to_message_id,
             ),
-            state,
         )
 
         target_message.reply.assert_awaited_once_with("https://example.com", suppress_embeds=True)
-        if state.last_action_at is None:
-            self.fail("明示replyの成功後にクールダウンが更新されていません")
+
+
+class LongTermMemoryExclusionFlagTest(unittest.IsolatedAsyncioTestCase):
+    async def test_records_exclusion_even_if_message_event_has_not_been_saved(self) -> None:
+        message_id = 123
+        cog = object.__new__(ConversationUseCases)
+        cog.__dict__["_long_term_memory_excluded_message_ids"] = set()
+        repository = SimpleNamespace(exclude_from_long_term_memory=AsyncMock())
+        cog.short_term_message_repository = repository
+        message = cast("Message", SimpleNamespace(id=message_id))
+
+        await cog.exclude_from_long_term_memory(message)
+
+        repository.exclude_from_long_term_memory.assert_awaited_once_with(message_id)
+        if message_id not in cog.__dict__["_long_term_memory_excluded_message_ids"]:
+            self.fail("保存イベントとの競合を吸収する除外フラグが保持されていません")
