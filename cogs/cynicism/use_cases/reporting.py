@@ -122,6 +122,8 @@ class CynicismReportUseCases:
 
     async def status(self, interaction: Interaction) -> None:
         """重み、一時停止状態、投稿先、最終発表を表示する。"""
+        # DBへの問い合わせが3秒の応答期限を超えることがあるため、先に応答を保留する。
+        await interaction.response.defer(ephemeral=True, thinking=True)
         now = datetime.datetime.now(JST)
         settings = await self._configuration.get()
         last_delivery = await self._reports.get_last_delivery(self._target_id)
@@ -137,7 +139,7 @@ class CynicismReportUseCases:
             else ("一時停止中" if settings.is_paused else "稼働中")
         )
         environment_note = "debug (自動発表停止、手動投稿のみ)" if self._runtime_environment.is_debug else "production"
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"現在: {now:%Y-%m-%d %H:%M JST}\n"
             f"集計状態: {paused_text}\n"
             f"重み: Papyrus {format_weight(settings.weights.papyrus)} / "
@@ -154,11 +156,12 @@ class CynicismReportUseCases:
         if papyrus is None and human is None:
             message = "papyrus と human の少なくとも一方を指定してください。"
             raise ArgumentError(message)
-        updated = await self._configuration.set_weights(
-            papyrus=self._validate_weight(papyrus),
-            human=self._validate_weight(human),
-        )
-        await interaction.response.send_message(
+        # 検証は入力だけで完結するため、応答を保留する前に済ませる。
+        validated_papyrus = self._validate_weight(papyrus)
+        validated_human = self._validate_weight(human)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        updated = await self._configuration.set_weights(papyrus=validated_papyrus, human=validated_human)
+        await interaction.followup.send(
             f"重みを Papyrus {format_weight(updated.weights.papyrus)} / "
             f"人間 {format_weight(updated.weights.human)} に変更しました。\n"
             "※過去の期間の集計値も新しい重みで再計算されます。",
@@ -168,8 +171,9 @@ class CynicismReportUseCases:
     async def pause(self, interaction: Interaction) -> None:
         """管理者が🥶の記録と自動発表を停止する。"""
         self._require_admin(interaction)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await self._configuration.set_paused(paused=True, now=datetime.datetime.now(JST))
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "冷笑ポイントの記録と自動発表を停止しました。`/cynicism ranking` での閲覧は引き続き利用できます。",
             ephemeral=True,
         )
@@ -177,8 +181,9 @@ class CynicismReportUseCases:
     async def resume(self, interaction: Interaction) -> None:
         """管理者が🥶の記録と自動発表を再開する。"""
         self._require_admin(interaction)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await self._configuration.set_paused(paused=False, now=datetime.datetime.now(JST))
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "冷笑ポイントの記録と自動発表を再開しました。停止中に付いた🥶は記録されていません。",
             ephemeral=True,
         )

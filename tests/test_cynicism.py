@@ -887,3 +887,100 @@ class PeriodDefaultTest(unittest.TestCase):
         period = use_cases._resolve_period("weekly", None, default_to_completed=True)  # noqa: SLF001
 
         ensure(period.end_at <= now, "発表では既に終わった期間を既定にします")
+
+
+class InteractionRecorder:
+    """DBアクセスと応答の順序を記録する、Interactionの代役。"""
+
+    def __init__(self, user: object = None) -> None:
+        self.calls: list[str] = []
+        self.response = SimpleNamespace(defer=self._defer, send_message=self._send_message)
+        self.followup = SimpleNamespace(send=self._followup_send)
+        self.user = user
+        self.guild = None
+
+    async def _defer(self, **_: object) -> None:
+        self.calls.append("defer")
+
+    async def _send_message(self, *_: object, **__: object) -> None:
+        self.calls.append("response.send_message")
+
+    async def _followup_send(self, *_: object, **__: object) -> None:
+        self.calls.append("followup.send")
+
+    async def record_database_access(self, *_: object, **__: object) -> object:
+        self.calls.append("database")
+        return make_settings()
+
+
+def make_admin_member(role_id: int) -> discord.Member:
+    """Bot管理者ロールを持つメンバーの代役を返します。"""
+    member = Mock(spec=discord.Member)
+    member.roles = [SimpleNamespace(id=role_id)]
+    return member
+
+
+class InteractionDeadlineTest(unittest.IsolatedAsyncioTestCase):
+    """Discordの応答期限は3秒しかないため、DBアクセスの前に応答を保留する。"""
+
+    ADMIN_ROLE_ID = 42
+
+    def build_use_cases(self, interaction: InteractionRecorder) -> CynicismReportUseCases:
+        use_cases = object.__new__(CynicismReportUseCases)
+        use_cases._runtime_environment = cast("Any", SimpleNamespace(is_debug=True))  # noqa: SLF001
+        use_cases._admin_role_id = self.ADMIN_ROLE_ID  # noqa: SLF001
+        use_cases._target_id = 7  # noqa: SLF001
+        use_cases._configuration = cast(  # noqa: SLF001
+            "Any",
+            SimpleNamespace(
+                get=interaction.record_database_access,
+                set_weights=interaction.record_database_access,
+                set_paused=interaction.record_database_access,
+            ),
+        )
+        use_cases._reports = cast(  # noqa: SLF001
+            "Any",
+            SimpleNamespace(get_last_delivery=AsyncMock(return_value=None)),
+        )
+        return use_cases
+
+    async def test_status_defers_before_touching_the_database(self) -> None:
+        interaction = InteractionRecorder()
+        use_cases = self.build_use_cases(interaction)
+
+        await use_cases.status(cast("Any", interaction))
+
+        ensure(interaction.calls[0] == "defer", "DBアクセスより先に応答を保留する必要があります")
+        ensure("response.send_message" not in interaction.calls)
+        ensure(interaction.calls[-1] == "followup.send")
+
+    async def test_weight_defers_before_touching_the_database(self) -> None:
+        interaction = InteractionRecorder(user=make_admin_member(self.ADMIN_ROLE_ID))
+        use_cases = self.build_use_cases(interaction)
+
+        await use_cases.set_weights(cast("Any", interaction), 5.0, None)
+
+        ensure(interaction.calls[0] == "defer", "DBアクセスより先に応答を保留する必要があります")
+        ensure(interaction.calls[-1] == "followup.send")
+
+    async def test_pause_and_resume_defer_before_touching_the_database(self) -> None:
+        for action in ("pause", "resume"):
+            with self.subTest(action=action):
+                interaction = InteractionRecorder(user=make_admin_member(self.ADMIN_ROLE_ID))
+                use_cases = self.build_use_cases(interaction)
+
+                await getattr(use_cases, action)(cast("Any", interaction))
+
+                ensure(interaction.calls[0] == "defer", "DBアクセスより先に応答を保留する必要があります")
+                ensure(interaction.calls[-1] == "followup.send")
+
+    async def test_invalid_weight_is_rejected_before_deferring(self) -> None:
+        interaction = InteractionRecorder(user=make_admin_member(self.ADMIN_ROLE_ID))
+        use_cases = self.build_use_cases(interaction)
+
+        try:
+            await use_cases.set_weights(cast("Any", interaction), 1000.0, None)
+        except ArgumentError:
+            ensure(interaction.calls == [], "入力の検証だけで弾ける場合は応答を保留しません")
+            return
+        self.fail("許容範囲外の重みは利用者向けエラーにする必要があります")
