@@ -359,6 +359,7 @@ class ApiUsageObservationTest(IsolatedAsyncioTestCase):
                 input_tokens=300_000,
                 output_tokens=10_000,
                 input_tokens_details=SimpleNamespace(cached_tokens=50_000, cache_write_tokens=25_000),
+                output_tokens_details=SimpleNamespace(reasoning_tokens=8_000),
             ),
             output=[SimpleNamespace(type="web_search_call"), SimpleNamespace(type="code_interpreter_call")],
         )
@@ -366,12 +367,11 @@ class ApiUsageObservationTest(IsolatedAsyncioTestCase):
         async def request() -> object:
             return response
 
-        with patch.object(observability, "_usage_repository", repository):
-            result = await observability.observe_chatbot_api_call(
-                "draft_generation",
-                "gpt-5.6-terra",
-                request(),
-            )
+        with (
+            patch.object(observability, "_usage_repository", repository),
+            self.assertLogs("cogs.chatbot.observability", level="DEBUG") as captured_logs,
+        ):
+            result = await observability.observe_chatbot_api_call("draft_generation", "gpt-5.6-terra", request())
 
         ensure(result is response)
         increment = repository.add.await_args.args[0]
@@ -382,6 +382,13 @@ class ApiUsageObservationTest(IsolatedAsyncioTestCase):
         ensure_equal(increment.long_context_cache_write_input_tokens, 25_000)
         ensure_equal(increment.web_search_calls, 1)
         ensure_equal(increment.code_interpreter_sessions, 1)
+        usage_log = "\n".join(captured_logs.output)
+        ensure_contains("input_tokens=300000", usage_log)
+        ensure_contains("output_tokens=10000", usage_log)
+        ensure_contains("reasoning_tokens=8000", usage_log)
+        ensure_contains("total_tokens=310000", usage_log)
+        ensure_contains("web_search_calls=1", usage_log)
+        ensure_contains("code_interpreter_sessions=1", usage_log)
 
 
 class ApiUsageDeliveryTest(TestCase):
