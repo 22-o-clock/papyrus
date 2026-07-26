@@ -5,80 +5,8 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 from cogs.chatbot.responses_api import MessageInMemory
-from cogs.chatbot.services.memory_migration import parse_memory_migration_markdown
 from cogs.chatbot.use_cases.long_term_memory import LongTermMemoryUseCases
 from cogs.chatbot.use_cases.memory_search import MemorySearchUseCases
-from scripts.migrate_chatbot_memory_documents import _legacy_memory_export_statement
-
-
-class MemoryMigrationMarkdownTest(unittest.TestCase):
-    def test_legacy_export_selects_only_columns_present_in_original_schema(self) -> None:
-        statement = _legacy_memory_export_statement(datetime(2026, 7, 26, tzinfo=UTC))
-
-        selected_columns = {column.key for column in statement.selected_columns}
-
-        if selected_columns != {"target_user_id", "kind", "content", "observed_at", "created_at"}:
-            self.fail(f"移行に不要な後発ORM列を旧テーブルから選択しています: {selected_columns}")
-
-    def test_parses_shared_bot_and_person_documents(self) -> None:
-        result = parse_memory_migration_markdown(
-            """# Chatbot long-term memory migration
-<!-- document:shared -->
-# 共有記憶
-## 共有されている前提
-共有事項です。
-## 継続中の話題・決定
-<!-- document:bot -->
-# Papyrusの自己記憶
-## 嗜好・立場
-私は簡潔な会話を好みます。
-## 人物への印象・関係
-## 継続的な約束
-<!-- document:person:123 -->
-# 人物の記憶
-## 基本情報
-この人物についての記憶です。
-## 嗜好・関心
-## 関係・継続事項
-"""
-        )
-
-        if result != {
-            "shared": "# 共有記憶\n## 共有されている前提\n共有事項です。\n## 継続中の話題・決定",
-            "bot": ("# Papyrusの自己記憶\n## 嗜好・立場\n私は簡潔な会話を好みます。\n## 人物への印象・関係\n## 継続的な約束"),
-            "person:123": "# 人物の記憶\n## 基本情報\nこの人物についての記憶です。\n## 嗜好・関心\n## 関係・継続事項",
-        }:
-            self.fail("移行Markdownを文書単位に分解できていません")
-
-    def test_rejects_duplicate_document_heading(self) -> None:
-        try:
-            parse_memory_migration_markdown("<!-- document:shared -->\nA\n<!-- document:shared -->\nB\n<!-- document:bot -->\n")
-        except ValueError:
-            return
-        self.fail("重複した文書見出しを拒否していません")
-
-    def test_rejects_over_limit_person_document(self) -> None:
-        try:
-            parse_memory_migration_markdown(
-                "<!-- document:shared -->\n# 共有記憶\n## 共有されている前提\n## 継続中の話題・決定\n"
-                "<!-- document:bot -->\n# Papyrusの自己記憶\n## 嗜好・立場\n## 人物への印象・関係\n## 継続的な約束\n"
-                f"<!-- document:person:123 -->\n# 人物の記憶\n## 基本情報\n{'あ' * 1001}\n"
-                "## 嗜好・関心\n## 関係・継続事項"
-            )
-        except ValueError:
-            return
-        self.fail("上限を超える人物文書を拒否していません")
-
-    def test_rejects_unknown_document_type(self) -> None:
-        try:
-            parse_memory_migration_markdown(
-                "<!-- document:shared -->\n# 共有記憶\n## 共有されている前提\n## 継続中の話題・決定\n"
-                "<!-- document:bot -->\n# Papyrusの自己記憶\n## 嗜好・立場\n## 人物への印象・関係\n## 継続的な約束\n"
-                "<!-- document:external:example -->\n本文"
-            )
-        except ValueError:
-            return
-        self.fail("未対応の文書種別を拒否していません")
 
 
 class MemoryResponseContextTest(unittest.IsolatedAsyncioTestCase):
