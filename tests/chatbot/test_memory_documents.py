@@ -8,9 +8,18 @@ from cogs.chatbot.responses_api import MessageInMemory
 from cogs.chatbot.services.memory_migration import parse_memory_migration_markdown
 from cogs.chatbot.use_cases.long_term_memory import LongTermMemoryUseCases
 from cogs.chatbot.use_cases.memory_search import MemorySearchUseCases
+from scripts.migrate_chatbot_memory_documents import _legacy_memory_export_statement
 
 
 class MemoryMigrationMarkdownTest(unittest.TestCase):
+    def test_legacy_export_selects_only_columns_present_in_original_schema(self) -> None:
+        statement = _legacy_memory_export_statement(datetime(2026, 7, 26, tzinfo=UTC))
+
+        selected_columns = {column.key for column in statement.selected_columns}
+
+        if selected_columns != {"target_user_id", "kind", "content", "observed_at", "created_at"}:
+            self.fail(f"移行に不要な後発ORM列を旧テーブルから選択しています: {selected_columns}")
+
     def test_parses_shared_bot_and_person_documents(self) -> None:
         result = parse_memory_migration_markdown(
             """# Chatbot long-term memory migration

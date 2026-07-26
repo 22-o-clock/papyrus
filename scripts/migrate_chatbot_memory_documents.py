@@ -8,11 +8,11 @@ import datetime
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import dotenv
 from openai import AsyncOpenAI
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.dialects.postgresql import insert
 
 from cogs.chatbot.prompt import load_prompt
@@ -44,24 +44,15 @@ async def _export(output: Path) -> None:
     session_factory = _session_factory()
     now = datetime.datetime.now(datetime.UTC)
     async with session_factory() as session:
-        result = await session.execute(
-            select(ChatbotLegacyLongTermMemory)
-            .where(
-                ChatbotLegacyLongTermMemory.status == "active",
-                (ChatbotLegacyLongTermMemory.expires_at.is_(None)) | (ChatbotLegacyLongTermMemory.expires_at > now),
-                (ChatbotLegacyLongTermMemory.target_user_id.is_not(None)) | (ChatbotLegacyLongTermMemory.kind == "shared"),
-            )
-            .order_by(ChatbotLegacyLongTermMemory.observed_at, ChatbotLegacyLongTermMemory.created_at)
-        )
+        result = await session.execute(_legacy_memory_export_statement(now))
         memories = [
             {
-                "target_user_id": memory.target_user_id,
-                "kind": memory.kind,
-                "content": memory.content,
-                "observed_at": (memory.observed_at or memory.created_at).date().isoformat(),
+                "target_user_id": target_user_id,
+                "kind": kind,
+                "content": content,
+                "observed_at": (observed_at or created_at).date().isoformat(),
             }
-            for memory in result.scalars()
-            if memory.target_user_id is not None or memory.kind == "shared"
+            for target_user_id, kind, content, observed_at, created_at in result
         ]
     response = await AsyncOpenAI().responses.create(
         model="gpt-5.6-luna",
@@ -70,6 +61,25 @@ async def _export(output: Path) -> None:
         input=json.dumps({"memories": memories}, ensure_ascii=False),
     )
     await asyncio.to_thread(output.write_text, response.output_text.strip() + "\n", encoding="utf-8")
+
+
+def _legacy_memory_export_statement(now: datetime.datetime) -> Select[tuple[Any, Any, Any, Any, Any]]:
+    """旧DBに存在する移行必須列だけを選び、後発のORM列へ依存しないようにします。"""
+    return (
+        select(
+            ChatbotLegacyLongTermMemory.target_user_id,
+            ChatbotLegacyLongTermMemory.kind,
+            ChatbotLegacyLongTermMemory.content,
+            ChatbotLegacyLongTermMemory.observed_at,
+            ChatbotLegacyLongTermMemory.created_at,
+        )
+        .where(
+            ChatbotLegacyLongTermMemory.status == "active",
+            (ChatbotLegacyLongTermMemory.expires_at.is_(None)) | (ChatbotLegacyLongTermMemory.expires_at > now),
+            (ChatbotLegacyLongTermMemory.target_user_id.is_not(None)) | (ChatbotLegacyLongTermMemory.kind == "shared"),
+        )
+        .order_by(ChatbotLegacyLongTermMemory.observed_at, ChatbotLegacyLongTermMemory.created_at)
+    )
 
 
 async def _apply(input_path: Path) -> None:
