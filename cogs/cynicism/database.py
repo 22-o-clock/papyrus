@@ -94,8 +94,13 @@ class CynicismDatabase:
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
-        """実行環境に対応するスキーマへ読み替えたSessionを返す。"""
-        async with self._session_factory() as session:
+        """実行環境に対応するスキーマへ読み替えたSessionを返し、終了時にコミットする。
+
+        スキーマの読み替えはコネクション単位の設定なので、ブロック全体を1つのトランザクションに
+        閉じ込める。途中でコミットするとコネクションが解放され、以降の文が読み替え前のスキーマを
+        参照してしまうため、利用側は個別にcommitしない。
+        """
+        async with self._session_factory() as session, session.begin():
             await session.connection(execution_options={"schema_translate_map": {TALKDATA_SCHEMA: self._database_schema}})
             yield session
 
@@ -127,4 +132,3 @@ class CynicismDatabase:
                     "(post_time, member_id) WHERE edit_count = 0"
                 )
             )
-            await session.commit()

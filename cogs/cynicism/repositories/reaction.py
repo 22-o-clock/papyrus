@@ -73,7 +73,6 @@ class CynicismReactionRepository:
                 )
             )
             await session.execute(statement)
-            await session.commit()
 
     async def remove_reaction(self, message_id: int, reactor_id: int, emoji_name: str, *, is_burst: bool) -> None:
         """取り消されたリアクション1件分の記録を削除する。"""
@@ -195,7 +194,6 @@ class CynicismReactionRepository:
         """条件に一致する記録を削除する。"""
         async with self._database.session() as session:
             await session.execute(delete(CynicismReaction).where(*conditions))
-            await session.commit()
 
 
 def _scope_conditions(

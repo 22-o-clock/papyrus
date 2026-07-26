@@ -82,7 +82,6 @@ class CynicismReportRepository:
                 )
             )
             await session.execute(statement)
-            await session.commit()
 
     async def get_last_delivery(self, target_id: int) -> ReportDelivery | None:
         """現在の投稿先で最後に成功した配送を返す。"""

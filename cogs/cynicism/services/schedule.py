@@ -5,6 +5,13 @@ import datetime
 from cogs.cynicism.constants import PUBLISH_HOUR
 from cogs.cynicism.periods import CynicismPeriod, CynicismPeriodType, latest_completed_period, previous_period
 
+# 週は切り替えと同時に発表する。月・年は暦日の切り替わりが深夜になるため、翌日の昼過ぎまで待つ。
+PUBLISH_DELAYS = {
+    CynicismPeriodType.WEEKLY: datetime.timedelta(),
+    CynicismPeriodType.MONTHLY: datetime.timedelta(hours=PUBLISH_HOUR),
+    CynicismPeriodType.YEARLY: datetime.timedelta(hours=PUBLISH_HOUR),
+}
+
 # 起動していなかった期間を補うために遡る上限。
 MAXIMUM_BACKFILL_PERIODS = {
     CynicismPeriodType.WEEKLY: 8,
@@ -21,8 +28,8 @@ REFRESH_PERIOD_COUNTS = {
 
 
 def publish_time(period: CynicismPeriod) -> datetime.datetime:
-    """期間終了の翌日 PUBLISH_HOUR (JST) を返す。"""
-    return period.end_at + datetime.timedelta(hours=PUBLISH_HOUR)
+    """期間の発表時刻を返す。週は期間の切り替えと同時に発表する。"""
+    return period.end_at + PUBLISH_DELAYS[period.period_type]
 
 
 def publishable_periods(

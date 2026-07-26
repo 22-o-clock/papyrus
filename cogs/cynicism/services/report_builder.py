@@ -60,11 +60,13 @@ def build_empty_notice(period: CynicismPeriod) -> str:
 
 def build_ranking_embed(ranking: CynicismRanking, *, updated_at: datetime.datetime) -> discord.Embed:
     """2部門の王とランキング表を1つのEmbedへまとめる。"""
-    embed = discord.Embed(
-        title=f"{ranking.period.label}冷笑王",
-        description=format_period(ranking.period),
-        color=EMBED_COLOR,
-    )
+    # 期間が終わる前に見た場合は順位が確定していないため、途中経過であることを明示する。
+    is_in_progress = updated_at < ranking.period.end_at
+    title = f"{ranking.period.label}冷笑王 (集計中)" if is_in_progress else f"{ranking.period.label}冷笑王"
+    description = format_period(ranking.period)
+    if is_in_progress:
+        description += "\n※期間の途中経過です。順位はまだ確定していません。"
+    embed = discord.Embed(title=title, description=description, color=EMBED_COLOR)
 
     total_champion = ranking.total_champion
     if total_champion is not None:
@@ -109,7 +111,7 @@ def _format_champion(entry: RankingEntry) -> str:
     """王として表示する1名分の内訳を返す。"""
     return (
         f"**{entry.display_name}** — {format_points(entry.points)} pt\n"
-        f"冷笑された発言 {entry.cynical_message_count}件 / 発言 {entry.message_count}件 / "
+        f"冷笑認定された発言 {entry.cynical_message_count}件 / 発言 {entry.message_count}件 / "
         f"冷笑率 {format_rate(entry.rate)}\n"
         f"内訳: Papyrus {entry.papyrus_count}件 / 人間 {entry.human_count}件"
     )

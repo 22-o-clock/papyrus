@@ -1,6 +1,7 @@
 import datetime
 import unittest
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -21,8 +22,10 @@ from cogs.cynicism.periods import (
     format_period,
     latest_completed_period,
     period_containing,
+    period_from_start_date,
     qualification_threshold,
 )
+from cogs.cynicism.repositories.configuration import CynicismConfigurationRepository
 from cogs.cynicism.services.message_delivery import (
     CynicismReportMessageDelivery,
     ReportMessageOwnershipError,
@@ -77,93 +80,123 @@ def make_settings(*, papyrus: str = "3.00", human: str = "1.00", is_paused: bool
 
 
 class PeriodTest(unittest.TestCase):
-    def test_week_starts_on_monday(self) -> None:
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+    def test_week_starts_on_friday_at_22(self) -> None:
+        # 2026-07-26は日曜。直前の切り替えは2026-07-24 (金) 22:00。
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
-        ensure(period.start_date == datetime.date(2026, 7, 20))
-        ensure(period.end_date == datetime.date(2026, 7, 26))
+        ensure(period.start_at == datetime.datetime(2026, 7, 24, 22, 0, tzinfo=JST))
+        ensure(period.end_at == datetime.datetime(2026, 7, 31, 22, 0, tzinfo=JST))
+
+    def test_friday_before_the_switch_belongs_to_the_previous_week(self) -> None:
+        period = period_containing(CynicismPeriodType.WEEKLY, datetime.datetime(2026, 7, 24, 21, 59, tzinfo=JST))
+
+        ensure(period.start_at == datetime.datetime(2026, 7, 17, 22, 0, tzinfo=JST))
+        ensure(period.end_at == datetime.datetime(2026, 7, 24, 22, 0, tzinfo=JST))
+
+    def test_the_switch_moment_starts_the_new_week(self) -> None:
+        period = period_containing(CynicismPeriodType.WEEKLY, datetime.datetime(2026, 7, 24, 22, 0, tzinfo=JST))
+
+        ensure(period.start_at == datetime.datetime(2026, 7, 24, 22, 0, tzinfo=JST))
 
     def test_week_spans_the_new_year(self) -> None:
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 1, 1))
+        # 2026-01-01は木曜なので、直前の切り替えは2025-12-26 (金) 22:00。
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 1, 1))
 
-        ensure(period.start_date == datetime.date(2025, 12, 29))
-        ensure(period.end_date == datetime.date(2026, 1, 4))
+        ensure(period.start_at == datetime.datetime(2025, 12, 26, 22, 0, tzinfo=JST))
+        ensure(period.end_at == datetime.datetime(2026, 1, 2, 22, 0, tzinfo=JST))
+
+    def test_a_start_date_from_the_display_selects_that_week(self) -> None:
+        """表示された開始日を指定すると、その週が対象になる。"""
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 24))
+
+        ensure(period.start_at == datetime.datetime(2026, 7, 24, 22, 0, tzinfo=JST))
 
     def test_month_covers_the_last_day(self) -> None:
-        period = period_containing(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
+        period = period_from_start_date(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
 
         ensure(period.start_date == datetime.date(2026, 7, 1))
         ensure(period.end_date == datetime.date(2026, 7, 31))
 
     def test_february_of_a_leap_year_ends_on_the_29th(self) -> None:
-        period = period_containing(CynicismPeriodType.MONTHLY, datetime.date(2024, 2, 10))
+        period = period_from_start_date(CynicismPeriodType.MONTHLY, datetime.date(2024, 2, 10))
 
         ensure(period.end_date.day == FEBRUARY_LEAP_LAST_DAY)
 
     def test_year_covers_the_whole_calendar_year(self) -> None:
-        period = period_containing(CynicismPeriodType.YEARLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.YEARLY, datetime.date(2026, 7, 26))
 
         ensure(period.start_date == datetime.date(2026, 1, 1))
         ensure(period.end_date == datetime.date(2026, 12, 31))
 
-    def test_boundaries_are_jst_midnight_and_exclusive_at_the_end(self) -> None:
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+    def test_monthly_boundaries_are_jst_midnight_and_exclusive_at_the_end(self) -> None:
+        period = period_from_start_date(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
 
-        ensure(period.start_at == datetime.datetime(2026, 7, 20, tzinfo=JST))
-        ensure(period.end_at == datetime.datetime(2026, 7, 27, tzinfo=JST))
+        ensure(period.start_at == datetime.datetime(2026, 7, 1, tzinfo=JST))
+        ensure(period.end_at == datetime.datetime(2026, 8, 1, tzinfo=JST))
 
     def test_qualification_thresholds_match_the_agreed_values(self) -> None:
         target = datetime.date(2026, 7, 26)
 
-        ensure(qualification_threshold(period_containing(CynicismPeriodType.WEEKLY, target)) == WEEKLY_THRESHOLD)
-        ensure(qualification_threshold(period_containing(CynicismPeriodType.MONTHLY, target)) == MONTHLY_THRESHOLD)
-        ensure(qualification_threshold(period_containing(CynicismPeriodType.YEARLY, target)) == YEARLY_THRESHOLD)
+        ensure(qualification_threshold(period_from_start_date(CynicismPeriodType.WEEKLY, target)) == WEEKLY_THRESHOLD)
+        ensure(qualification_threshold(period_from_start_date(CynicismPeriodType.MONTHLY, target)) == MONTHLY_THRESHOLD)
+        ensure(qualification_threshold(period_from_start_date(CynicismPeriodType.YEARLY, target)) == YEARLY_THRESHOLD)
 
-    def test_format_period_shows_the_inclusive_range(self) -> None:
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+    def test_weekly_format_shows_the_switch_times(self) -> None:
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
-        ensure(format_period(period) == "2026-07-20 〜 2026-07-26 (JST)")
+        ensure(format_period(period) == "2026-07-24 22:00 〜 2026-07-31 22:00 (JST)")
+
+    def test_monthly_format_shows_the_inclusive_date_range(self) -> None:
+        period = period_from_start_date(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
+
+        ensure(format_period(period) == "2026-07-01 〜 2026-07-31 (JST)")
 
 
 class ScheduleTest(unittest.TestCase):
-    def test_publish_time_is_the_day_after_the_period_at_21(self) -> None:
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+    def test_weekly_is_published_at_the_switch_moment(self) -> None:
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
-        ensure(publish_time(period) == datetime.datetime(2026, 7, 27, 21, 0, tzinfo=JST))
+        ensure(publish_time(period) == period.end_at)
+        ensure(publish_time(period) == datetime.datetime(2026, 7, 31, 22, 0, tzinfo=JST))
 
-    def test_period_is_not_published_before_its_publish_time(self) -> None:
-        just_before = datetime.datetime(2026, 7, 27, 20, 59, tzinfo=JST)
+    def test_monthly_is_published_on_the_next_day_at_21(self) -> None:
+        period = period_from_start_date(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
 
-        periods = publishable_periods(just_before, datetime.date(2026, 7, 20))
+        ensure(publish_time(period) == datetime.datetime(2026, 8, 1, 21, 0, tzinfo=JST))
 
-        ensure(all(period.start_date != datetime.date(2026, 7, 20) for period in periods))
+    def test_week_is_not_published_before_the_switch(self) -> None:
+        just_before = datetime.datetime(2026, 7, 31, 21, 59, tzinfo=JST)
 
-    def test_period_is_published_once_its_publish_time_passes(self) -> None:
-        just_after = datetime.datetime(2026, 7, 27, 21, 0, tzinfo=JST)
+        periods = publishable_periods(just_before, datetime.date(2026, 7, 24))
 
-        periods = publishable_periods(just_after, datetime.date(2026, 7, 20))
+        ensure(all(period.start_date != datetime.date(2026, 7, 24) for period in periods))
 
-        ensure(any(period.start_date == datetime.date(2026, 7, 20) for period in periods))
+    def test_week_is_published_at_the_switch(self) -> None:
+        at_the_switch = datetime.datetime(2026, 7, 31, 22, 0, tzinfo=JST)
+
+        periods = publishable_periods(at_the_switch, datetime.date(2026, 7, 24))
+
+        ensure(any(period.start_date == datetime.date(2026, 7, 24) for period in periods))
 
     def test_periods_before_the_first_record_are_skipped(self) -> None:
-        now = datetime.datetime(2026, 7, 27, 22, 0, tzinfo=JST)
+        now = datetime.datetime(2026, 7, 31, 22, 30, tzinfo=JST)
 
-        periods = publishable_periods(now, datetime.date(2026, 7, 20))
+        periods = publishable_periods(now, datetime.date(2026, 7, 25))
 
         ensure(len(periods) == 1)
         ensure(periods[0].period_type is CynicismPeriodType.WEEKLY)
 
     def test_no_record_still_limits_backfill(self) -> None:
-        now = datetime.datetime(2026, 7, 27, 22, 0, tzinfo=JST)
+        now = datetime.datetime(2026, 7, 31, 22, 30, tzinfo=JST)
 
         periods = publishable_periods(now, None)
 
         weekly = [period for period in periods if period.period_type is CynicismPeriodType.WEEKLY]
         ensure(len(weekly) == 8)  # noqa: PLR2004 - MAXIMUM_BACKFILL_PERIODSの週次上限。
 
-    def test_all_three_period_types_publish_when_the_year_starts_on_monday(self) -> None:
-        # 2024-01-01は月曜のため、週次・月次・年次の発表時刻が同時に到来する。
-        now = datetime.datetime(2024, 1, 1, 21, 30, tzinfo=JST)
+    def test_all_three_period_types_can_publish_together(self) -> None:
+        # 2024-01-05 (金) 22:00で週が切り替わり、月次・年次も2024-01-01 21:00を過ぎている。
+        now = datetime.datetime(2024, 1, 5, 22, 30, tzinfo=JST)
 
         periods = publishable_periods(now, datetime.date(2023, 1, 1))
         published_types = {period.period_type for period in periods}
@@ -171,7 +204,7 @@ class ScheduleTest(unittest.TestCase):
         ensure(len(published_types) == EXPECTED_PUBLISHABLE_PERIOD_COUNT)
 
     def test_publishable_periods_are_ordered_from_oldest(self) -> None:
-        now = datetime.datetime(2026, 7, 27, 22, 0, tzinfo=JST)
+        now = datetime.datetime(2026, 7, 31, 22, 30, tzinfo=JST)
 
         periods = publishable_periods(now, None)
         weekly = [period.start_date for period in periods if period.period_type is CynicismPeriodType.WEEKLY]
@@ -179,7 +212,7 @@ class ScheduleTest(unittest.TestCase):
         ensure(weekly == sorted(weekly))
 
     def test_refreshable_periods_cover_recent_completed_periods(self) -> None:
-        now = datetime.datetime(2026, 7, 27, 22, 0, tzinfo=JST)
+        now = datetime.datetime(2026, 7, 31, 22, 30, tzinfo=JST)
 
         periods = refreshable_periods(now)
         weekly = [period for period in periods if period.period_type is CynicismPeriodType.WEEKLY]
@@ -256,7 +289,7 @@ class RankingTest(unittest.TestCase):
             1: RankedMemberIdentity(1, "少数精鋭", is_bot=False),
             2: RankedMemberIdentity(2, "数打ち", is_bot=False),
         }
-        period = period_containing(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
+        period = period_from_start_date(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
 
         with_default = build_ranking(period, counts, message_counts, identities, DEFAULT_WEIGHTS)
         with_heavier = build_ranking(
@@ -277,7 +310,7 @@ class RankingTest(unittest.TestCase):
     def test_bot_authors_are_excluded_from_the_ranking(self) -> None:
         counts = [MemberReactionCounts(member_id=1, papyrus_count=1, human_count=0, cynical_message_count=1)]
         identities = {1: RankedMemberIdentity(1, "Bot", is_bot=True)}
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
         ranking = build_ranking(period, counts, {1: 100}, identities, DEFAULT_WEIGHTS)
 
@@ -294,7 +327,7 @@ class RankingTest(unittest.TestCase):
             2: RankedMemberIdentity(2, "B", is_bot=False),
             3: RankedMemberIdentity(3, "C", is_bot=False),
         }
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
         ranking = build_ranking(period, counts, {1: 20, 2: 20, 3: 20}, identities, DEFAULT_WEIGHTS)
 
@@ -309,7 +342,7 @@ class RankingTest(unittest.TestCase):
             1: RankedMemberIdentity(1, "常連", is_bot=False),
             2: RankedMemberIdentity(2, "一言だけ", is_bot=False),
         }
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
         ranking = build_ranking(period, counts, {1: 40, 2: 1}, identities, DEFAULT_WEIGHTS)
 
@@ -320,7 +353,7 @@ class RankingTest(unittest.TestCase):
     def test_summary_counts_reactions_by_source(self) -> None:
         counts = [MemberReactionCounts(member_id=1, papyrus_count=2, human_count=3, cynical_message_count=4)]
         identities = {1: RankedMemberIdentity(1, "A", is_bot=False)}
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
         ranking = build_ranking(period, counts, {1: 20}, identities, DEFAULT_WEIGHTS)
 
@@ -339,24 +372,24 @@ def build_sample_ranking(*, papyrus_weight: str = "3.00") -> "CynicismRanking":
         1: RankedMemberIdentity(1, "冷笑家", is_bot=False),
         2: RankedMemberIdentity(2, "ときどき", is_bot=False),
     }
-    period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+    period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
     weights = CynicismWeights(papyrus=Decimal(papyrus_weight), human=Decimal("1.00"))
     return build_ranking(period, counts, {1: 40, 2: 30}, identities, weights)
 
 
 class ReportBuilderTest(unittest.TestCase):
     def test_marker_identifies_the_period_type_and_start(self) -> None:
-        period = period_containing(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
+        period = period_from_start_date(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
 
         ensure(report_marker(period) == "cynicism-report:monthly:2026-07-01")
 
     def test_embed_shows_both_champions_and_the_threshold(self) -> None:
         ranking = build_sample_ranking()
 
-        embed = build_ranking_embed(ranking, updated_at=datetime.datetime(2026, 7, 27, 21, 0, tzinfo=JST))
+        embed = build_ranking_embed(ranking, updated_at=datetime.datetime(2026, 7, 31, 22, 0, tzinfo=JST))
 
         ensure(embed.title == "週間冷笑王")
-        ensure(embed.description == "2026-07-20 〜 2026-07-26 (JST)")
+        ensure(embed.description is not None and embed.description.startswith("2026-07-24 22:00 〜 2026-07-31 22:00 (JST)"))
         field_names = [field.name for field in embed.fields]
         ensure(any(name is not None and "冷笑王 (合計)" in name for name in field_names))
         ensure(any(name is not None and "冷笑率王 (平均)" in name for name in field_names))
@@ -369,10 +402,10 @@ class ReportBuilderTest(unittest.TestCase):
     def test_rate_champion_is_absent_when_nobody_qualifies(self) -> None:
         counts = [MemberReactionCounts(member_id=1, papyrus_count=1, human_count=0, cynical_message_count=1)]
         identities = {1: RankedMemberIdentity(1, "一言だけ", is_bot=False)}
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
         ranking = build_ranking(period, counts, {1: 1}, identities, DEFAULT_WEIGHTS)
 
-        embed = build_ranking_embed(ranking, updated_at=datetime.datetime(2026, 7, 27, 21, 0, tzinfo=JST))
+        embed = build_ranking_embed(ranking, updated_at=datetime.datetime(2026, 7, 31, 22, 0, tzinfo=JST))
 
         rate_field = next(field for field in embed.fields if field.name is not None and "冷笑率王" in field.name)
         ensure(rate_field.value is not None and "該当なし" in rate_field.value)
@@ -384,9 +417,9 @@ class ReportBuilderTest(unittest.TestCase):
         ensure(ranking_digest(build_sample_ranking()) == ranking_digest(build_sample_ranking()))
 
     def test_empty_notice_names_the_period(self) -> None:
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
-        ensure("2026-07-20 〜 2026-07-26 (JST)" in build_empty_notice(period))
+        ensure("2026-07-24 22:00 〜 2026-07-31 22:00 (JST)" in build_empty_notice(period))
 
 
 def make_delivery_target(message: object | None, history: list[object] | None = None) -> Mock:
@@ -412,7 +445,7 @@ class MessageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         )
         repository = cast("Any", SimpleNamespace(get_delivery=AsyncMock(return_value=None)))
         delivery = CynicismReportMessageDelivery(bot, repository, target_id=7)
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
         result = await delivery.upsert(period, discord.Embed(), "digest")
 
@@ -435,7 +468,7 @@ class MessageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         )
         repository = cast("Any", SimpleNamespace(get_delivery=AsyncMock(return_value=stored)))
         delivery = CynicismReportMessageDelivery(bot, repository, target_id=7)
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
         result = await delivery.upsert(period, discord.Embed(), "digest")
 
@@ -457,7 +490,7 @@ class MessageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         )
         repository = cast("Any", SimpleNamespace(get_delivery=AsyncMock(return_value=stored)))
         delivery = CynicismReportMessageDelivery(bot, repository, target_id=7)
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
         result = await delivery.upsert(period, discord.Embed(), "new")
 
@@ -479,7 +512,7 @@ class MessageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         )
         repository = cast("Any", SimpleNamespace(get_delivery=AsyncMock(return_value=stored)))
         delivery = CynicismReportMessageDelivery(bot, repository, target_id=7)
-        period = period_containing(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
         try:
             await delivery.upsert(period, discord.Embed(), "new")
@@ -703,7 +736,7 @@ class ReportUseCasesTest(unittest.IsolatedAsyncioTestCase):
         use_cases = self.build_use_cases()
 
         try:
-            use_cases._resolve_period("daily", None)  # noqa: SLF001
+            use_cases._resolve_period("daily", None, default_to_completed=True)  # noqa: SLF001
         except ArgumentError:
             return
         self.fail("未知の期間種別は利用者向けエラーにする必要があります")
@@ -712,7 +745,7 @@ class ReportUseCasesTest(unittest.IsolatedAsyncioTestCase):
         use_cases = self.build_use_cases()
 
         try:
-            use_cases._resolve_period("weekly", "2026/07/20")  # noqa: SLF001
+            use_cases._resolve_period("weekly", "2026/07/20", default_to_completed=True)  # noqa: SLF001
         except ArgumentError:
             return
         self.fail("開始日の書式誤りは利用者向けエラーにする必要があります")
@@ -720,9 +753,10 @@ class ReportUseCasesTest(unittest.IsolatedAsyncioTestCase):
     def test_start_date_is_normalized_to_the_containing_period(self) -> None:
         use_cases = self.build_use_cases()
 
-        period = use_cases._resolve_period("weekly", "2026-07-23")  # noqa: SLF001
+        period = use_cases._resolve_period("weekly", "2026-07-23", default_to_completed=True)  # noqa: SLF001
 
-        ensure(period.start_date == datetime.date(2026, 7, 20))
+        # 2026-07-23は木曜なので、直前の切り替えである2026-07-17 (金) 22:00の週になる。
+        ensure(period.start_at == datetime.datetime(2026, 7, 17, 22, 0, tzinfo=JST))
 
     def test_weight_outside_the_allowed_range_is_rejected(self) -> None:
         use_cases = self.build_use_cases()
@@ -748,3 +782,108 @@ class ChannelScopeModelTest(unittest.TestCase):
 
         ensure(scope.contains(1))
         ensure(not scope.contains(2))
+
+
+class RecordingSession:
+    """実行した操作の順序を記録する、DBへ接続しないSessionの代役。"""
+
+    def __init__(self, row: object) -> None:
+        self.calls: list[str] = []
+        self._row = row
+
+    async def execute(self, _statement: object) -> SimpleNamespace:
+        self.calls.append("execute")
+        return SimpleNamespace(scalar_one=lambda: self._row)
+
+    async def commit(self) -> None:
+        self.calls.append("commit")
+
+
+class RecordingDatabase:
+    """常に同じRecordingSessionを返すCynicismDatabaseの代役。"""
+
+    def __init__(self, session: RecordingSession) -> None:
+        self._session = session
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[RecordingSession]:
+        yield self._session
+
+
+def make_configuration_row() -> SimpleNamespace:
+    """設定テーブルの1行分の代役を返します。"""
+    return SimpleNamespace(
+        papyrus_weight=Decimal("3.00"),
+        human_weight=Decimal("1.00"),
+        is_paused=False,
+        paused_at=None,
+    )
+
+
+class ConfigurationRepositoryTest(unittest.IsolatedAsyncioTestCase):
+    """スキーマの読み替えはコネクション単位の設定なので、途中でコミットしてはいけない。
+
+    コミットするとコネクションが解放され、以降の文が読み替え前のスキーマを参照して
+    UndefinedTableErrorになる。
+    """
+
+    async def test_reading_settings_does_not_commit_midway(self) -> None:
+        session = RecordingSession(make_configuration_row())
+        repository = CynicismConfigurationRepository(cast("Any", RecordingDatabase(session)))
+
+        settings = await repository.get()
+
+        ensure("commit" not in session.calls, "設定の読み取りは1つのトランザクション内で完結する必要があります")
+        ensure(settings.weights.papyrus == Decimal("3.00"))
+        ensure(not settings.is_paused)
+
+    async def test_updating_settings_does_not_commit_midway(self) -> None:
+        session = RecordingSession(make_configuration_row())
+        repository = CynicismConfigurationRepository(cast("Any", RecordingDatabase(session)))
+
+        await repository.set_paused(paused=True, now=datetime.datetime.now(JST))
+
+        ensure("commit" not in session.calls, "設定の更新は1つのトランザクション内で完結する必要があります")
+
+
+class InProgressPeriodTest(unittest.TestCase):
+    def test_embed_marks_a_period_that_has_not_ended_yet(self) -> None:
+        ranking = build_sample_ranking()
+        during_the_period = datetime.datetime(2026, 7, 28, 12, 0, tzinfo=JST)
+
+        embed = build_ranking_embed(ranking, updated_at=during_the_period)
+
+        ensure(embed.title == "週間冷笑王 (集計中)")
+        ensure(embed.description is not None and "途中経過" in embed.description)
+
+    def test_embed_does_not_mark_a_completed_period(self) -> None:
+        ranking = build_sample_ranking()
+        after_the_period = datetime.datetime(2026, 7, 31, 22, 0, tzinfo=JST)
+
+        embed = build_ranking_embed(ranking, updated_at=after_the_period)
+
+        ensure(embed.title == "週間冷笑王")
+        ensure(embed.description is not None and "途中経過" not in embed.description)
+
+
+class PeriodDefaultTest(unittest.TestCase):
+    """閲覧は進行中の期間、発表は確定した期間を既定にする。"""
+
+    def build_use_cases(self) -> CynicismReportUseCases:
+        return object.__new__(CynicismReportUseCases)
+
+    def test_ranking_defaults_to_the_period_in_progress(self) -> None:
+        use_cases = self.build_use_cases()
+        now = datetime.datetime.now(JST)
+
+        period = use_cases._resolve_period("weekly", None, default_to_completed=False)  # noqa: SLF001
+
+        ensure(period.start_at <= now < period.end_at, "閲覧では現在を含む期間を既定にします")
+
+    def test_publish_defaults_to_the_latest_completed_period(self) -> None:
+        use_cases = self.build_use_cases()
+        now = datetime.datetime.now(JST)
+
+        period = use_cases._resolve_period("weekly", None, default_to_completed=True)  # noqa: SLF001
+
+        ensure(period.end_at <= now, "発表では既に終わった期間を既定にします")

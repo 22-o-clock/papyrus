@@ -33,7 +33,6 @@ class CynicismConfigurationRepository:
                 .on_conflict_do_nothing(index_elements=[CynicismConfiguration.id])
             )
             await session.execute(statement)
-            await session.commit()
             row = (
                 await session.execute(select(CynicismConfiguration).where(CynicismConfiguration.id == CONFIGURATION_ID))
             ).scalar_one()
@@ -66,7 +65,6 @@ class CynicismConfigurationRepository:
             await session.execute(
                 update(CynicismConfiguration).where(CynicismConfiguration.id == CONFIGURATION_ID).values(**values)
             )
-            await session.commit()
             row = (
                 await session.execute(select(CynicismConfiguration).where(CynicismConfiguration.id == CONFIGURATION_ID))
             ).scalar_one()

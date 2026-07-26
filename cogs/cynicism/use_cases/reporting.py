@@ -15,9 +15,10 @@ from cogs.cynicism.models import CynicismRanking, CynicismSettings
 from cogs.cynicism.periods import (
     CynicismPeriod,
     CynicismPeriodType,
+    current_period,
     format_period,
     latest_completed_period,
-    period_containing,
+    period_from_start_date,
 )
 from cogs.cynicism.repositories.configuration import CynicismConfigurationRepository
 from cogs.cynicism.repositories.reaction import CynicismReactionRepository
@@ -81,7 +82,8 @@ class CynicismReportUseCases:
 
     async def ranking(self, interaction: Interaction, period_type: str, start: str | None) -> None:
         """指定期間のランキングをその場で集計して表示する。"""
-        period = self._resolve_period(period_type, start)
+        # 閲覧では今の順位を知りたいはずなので、既定を進行中の期間にする。
+        period = self._resolve_period(period_type, start, default_to_completed=False)
         await interaction.response.defer(thinking=True)
         settings = await self._configuration.get()
         ranking = await self.build_ranking_for(period, settings, guild=interaction.guild)
@@ -96,7 +98,8 @@ class CynicismReportUseCases:
     async def publish(self, interaction: Interaction, period_type: str, start: str | None) -> None:
         """管理者操作で指定期間のランキングを発表チャンネルへ投稿・更新する。"""
         self._require_admin(interaction)
-        period = self._resolve_period(period_type, start)
+        # 発表は確定した順位を出すものなので、既定を直近の完了済み期間にする。
+        period = self._resolve_period(period_type, start, default_to_completed=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
         settings = await self._configuration.get()
         try:
@@ -227,7 +230,7 @@ class CynicismReportUseCases:
             )
         return result.message
 
-    def _resolve_period(self, period_type: str, start: str | None) -> CynicismPeriod:
+    def _resolve_period(self, period_type: str, start: str | None, *, default_to_completed: bool) -> CynicismPeriod:
         """コマンド引数を集計期間へ変換する。開始日は期間内の任意の日でよい。"""
         try:
             resolved_type = CynicismPeriodType(period_type)
@@ -235,13 +238,14 @@ class CynicismReportUseCases:
             message = "期間には weekly、monthly、yearly のいずれかを指定してください。"
             raise ArgumentError(message) from error
         if start is None:
-            return latest_completed_period(resolved_type, datetime.datetime.now(JST))
+            now = datetime.datetime.now(JST)
+            return latest_completed_period(resolved_type, now) if default_to_completed else current_period(resolved_type, now)
         try:
             start_date = datetime.date.fromisoformat(start)
         except ValueError as error:
             message = "開始日は YYYY-MM-DD 形式で指定してください。"
             raise ArgumentError(message) from error
-        return period_containing(resolved_type, start_date)
+        return period_from_start_date(resolved_type, start_date)
 
     def _validate_weight(self, weight: float | None) -> Decimal | None:
         """重みが許容範囲に収まっているかを検証する。"""
