@@ -237,11 +237,11 @@ class SpotifyEmbedFallback(commands.Cog):
             fallback_urls.append(url)
         return fallback_embeds, fallback_urls
 
-    @staticmethod
-    async def _reply_with_fallback(message: Message, embeds: list[discord.Embed], urls: list[str]) -> None:
+    async def _reply_with_fallback(self, message: Message, embeds: list[discord.Embed], urls: list[str]) -> None:
         """元投稿へのメンションを発生させずフォールバックを返信する。"""
         try:
-            await message.reply(embeds=embeds, view=build_spotify_view(urls), mention_author=False)
+            sent_message = await message.reply(embeds=embeds, view=build_spotify_view(urls), mention_author=False)
+            self.bot.dispatch("exclude_from_long_term_memory", sent_message)
         except (discord.Forbidden, discord.NotFound):
             return
         except discord.HTTPException:

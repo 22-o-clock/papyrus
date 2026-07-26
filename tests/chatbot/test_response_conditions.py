@@ -409,3 +409,19 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
         target_message.reply.assert_awaited_once_with("https://example.com", suppress_embeds=True)
         if state.last_action_at is None:
             self.fail("明示replyの成功後にクールダウンが更新されていません")
+
+
+class LongTermMemoryExclusionFlagTest(unittest.IsolatedAsyncioTestCase):
+    async def test_records_exclusion_even_if_message_event_has_not_been_saved(self) -> None:
+        message_id = 123
+        cog = object.__new__(ConversationUseCases)
+        cog.__dict__["_long_term_memory_excluded_message_ids"] = set()
+        repository = SimpleNamespace(exclude_from_long_term_memory=AsyncMock())
+        cog.short_term_message_repository = repository
+        message = cast("Message", SimpleNamespace(id=message_id))
+
+        await cog.exclude_from_long_term_memory(message)
+
+        repository.exclude_from_long_term_memory.assert_awaited_once_with(message_id)
+        if message_id not in cog.__dict__["_long_term_memory_excluded_message_ids"]:
+            self.fail("保存イベントとの競合を吸収する除外フラグが保持されていません")

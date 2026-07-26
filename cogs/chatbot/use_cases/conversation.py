@@ -130,6 +130,7 @@ class ConversationUseCases:
         self._channel_states: dict[int, ChannelProcessingState] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._sent_custom_profiles: dict[int, str | None] = {}
+        self._long_term_memory_excluded_message_ids: set[int] = set()
         self.long_term_memory_use_cases = LongTermMemoryUseCases(
             self.bot,
             self.environment_repository,
@@ -506,6 +507,7 @@ class ConversationUseCases:
                     is_bot=after.author.bot,
                     is_self=self._is_self_message(after),
                     is_forwarded=bool(after.message_snapshots),
+                    is_long_term_memory_excluded=after.id in self._long_term_memory_excluded_message_ids,
                     custom_profile_name=self._sent_custom_profiles.get(after.id),
                     embeds=self._serialize_embeds(after),
                 )
@@ -649,18 +651,30 @@ class ConversationUseCases:
                     is_bot=message.author.bot,
                     is_self=self._is_self_message(message),
                     is_forwarded=bool(message.message_snapshots),
+                    is_long_term_memory_excluded=message.id in self._long_term_memory_excluded_message_ids,
                     custom_profile_name=self._sent_custom_profiles.get(message.id),
                     embeds=self._serialize_embeds(message),
                 )
             )
             await self._synchronize_message_reactions(message)
             await self._save_message_media(message)
+            self._long_term_memory_excluded_message_ids.discard(message.id)
         if not message.author.bot:
             state.last_human_message_timestamp = message.created_at
 
     def _is_self_message(self, message: Message) -> bool:
         bot_user = self.bot.user
         return bot_user is not None and message.author.id == bot_user.id
+
+    async def exclude_from_long_term_memory(self, message: Message) -> None:
+        """他機能が生成した投稿を長期記憶から除外し、イベント順の競合も吸収します。"""
+        self._long_term_memory_excluded_message_ids.add(message.id)
+        await self.short_term_message_repository.exclude_from_long_term_memory(message.id)
+        asyncio.get_running_loop().call_later(
+            60,
+            self._long_term_memory_excluded_message_ids.discard,
+            message.id,
+        )
 
     async def _enqueue_long_term_memory(self, message: Message) -> None:
         """人間またはPapyrus自身の投稿だけを文書更新の起点にします。"""

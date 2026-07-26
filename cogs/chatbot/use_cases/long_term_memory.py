@@ -152,14 +152,15 @@ class LongTermMemoryUseCases:
             after_message_id=cursor.last_processed_message_id if cursor is not None else None,
             through_message_id=latest_message_id,
         )
-        source_count = sum(self._is_update_source(message) for message in messages)
-        token_count = sum(self._message_token_count(message) for message in messages)
+        analysis_messages = [message for message in messages if self._is_analysis_input(message)]
+        source_count = sum(self._is_update_source(message) for message in analysis_messages)
+        token_count = sum(self._message_token_count(message) for message in analysis_messages)
         if source_count < MEMORY_DOCUMENT_MESSAGE_TRIGGER and token_count < MEMORY_DOCUMENT_TOKEN_TRIGGER:
             return
 
         selected: list[ChatbotStoredMessage] = []
         selected_tokens = 0
-        for message in messages:
+        for message in analysis_messages:
             message_tokens = self._message_token_count(message)
             if selected and selected_tokens + message_tokens > MEMORY_DOCUMENT_NEW_CONTEXT_TOKENS:
                 break
@@ -212,9 +213,10 @@ class LongTermMemoryUseCases:
     ) -> None:
         cursor = await self._documents.get_cursor(channel_id)
         all_messages = await self._messages.get_range(channel_id, after_message_id=None, through_message_id=end_message_id)
+        included_messages = [message for message in all_messages if self._is_analysis_input(message)]
         new_messages = [
             message
-            for message in all_messages
+            for message in included_messages
             if cursor is None
             or cursor.last_processed_message_id is None
             or message.message_id > cursor.last_processed_message_id
@@ -228,7 +230,13 @@ class LongTermMemoryUseCases:
         new_payload = await self._serialize_messages(new_messages)
         new_tokens = self._token_count(new_payload)
         reference_budget = max(0, MEMORY_DOCUMENT_TOTAL_CONTEXT_TOKENS - new_tokens)
-        earlier = all_messages[: len(all_messages) - len(new_messages)]
+        earlier = [
+            message
+            for message in included_messages
+            if cursor is not None
+            and cursor.last_processed_message_id is not None
+            and message.message_id <= cursor.last_processed_message_id
+        ]
         reference_messages: list[ChatbotStoredMessage] = []
         used_reference_tokens = 0
         for message in reversed(earlier):
@@ -403,7 +411,11 @@ class LongTermMemoryUseCases:
         )
 
     def _is_update_source(self, message: ChatbotStoredMessage) -> bool:
-        return not message.is_forwarded and (not message.is_bot or message.is_self)
+        return self._is_analysis_input(message) and not message.is_forwarded and (not message.is_bot or message.is_self)
+
+    @staticmethod
+    def _is_analysis_input(message: ChatbotStoredMessage) -> bool:
+        return not message.is_long_term_memory_excluded
 
     def _message_token_count(self, message: ChatbotStoredMessage) -> int:
         return self._token_count(

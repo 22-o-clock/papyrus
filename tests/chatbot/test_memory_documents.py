@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 from cogs.chatbot.responses_api import MessageInMemory
 from cogs.chatbot.services.memory_migration import parse_memory_migration_markdown
+from cogs.chatbot.use_cases.long_term_memory import LongTermMemoryUseCases
 from cogs.chatbot.use_cases.memory_search import MemorySearchUseCases
 
 
@@ -109,3 +110,22 @@ class MemoryResponseContextTest(unittest.IsolatedAsyncioTestCase):
         document_repository.get_for_users.assert_awaited_once_with({10, 20, 30, 40})
         if "## bot\nBot文書" not in context or "## shared\n共有文書" not in context:
             self.fail("Bot文書と共有文書を回答文脈へ整形できていません")
+
+
+class MemorySourceExclusionTest(unittest.TestCase):
+    def test_excluded_message_is_not_an_analysis_input_or_update_source(self) -> None:
+        message = cast(
+            "Any",
+            SimpleNamespace(
+                is_long_term_memory_excluded=True,
+                is_forwarded=False,
+                is_bot=True,
+                is_self=True,
+            ),
+        )
+        use_cases = object.__new__(LongTermMemoryUseCases)
+
+        if use_cases._is_analysis_input(message):  # noqa: SLF001
+            self.fail("除外フラグ付きメッセージを長期記憶の分析入力に含めています")
+        if use_cases._is_update_source(message):  # noqa: SLF001
+            self.fail("除外フラグ付きメッセージを長期記憶の更新起点にしています")

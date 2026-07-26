@@ -25,6 +25,7 @@ class ChatbotStoredMessage(ChatbotBase):
     is_bot = mapped_column(Boolean, nullable=False)
     is_self = mapped_column(Boolean, nullable=False, default=False)
     is_forwarded = mapped_column(Boolean, nullable=False, default=False)
+    is_long_term_memory_excluded = mapped_column(Boolean, nullable=False, default=False)
     custom_profile_name = mapped_column(Text, nullable=True)
     embeds = mapped_column(JSONB, nullable=False, default=list)
 
@@ -80,6 +81,7 @@ class StoredMessageInput:
     is_bot: bool
     is_self: bool = False
     is_forwarded: bool = False
+    is_long_term_memory_excluded: bool = False
     custom_profile_name: str | None = None
     embeds: list[dict[str, object]] | None = None
 
@@ -134,14 +136,21 @@ class ChatbotShortTermMessageRepository:
                 "is_bot": message.is_bot,
                 "is_self": message.is_self,
                 "is_forwarded": message.is_forwarded,
+                "is_long_term_memory_excluded": message.is_long_term_memory_excluded,
                 "custom_profile_name": message.custom_profile_name,
                 "embeds": message.embeds or [],
             }
             statement = insert(ChatbotStoredMessage).values(**values)
+            updated_values: dict[str, object] = {
+                key: value for key, value in values.items() if key not in {"message_id", "created_at"}
+            }
+            updated_values["is_long_term_memory_excluded"] = (
+                ChatbotStoredMessage.is_long_term_memory_excluded | statement.excluded.is_long_term_memory_excluded
+            )
             await session.execute(
                 statement.on_conflict_do_update(
                     index_elements=[ChatbotStoredMessage.message_id],
-                    set_={key: value for key, value in values.items() if key not in {"message_id", "created_at"}},
+                    set_=updated_values,
                 )
             )
 
@@ -154,6 +163,15 @@ class ChatbotShortTermMessageRepository:
                 update(ChatbotStoredMessage)
                 .where(ChatbotStoredMessage.message_id.in_(message_ids))
                 .values(custom_profile_name=profile_name)
+            )
+
+    async def exclude_from_long_term_memory(self, message_id: int) -> None:
+        """送信元機能が指定したメッセージを長期記憶の分析対象外にします。"""
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                update(ChatbotStoredMessage)
+                .where(ChatbotStoredMessage.message_id == message_id)
+                .values(is_long_term_memory_excluded=True)
             )
 
     async def delete(self, message_id: int) -> None:

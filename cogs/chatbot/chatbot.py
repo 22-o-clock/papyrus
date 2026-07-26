@@ -31,6 +31,10 @@ class ChatBot(commands.Cog):
         await self.conversation_use_cases.on_message(message)
 
     @commands.Cog.listener()
+    async def on_exclude_from_long_term_memory(self, message: Message) -> None:
+        await self.conversation_use_cases.exclude_from_long_term_memory(message)
+
+    @commands.Cog.listener()
     async def on_message_delete(self, message: Message) -> None:
         await self.conversation_use_cases.on_message_delete(message)
 

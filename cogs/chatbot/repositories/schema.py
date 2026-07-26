@@ -49,6 +49,7 @@ async def create_chatbot_tables(engine: AsyncEngine) -> None:
                 "ADD COLUMN IF NOT EXISTS custom_profile_name TEXT, "
                 "ADD COLUMN IF NOT EXISTS is_forwarded BOOLEAN NOT NULL DEFAULT FALSE, "
                 "ADD COLUMN IF NOT EXISTS is_self BOOLEAN NOT NULL DEFAULT FALSE, "
+                "ADD COLUMN IF NOT EXISTS is_long_term_memory_excluded BOOLEAN NOT NULL DEFAULT FALSE, "
                 "ADD COLUMN IF NOT EXISTS embeds JSONB NOT NULL DEFAULT '[]'::jsonb"
             )
         )
