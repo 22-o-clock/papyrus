@@ -4,6 +4,8 @@ from core.runtime_environment import BotEnvironment, configure_runtime_environme
 
 PRODUCTION_REPORT_TARGET_ID = 2
 DEBUG_REPORT_TARGET_ID = 8
+PRODUCTION_CYNICISM_TARGET_ID = 12
+DEBUG_CYNICISM_TARGET_ID = 13
 
 
 def ensure(condition: object) -> None:
@@ -22,7 +24,9 @@ def valid_environment(**overrides: str) -> dict[str, str]:
     """起動環境検証テスト用の最小構成を返します。"""
     values = {
         "BOT_ENVIRONMENT": "production",
+        "CHANNEL_ID_CYNICISM_REPORT": "12",
         "CHANNEL_ID_DEBUG_CHATBOT": "10",
+        "CHANNEL_ID_DEBUG_CYNICISM_REPORT": "13",
         "CHANNEL_ID_LISTEN_ONLY_MEMBER": "4",
         "CHANNEL_ID_LOBBY": "5",
         "CHATBOT_SUPABASE_CONNECTION_STRING": "postgresql://chatbot",
@@ -53,6 +57,7 @@ class RuntimeEnvironmentTest(unittest.TestCase):
         ensure(runtime.enabled_cogs[0] == "admin")
         ensure(runtime.enabled_cogs[-1] == "voicevox")
         ensure(runtime.api_usage_report_target_id == PRODUCTION_REPORT_TARGET_ID)
+        ensure(runtime.cynicism_report_target_id == PRODUCTION_CYNICISM_TARGET_ID)
         ensure(not runtime.should_process_chatbot_channel(10))
         ensure(runtime.should_process_chatbot_channel(11))
 
@@ -61,6 +66,7 @@ class RuntimeEnvironmentTest(unittest.TestCase):
 
         ensure(runtime.environment is BotEnvironment.DEBUG)
         ensure(runtime.api_usage_report_target_id == DEBUG_REPORT_TARGET_ID)
+        ensure(runtime.cynicism_report_target_id == DEBUG_CYNICISM_TARGET_ID)
         ensure(runtime.should_process_chatbot_channel(10))
         ensure(not runtime.should_process_chatbot_channel(11))
 

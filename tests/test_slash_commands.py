@@ -4,6 +4,7 @@ from discord import app_commands
 
 from cogs.api_usage.api_usage import ApiUsageReporter
 from cogs.chatbot.chatbot import ChatBot
+from cogs.cynicism.cynicism import Cynicism
 from cogs.monitor.monitor import Monitor
 from cogs.moving.moving import Moving
 from cogs.remind.remind import Notify
@@ -27,6 +28,7 @@ EXPECTED_GROUP_COMMANDS = {
         "role_show",
     },
     "copy": {"all", "range", "to_new_thread"},
+    "cynicism": {"pause", "publish", "ranking", "resume", "status", "weight"},
     "moderation": {
         "expression_config",
         "post_ban",
@@ -52,6 +54,7 @@ COMMAND_GROUPS = (
     ArknightsVoice.arknights,
     ChatBot.chatbot,
     Moving.copy,
+    Cynicism.cynicism,
     Monitor.moderation,
     Notify.reminder,
     TalkData.talkdata,
@@ -59,7 +62,7 @@ COMMAND_GROUPS = (
 )
 
 INDEPENDENT_COMMANDS = (Notify.remind, Speak.choice_command, Speak.hi)
-EXPECTED_SLASH_COMMAND_COUNT = 41
+EXPECTED_SLASH_COMMAND_COUNT = 47
 
 
 def ensure(condition: object) -> None:

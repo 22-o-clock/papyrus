@@ -20,8 +20,8 @@ debug環境は、通常運用と処理対象や副作用が競合しないよう
 Cogを読み込まず、カンマ区切りのCog名では指定したCogだけを既定の順序で読み込む。未知のCog名、重複、空の
 要素を含む指定ではBotを起動しない。
 
-指定できるCog名は、`admin`、`agree`、`audit`、`api_usage`、`chatbot`、`hwh`、`monitor`、`moving`、
-`remind`、`speak`、`spotify_embed`、`talkdata`、`voice`、`voicevox`とする。
+指定できるCog名は、`admin`、`agree`、`audit`、`api_usage`、`chatbot`、`cynicism`、`hwh`、`monitor`、
+`moving`、`remind`、`speak`、`spotify_embed`、`talkdata`、`voice`、`voicevox`とする。
 
 全Cogをロードしてデバッグする場合は、`BOT_ENVIRONMENT=debug`と`ENABLED_COGS=all`を組み合わせる。
 
@@ -49,6 +49,21 @@ Cogを読み込まず、カンマ区切りのCog名では指定したCogだけ�
 - 投稿先にはテキストチャンネルまたはスレッドを指定できる。
 - 保存済みメッセージが別のBotによる投稿だった場合は、配送記録を上書きせず設定エラーとして停止する。
 
+#### 冷笑ランキング
+
+- production環境では自動発表と手動投稿を行う。
+- debug環境では自動発表を行わず、`/cynicism publish` による手動投稿だけを行う。
+- production環境の投稿先は `CHANNEL_ID_CYNICISM_REPORT`、debug環境の投稿先は
+  `CHANNEL_ID_DEBUG_CYNICISM_REPORT` で指定する。投稿先にはテキストチャンネルまたはスレッドを指定できる。
+- 🥶の記録と集計の対象チャンネルは、Chatbotの処理対象と同じ範囲とする。production環境は
+  `CHANNEL_ID_DEBUG_CHATBOT` を除く全チャンネル、debug環境はそのチャンネルだけを対象にする。
+- テーブルはTalkDataと同じスキーマへ置き、実行環境ごとに `talkdata` と `talkdata_test` へ分離する。
+  平均の分母である `talkdata.message` と同じ接続で集計するため。
+- 集計期間はJST暦日で区切る。API usageレポートのUTC暦日(JST 09:00起点)とは基準が異なる。
+- 集計の一時停止は `/cynicism pause` で切り替え、DBへ永続化する。停止中は🥶の記録と自動発表を止めるが、
+  取り消しイベントの反映と `/cynicism ranking` の閲覧は続行する。
+- 保存済みメッセージが別のBotによる投稿だった場合は、配送記録を上書きせず設定エラーとして停止する。
+
 #### TalkData
 
 TalkDataは実行環境ごとにスキーマを分離する。
@@ -65,6 +80,7 @@ TalkDataは実行環境ごとにスキーマを分離する。
 - API usageの定期投稿、再集計、確定額再取得
 - リマインダーの定期配送
 - 長期記憶文書の更新ジョブ、12時間の更新タイマー
+- 冷笑王ランキングの定期発表
 - Last.fm更新停止警告
 - Discord予定イベントの作成、更新、開始、終了、中止通知
 - 監査ログの削除・編集転送
