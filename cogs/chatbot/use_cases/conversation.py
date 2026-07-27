@@ -225,16 +225,20 @@ class ConversationUseCases:
         self._history_sync_complete.clear()
         if self.runtime_environment.is_debug:
             logger.info("Skipped chatbot Discord history sync in debug environment")
-            self._history_sync_complete.set()
-            await self._initialize_long_term_memory_if_enabled()
+            try:
+                await self._initialize_long_term_memory_if_enabled()
+            finally:
+                self._history_sync_complete.set()
             return
         try:
             async with self._history_sync_lock:
                 await self._synchronize_recent_discord_history()
         finally:
-            # 一部チャンネルの失敗で、通常の応答まで永続的に停止させない。
-            self._history_sync_complete.set()
-        await self._initialize_long_term_memory_if_enabled()
+            try:
+                await self._initialize_long_term_memory_if_enabled()
+            finally:
+                # 一部チャンネルの失敗で、通常の応答まで永続的に停止させない。
+                self._history_sync_complete.set()
 
     async def _initialize_long_term_memory_if_enabled(self) -> None:
         """共有記憶を書き換えるバックグラウンド処理を本番だけで開始します。"""
@@ -267,8 +271,6 @@ class ConversationUseCases:
                     channel_message_count = 0
                     async for message in channel.history(after=after, oldest_first=True, limit=None):
                         await self._append_message_to_short_term_memory(message, state)
-                        if self.runtime_environment.is_production:
-                            await self._enqueue_long_term_memory(message)
                         channel_message_count += 1
                     synchronized_message_count += channel_message_count
                     if channel_message_count:
@@ -839,7 +841,7 @@ class ConversationUseCases:
             return
 
         async def generate_response() -> LLMMessage:
-            long_term_memory_context = await self.memory_search_use_cases.build_response_context(
+            response_memory = await self.memory_search_use_cases.build_response_memory(
                 message.channel.id,
                 resolved_member_aliases,
             )
@@ -848,7 +850,9 @@ class ConversationUseCases:
                 ResponseGenerationOptions(
                     response_mode=response_mode,
                     required_reply_to_message_id=required_reply_to_message_id,
-                    long_term_memory_context=long_term_memory_context,
+                    long_term_memory_context=response_memory.long_term_memory,
+                    pending_other_channel_index=response_memory.pending_index,
+                    pending_other_channel_context=response_memory.pending_context,
                     custom_profile=custom_profile,
                     resolved_member_aliases=resolved_member_aliases,
                     available_custom_emojis=_collect_available_custom_emojis(message, response_mode),
