@@ -4,11 +4,12 @@ import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 from discord import Message
 
+from cogs.chatbot import observability
 from cogs.chatbot.channel_roles import ChannelRole
 from cogs.chatbot.constants import SHORT_TERM_MEMORY_PROMPT_TOKENS
 from cogs.chatbot.models import (
@@ -748,8 +749,11 @@ class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
     async def test_updates_memory_documents_with_luna_and_medium_reasoning(self) -> None:
         responses = ConfigRecordingResponses(MemoryDocumentUpdateResult())
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        usage_repository = AsyncMock()
+        expected_channel_count = 2
 
-        await MemoryDocumentUpdater(client).update({"new_messages": []})
+        with patch.object(observability, "_usage_repository", usage_repository):
+            await MemoryDocumentUpdater(client).update({"channel_conversations": [{}] * expected_channel_count})
 
         if responses.calls[0]["model"] != "gpt-5.6-luna":
             self.fail("長期記憶文書の更新がLunaを使用していません")
@@ -757,12 +761,17 @@ class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
             self.fail("長期記憶文書の更新の推論強度がmediumになっていません")
         if responses.calls[0]["metadata"] != {"operation": "memory_document_update"}:
             self.fail("長期記憶文書の更新種別をPlatformのmetadataへ設定していません")
+        if usage_repository.add.await_args.args[0].item_count != expected_channel_count:
+            self.fail("API利用量へ更新対象のチャンネル数を記録していません")
 
     async def test_uses_separate_instructions_for_shortening_retry(self) -> None:
         responses = ConfigRecordingResponses(MemoryDocumentUpdateResult())
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        usage_repository = AsyncMock()
+        expected_document_count = 3
 
-        await MemoryDocumentUpdater(client).shorten({"documents": []})
+        with patch.object(observability, "_usage_repository", usage_repository):
+            await MemoryDocumentUpdater(client).shorten({"documents": [{}] * expected_document_count})
 
         if responses.calls[0]["instructions"] != MEMORY_DOCUMENT_SHORTEN_INSTRUCTIONS:
             self.fail("文字数超過時に独立した短縮専用の指示を使用していません")
@@ -772,3 +781,5 @@ class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
             self.fail("短縮処理の種別をPlatformのmetadataへ設定していません")
         if responses.calls[0]["text_format"] is not MemoryDocumentShortenResult:
             self.fail("短縮callが本文以外の識別情報も再生成する出力形式になっています")
+        if usage_repository.add.await_args.args[0].item_count != expected_document_count:
+            self.fail("API利用量へ短縮対象の文書数を記録していません")

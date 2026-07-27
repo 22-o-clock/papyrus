@@ -693,6 +693,8 @@ class MemoryDocumentUpdater:
     ) -> MemoryDocumentUpdateResult:
         """既存文書と会話を渡し、変更された文書だけを受け取ります。"""
         operation = "memory_document_update"
+        channel_conversations = payload.get("channel_conversations")
+        item_count = len(channel_conversations) if isinstance(channel_conversations, list) else 1
         response = await observe_chatbot_api_call(
             operation,
             MEMORY_DOCUMENT_UPDATE_MODEL,
@@ -704,7 +706,7 @@ class MemoryDocumentUpdater:
                 text_format=MemoryDocumentUpdateResult,
                 metadata={"operation": operation},
             ),
-            item_count=1,
+            item_count=item_count,
         )
         if response.output_parsed is None:
             logger.warning("Failed to parse memory document update response")
@@ -714,6 +716,8 @@ class MemoryDocumentUpdater:
     async def shorten(self, payload: dict[str, object]) -> MemoryDocumentShortenResult:
         """対象文書の本文だけを短縮し、入力順に受け取ります。"""
         operation = "memory_document_shorten"
+        documents = payload.get("documents")
+        item_count = len(documents) if isinstance(documents, list) else 1
         response = await observe_chatbot_api_call(
             operation,
             MEMORY_DOCUMENT_UPDATE_MODEL,
@@ -725,7 +729,7 @@ class MemoryDocumentUpdater:
                 text_format=MemoryDocumentShortenResult,
                 metadata={"operation": operation},
             ),
-            item_count=1,
+            item_count=item_count,
         )
         if response.output_parsed is None:
             logger.warning("Failed to parse memory document shorten response")
