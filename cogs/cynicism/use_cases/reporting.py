@@ -73,12 +73,14 @@ class CynicismReportUseCases:
         async with self._report_lock:
             earliest_recorded = await self._reactions.earliest_recorded_date()
             for period in publishable_periods(current_time, earliest_recorded):
+                # 対象が無く投稿しなかった期間も処理済みとして記録するため、毎分の再集計にはならない。
                 if not await self._reports.has_delivery(period, self._target_id):
-                    await self._post_or_update(period, settings)
+                    await self._post_or_update(period, settings, record_empty=True)
             for period in refreshable_periods(current_time):
-                # 遅れて付いた🥶や重み変更を反映するため、発表済みの内容だけを更新する。
-                if await self._reports.has_delivery(period, self._target_id):
-                    await self._post_or_update(period, settings)
+                # 遅れて付いた🥶や重み変更を反映するため、投稿済みの内容だけを更新する。
+                delivery = await self._reports.get_delivery(period, self._target_id)
+                if delivery is not None and delivery.is_posted:
+                    await self._post_or_update(period, settings, record_empty=False)
 
     async def ranking(self, interaction: Interaction, period_type: str, start: str | None) -> None:
         """指定期間のランキングをその場で集計して表示する。"""
@@ -104,7 +106,8 @@ class CynicismReportUseCases:
         settings = await self._configuration.get()
         try:
             async with self._report_lock:
-                posted = await self._post_or_update(period, settings)
+                # 手動確認で進行中の期間を空と確定させないよう、ここでは処理済みにしない。
+                posted = await self._post_or_update(period, settings, record_empty=False)
         except ReportMessageOwnershipError:
             logger.exception("Refused to overwrite another Bot's cynicism report")
             await interaction.followup.send(
@@ -129,7 +132,7 @@ class CynicismReportUseCases:
         last_delivery = await self._reports.get_last_delivery(self._target_id)
         last_text = (
             f"{last_delivery.period_type} {last_delivery.period_start:%Y-%m-%d} "
-            f"({last_delivery.last_updated_at.astimezone(JST):%Y-%m-%d %H:%M JST})"
+            f"({last_delivery.last_processed_at.astimezone(JST):%Y-%m-%d %H:%M JST})"
             if last_delivery is not None
             else "なし"
         )
@@ -216,22 +219,30 @@ class CynicismReportUseCases:
         )
         return build_ranking(period, counts, message_counts, identities, settings.weights)
 
-    async def _post_or_update(self, period: CynicismPeriod, settings: CynicismSettings) -> discord.Message | None:
+    async def _post_or_update(
+        self,
+        period: CynicismPeriod,
+        settings: CynicismSettings,
+        *,
+        record_empty: bool,
+    ) -> discord.Message | None:
         """集計結果を作り、既存投稿の編集または新規投稿を行う。"""
         ranking = await self.build_ranking_for(period, settings)
         if ranking.is_empty:
-            # 対象が無い期間まで毎回投稿すると通知が増えるだけなので、配送記録も残さない。
+            # 対象が無い期間は投稿しない。定期処理では処理済みとして記録し、再集計を繰り返さない。
+            if record_empty:
+                await self._reports.save_empty(period, self._target_id, processed_at=datetime.datetime.now(JST))
             return None
         digest = ranking_digest(ranking)
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime.now(JST))
         result = await self._delivery.upsert(period, embed, digest)
         if result.changed:
-            await self._reports.save_delivery(
+            await self._reports.save_posted(
                 period,
                 self._target_id,
                 result.message.id,
                 content_digest=digest,
-                posted_at=result.updated_at,
+                processed_at=result.updated_at,
             )
         return result.message
 

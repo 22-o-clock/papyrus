@@ -1,13 +1,11 @@
 """🥶が向けられた事実の記録と取り消し。"""
 
-import datetime
-from dataclasses import dataclass
 from logging import getLogger
 
 import discord
 from discord.ext import commands
 
-from cogs.cynicism.constants import CYNICISM_EMOJI, JST, REACTION_SOURCE, REPLY_SOURCE
+from cogs.cynicism.constants import REACTION_SOURCE, REPLY_SOURCE
 from cogs.cynicism.repositories.configuration import CynicismConfigurationRepository
 from cogs.cynicism.repositories.reaction import CynicismReactionEvent, CynicismReactionRepository
 from cogs.cynicism.services.reaction_filter import is_cynicism_emoji, is_cynicism_only_content
@@ -16,17 +14,11 @@ from core.runtime_environment import RuntimeEnvironment
 logger = getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
-class TargetMessage:
-    """🥶を向けられた発言のうち、集計に必要な情報。"""
-
-    author_id: int
-    author_is_bot: bool
-    posted_at: datetime.datetime
-
-
 class CynicismTrackingUseCases:
-    """Discordのリアクションと返信から冷笑ポイントの根拠を集める。"""
+    """Discordのリアクションと返信から冷笑ポイントの根拠を集める。
+
+    発言者や投稿時刻は集計時にTalkDataから解決するため、記録時にDiscordのメッセージは取得しない。
+    """
 
     def __init__(
         self,
@@ -44,32 +36,22 @@ class CynicismTrackingUseCases:
         """付与された🥶を冷笑ポイントの根拠として記録する。"""
         if not is_cynicism_emoji(payload.emoji) or not self._is_target_channel(payload.guild_id, payload.channel_id):
             return
-        if await self._is_paused():
+        # 判定主体はPapyrusと人間に限る。他のBotによる🥶は記録しない。
+        if self._is_other_bot(payload.user_id, payload.member):
             return
-
-        target = await self._resolve_target_message(
-            payload.channel_id,
-            payload.message_id,
-            fallback_author_id=payload.message_author_id,
-            guild_id=payload.guild_id,
-        )
-        if target is None or target.author_is_bot:
+        # Botの発言はランキングの対象にしない。判別できない場合も集計時のメンバー解決で除外される。
+        if self._is_known_bot(payload.guild_id, payload.message_author_id):
+            return
+        if await self._is_paused():
             return
 
         await self._reactions.record(
             CynicismReactionEvent(
                 message_id=payload.message_id,
                 reactor_id=payload.user_id,
-                emoji_name=CYNICISM_EMOJI,
                 is_burst=payload.burst,
                 source=REACTION_SOURCE,
                 evidence_message_id=None,
-                channel_id=payload.channel_id,
-                message_author_id=target.author_id,
-                message_author_is_bot=target.author_is_bot,
-                reactor_is_bot=self._is_bot_user(payload.user_id, payload.member),
-                message_posted_at=target.posted_at,
-                recorded_at=datetime.datetime.now(JST),
             )
         )
 
@@ -77,12 +59,7 @@ class CynicismTrackingUseCases:
         """取り消された🥶の記録を削除する。一時停止中でも整合のため処理する。"""
         if not is_cynicism_emoji(payload.emoji):
             return
-        await self._reactions.remove_reaction(
-            payload.message_id,
-            payload.user_id,
-            CYNICISM_EMOJI,
-            is_burst=payload.burst,
-        )
+        await self._reactions.remove_reaction(payload.message_id, payload.user_id, is_burst=payload.burst)
 
     async def on_reaction_clear(self, payload: discord.RawReactionClearEvent) -> None:
         """メッセージの全リアクションが消された場合の記録を削除する。"""
@@ -92,11 +69,12 @@ class CynicismTrackingUseCases:
         """特定の絵文字が一括削除された場合の記録を削除する。"""
         if not is_cynicism_emoji(payload.emoji):
             return
-        await self._reactions.remove_emoji_reactions(payload.message_id, CYNICISM_EMOJI)
+        await self._reactions.remove_message_reactions(payload.message_id)
 
     async def on_message(self, message: discord.Message) -> None:
         """Papyrusが🥶だけを返信した場合も、リアクションと同じ根拠として記録する。"""
-        reference_message_id = message.reference.message_id if message.reference is not None else None
+        reference = message.reference
+        reference_message_id = reference.message_id if reference is not None else None
         if (
             self._bot.user is None
             or message.author.id != self._bot.user.id
@@ -105,32 +83,20 @@ class CynicismTrackingUseCases:
             or not self._is_target_channel(message.guild.id if message.guild is not None else None, message.channel.id)
         ):
             return
-        if await self._is_paused():
+        # 返信元はGatewayのイベントに同梱されるため、Discordへ取得しに行かずにBot判定できる。
+        replied_to = reference.resolved if reference is not None else None
+        if isinstance(replied_to, discord.Message) and replied_to.author.bot:
             return
-
-        target = await self._resolve_target_message(
-            message.channel.id,
-            reference_message_id,
-            fallback_author_id=None,
-            guild_id=message.guild.id if message.guild is not None else None,
-        )
-        if target is None or target.author_is_bot:
+        if await self._is_paused():
             return
 
         await self._reactions.record(
             CynicismReactionEvent(
                 message_id=reference_message_id,
                 reactor_id=self._bot.user.id,
-                emoji_name=CYNICISM_EMOJI,
                 is_burst=False,
                 source=REPLY_SOURCE,
                 evidence_message_id=message.id,
-                channel_id=message.channel.id,
-                message_author_id=target.author_id,
-                message_author_is_bot=target.author_is_bot,
-                reactor_is_bot=True,
-                message_posted_at=target.posted_at,
-                recorded_at=datetime.datetime.now(JST),
             )
         )
 
@@ -149,44 +115,22 @@ class CynicismTrackingUseCases:
         settings = await self._configuration.get()
         return settings.is_paused
 
-    def _is_bot_user(self, user_id: int, member: discord.Member | None) -> bool:
-        """🥶を付けた相手がBotかを、取得できる情報の範囲で判定する。"""
+    def _is_other_bot(self, user_id: int, member: discord.Member | None) -> bool:
+        """Papyrus以外のBotによる操作かを、取得できる情報の範囲で判定する。"""
+        if self._bot.user is not None and user_id == self._bot.user.id:
+            return False
         if member is not None:
             return member.bot
         user = self._bot.get_user(user_id)
-        if user is not None:
-            return user.bot
-        return self._bot.user is not None and user_id == self._bot.user.id
+        return user is not None and user.bot
 
-    async def _resolve_target_message(
-        self,
-        channel_id: int,
-        message_id: int,
-        *,
-        fallback_author_id: int | None,
-        guild_id: int | None,
-    ) -> TargetMessage | None:
-        """🥶を向けられた発言の投稿者と投稿時刻を解決する。"""
-        channel = self._bot.get_channel(channel_id)
-        if isinstance(channel, discord.TextChannel | discord.Thread):
-            try:
-                message = await channel.fetch_message(message_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                logger.debug("Failed to fetch cynicism target message (message_id=%s)", message_id)
-            else:
-                return TargetMessage(
-                    author_id=message.author.id,
-                    author_is_bot=message.author.bot,
-                    posted_at=message.created_at.astimezone(JST),
-                )
-
-        if fallback_author_id is None:
-            return None
-        # 取得できない場合でも、Discord IDから投稿時刻を復元して集計期間を決められる。
+    def _is_known_bot(self, guild_id: int | None, user_id: int | None) -> bool:
+        """キャッシュから確実にBotと分かる利用者かを返す。"""
+        if user_id is None:
+            return False
         guild = self._bot.get_guild(guild_id) if guild_id is not None else None
-        author = guild.get_member(fallback_author_id) if guild is not None else None
-        return TargetMessage(
-            author_id=fallback_author_id,
-            author_is_bot=author.bot if author is not None else False,
-            posted_at=discord.utils.snowflake_time(message_id).astimezone(JST),
-        )
+        member = guild.get_member(user_id) if guild is not None else None
+        if member is not None:
+            return member.bot
+        user = self._bot.get_user(user_id)
+        return user is not None and user.bot

@@ -14,6 +14,10 @@ VARIATION_SELECTOR = "\ufe0f"
 REACTION_SOURCE = "reaction"
 REPLY_SOURCE = "reply"
 
+# ランキング発表の処理結果。
+POSTED_STATUS = "posted"
+EMPTY_STATUS = "empty"
+
 # 中立な第三者としての判定を重く見るため、Papyrusの既定値を人間より大きくする。
 DEFAULT_PAPYRUS_WEIGHT = Decimal("3.00")
 DEFAULT_HUMAN_WEIGHT = Decimal("1.00")

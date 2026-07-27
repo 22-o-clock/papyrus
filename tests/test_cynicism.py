@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import unittest
 from collections.abc import AsyncIterator
@@ -18,6 +19,7 @@ from cogs.cynicism.models import (
     RankedMemberIdentity,
 )
 from cogs.cynicism.periods import (
+    CynicismPeriod,
     CynicismPeriodType,
     format_period,
     latest_completed_period,
@@ -62,6 +64,8 @@ FEBRUARY_LEAP_LAST_DAY = 29
 EXPECTED_PUBLISHABLE_PERIOD_COUNT = 3
 HEAVY_POSTER_ID = 2
 LIGHT_POSTER_ID = 1
+TARGET_MESSAGE_ID = 12345
+REPLY_MESSAGE_ID = 777
 
 
 def ensure(condition: object, message: str = "") -> None:
@@ -464,7 +468,7 @@ class MessageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         stored = SimpleNamespace(
             message_id=55,
             content_digest="digest",
-            last_updated_at=datetime.datetime(2026, 7, 27, 21, 0, tzinfo=JST),
+            last_processed_at=datetime.datetime(2026, 7, 27, 21, 0, tzinfo=JST),
         )
         repository = cast("Any", SimpleNamespace(get_delivery=AsyncMock(return_value=stored)))
         delivery = CynicismReportMessageDelivery(bot, repository, target_id=7)
@@ -486,7 +490,7 @@ class MessageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         stored = SimpleNamespace(
             message_id=55,
             content_digest="old",
-            last_updated_at=datetime.datetime(2026, 7, 27, 21, 0, tzinfo=JST),
+            last_processed_at=datetime.datetime(2026, 7, 27, 21, 0, tzinfo=JST),
         )
         repository = cast("Any", SimpleNamespace(get_delivery=AsyncMock(return_value=stored)))
         delivery = CynicismReportMessageDelivery(bot, repository, target_id=7)
@@ -508,7 +512,7 @@ class MessageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         stored = SimpleNamespace(
             message_id=55,
             content_digest="old",
-            last_updated_at=datetime.datetime(2026, 7, 27, 21, 0, tzinfo=JST),
+            last_processed_at=datetime.datetime(2026, 7, 27, 21, 0, tzinfo=JST),
         )
         repository = cast("Any", SimpleNamespace(get_delivery=AsyncMock(return_value=stored)))
         delivery = CynicismReportMessageDelivery(bot, repository, target_id=7)
@@ -525,25 +529,19 @@ class MessageDeliveryTest(unittest.IsolatedAsyncioTestCase):
 def make_tracking_use_cases(
     *,
     is_paused: bool = False,
-    target_message: object | None = None,
+    bot_user_ids: frozenset[int] = frozenset(),
     is_debug: bool = False,
 ) -> tuple[CynicismTrackingUseCases, Any, Any]:
     """記録用ユースケースと、注入したBot・リポジトリの代役を返します。"""
-    channel = Mock(spec=discord.TextChannel)
-    channel.fetch_message = AsyncMock(
-        return_value=target_message
-        or SimpleNamespace(
-            author=SimpleNamespace(id=AUTHOR_USER_ID, bot=False),
-            created_at=datetime.datetime(2026, 7, 22, 3, 0, tzinfo=datetime.UTC),
-        )
-    )
+    guild = Mock(spec=discord.Guild)
+    guild.get_member = lambda user_id: SimpleNamespace(bot=True) if user_id in bot_user_ids else SimpleNamespace(bot=False)
     bot = cast(
         "Any",
         SimpleNamespace(
             user=SimpleNamespace(id=PAPYRUS_USER_ID),
-            get_channel=Mock(return_value=channel),
+            get_channel=Mock(return_value=None),
             get_user=Mock(return_value=None),
-            get_guild=Mock(return_value=None),
+            get_guild=Mock(return_value=guild),
         ),
     )
     runtime = cast(
@@ -572,6 +570,7 @@ def make_reaction_payload(
     *,
     emoji_name: str = CYNICISM_EMOJI,
     channel_id: int = CHANNEL_ID,
+    reactor_is_bot: bool = False,
 ) -> discord.RawReactionActionEvent:
     """リアクションイベントの代役を返します。"""
     return cast(
@@ -580,10 +579,10 @@ def make_reaction_payload(
             emoji=discord.PartialEmoji(name=emoji_name),
             guild_id=GUILD_ID,
             channel_id=channel_id,
-            message_id=12345,
+            message_id=TARGET_MESSAGE_ID,
             user_id=HUMAN_USER_ID,
             message_author_id=AUTHOR_USER_ID,
-            member=SimpleNamespace(bot=False),
+            member=SimpleNamespace(bot=reactor_is_bot),
             burst=False,
         ),
     )
@@ -599,10 +598,10 @@ def make_reply_message(
     return cast(
         "discord.Message",
         SimpleNamespace(
-            id=777,
+            id=REPLY_MESSAGE_ID,
             author=SimpleNamespace(id=author_id),
             content=content,
-            reference=SimpleNamespace(message_id=12345) if reference else None,
+            reference=SimpleNamespace(message_id=TARGET_MESSAGE_ID, resolved=None) if reference else None,
             guild=SimpleNamespace(id=GUILD_ID),
             channel=SimpleNamespace(id=CHANNEL_ID),
         ),
@@ -618,8 +617,9 @@ class TrackingTest(unittest.IsolatedAsyncioTestCase):
         reactions.record.assert_awaited_once()
         event = reactions.record.await_args.args[0]
         ensure(event.source == REACTION_SOURCE)
-        ensure(event.message_author_id == AUTHOR_USER_ID)
-        ensure(event.message_posted_at.tzinfo is not None)
+        ensure(event.message_id == TARGET_MESSAGE_ID)
+        ensure(event.reactor_id == HUMAN_USER_ID)
+        ensure(event.evidence_message_id is None)
 
     async def test_other_emoji_is_ignored(self) -> None:
         use_cases, _, reactions = make_tracking_use_cases()
@@ -636,16 +636,27 @@ class TrackingTest(unittest.IsolatedAsyncioTestCase):
         reactions.record.assert_not_awaited()
 
     async def test_reaction_on_a_bot_message_is_ignored(self) -> None:
-        use_cases, _, reactions = make_tracking_use_cases(
-            target_message=SimpleNamespace(
-                author=SimpleNamespace(id=PAPYRUS_USER_ID, bot=True),
-                created_at=datetime.datetime(2026, 7, 22, 3, 0, tzinfo=datetime.UTC),
-            )
-        )
+        use_cases, _, reactions = make_tracking_use_cases(bot_user_ids=frozenset({AUTHOR_USER_ID}))
 
         await use_cases.on_reaction_add(make_reaction_payload())
 
         reactions.record.assert_not_awaited()
+
+    async def test_reaction_from_another_bot_is_ignored(self) -> None:
+        use_cases, _, reactions = make_tracking_use_cases()
+
+        await use_cases.on_reaction_add(make_reaction_payload(reactor_is_bot=True))
+
+        reactions.record.assert_not_awaited()
+
+    async def test_recording_does_not_fetch_the_target_message(self) -> None:
+        """Discordの取得を挟まず、イベントの情報だけで記録する。"""
+        use_cases, bot, reactions = make_tracking_use_cases()
+
+        await use_cases.on_reaction_add(make_reaction_payload())
+
+        reactions.record.assert_awaited_once()
+        bot.get_channel.assert_not_called()
 
     async def test_paused_tracking_records_nothing(self) -> None:
         use_cases, _, reactions = make_tracking_use_cases(is_paused=True)
@@ -669,9 +680,9 @@ class TrackingTest(unittest.IsolatedAsyncioTestCase):
         reactions.record.assert_awaited_once()
         event = reactions.record.await_args.args[0]
         ensure(event.source == REPLY_SOURCE)
-        ensure(event.evidence_message_id == 777)  # noqa: PLR2004 - テストデータの返信メッセージID。
+        ensure(event.evidence_message_id == REPLY_MESSAGE_ID)
         ensure(event.reactor_id == PAPYRUS_USER_ID)
-        ensure(event.reactor_is_bot)
+        ensure(event.message_id == TARGET_MESSAGE_ID)
 
     async def test_reply_with_extra_text_is_ignored(self) -> None:
         use_cases, _, reactions = make_tracking_use_cases()
@@ -697,9 +708,9 @@ class TrackingTest(unittest.IsolatedAsyncioTestCase):
     async def test_deleting_the_reply_removes_its_point(self) -> None:
         use_cases, _, reactions = make_tracking_use_cases()
 
-        await use_cases.on_raw_message_delete(cast("Any", SimpleNamespace(message_id=777)))
+        await use_cases.on_raw_message_delete(cast("Any", SimpleNamespace(message_id=REPLY_MESSAGE_ID)))
 
-        reactions.remove_reply_evidence.assert_awaited_once_with(777)
+        reactions.remove_reply_evidence.assert_awaited_once_with(REPLY_MESSAGE_ID)
 
 
 class ReportUseCasesTest(unittest.IsolatedAsyncioTestCase):
@@ -984,3 +995,81 @@ class InteractionDeadlineTest(unittest.IsolatedAsyncioTestCase):
             ensure(interaction.calls == [], "入力の検証だけで弾ける場合は応答を保留しません")
             return
         self.fail("許容範囲外の重みは利用者向けエラーにする必要があります")
+
+
+class ScheduledReportTest(unittest.IsolatedAsyncioTestCase):
+    """対象が無い期間を毎分集計し直さないよう、処理済みとして記録する。"""
+
+    TARGET_ID = 7
+
+    def build_use_cases(
+        self,
+        *,
+        deliveries: dict[tuple[str, datetime.date], SimpleNamespace] | None = None,
+        ranking_is_empty: bool = True,
+    ) -> tuple[CynicismReportUseCases, SimpleNamespace]:
+        stored = deliveries if deliveries is not None else {}
+        recorded = SimpleNamespace(empty_periods=[], posted_periods=[], aggregated=[])
+
+        async def get_delivery(period: CynicismPeriod, _target_id: int) -> object | None:
+            return stored.get((period.period_type.value, period.start_date))
+
+        async def has_delivery(period: CynicismPeriod, target_id: int) -> bool:
+            return await get_delivery(period, target_id) is not None
+
+        async def save_empty(period: CynicismPeriod, _target_id: int, **_: object) -> None:
+            recorded.empty_periods.append(period)
+
+        async def save_posted(period: CynicismPeriod, _target_id: int, _message_id: int, **_: object) -> None:
+            recorded.posted_periods.append(period)
+
+        async def build_ranking_for(period: CynicismPeriod, _settings: object, **_: object) -> object:
+            recorded.aggregated.append(period)
+            return SimpleNamespace(is_empty=ranking_is_empty)
+
+        use_cases = object.__new__(CynicismReportUseCases)
+        use_cases._runtime_environment = cast("Any", SimpleNamespace(is_debug=False))  # noqa: SLF001
+        use_cases._configuration = cast("Any", SimpleNamespace(get=AsyncMock(return_value=make_settings())))  # noqa: SLF001
+        use_cases._reactions = cast(  # noqa: SLF001
+            "Any",
+            SimpleNamespace(earliest_recorded_date=AsyncMock(return_value=datetime.date(2026, 1, 1))),
+        )
+        use_cases._reports = cast(  # noqa: SLF001
+            "Any",
+            SimpleNamespace(
+                get_delivery=get_delivery,
+                has_delivery=has_delivery,
+                save_empty=save_empty,
+                save_posted=save_posted,
+            ),
+        )
+        use_cases._target_id = self.TARGET_ID  # noqa: SLF001
+        use_cases._report_lock = asyncio.Lock()  # noqa: SLF001
+        use_cases.build_ranking_for = build_ranking_for  # type: ignore[method-assign]
+        return use_cases, recorded
+
+    async def test_empty_periods_are_recorded_as_processed(self) -> None:
+        use_cases, recorded = self.build_use_cases()
+
+        await use_cases.process_scheduled_reports(datetime.datetime(2026, 7, 31, 22, 30, tzinfo=JST))
+
+        ensure(recorded.empty_periods, "投稿しなかった期間も処理済みとして記録する必要があります")
+        ensure(not recorded.posted_periods)
+
+    async def test_recorded_empty_periods_are_skipped_on_the_next_run(self) -> None:
+        now = datetime.datetime(2026, 7, 31, 22, 30, tzinfo=JST)
+        first_run, first_recorded = self.build_use_cases()
+        await first_run.process_scheduled_reports(now)
+
+        stored = {
+            (period.period_type.value, period.start_date): SimpleNamespace(is_posted=False)
+            for period in first_recorded.empty_periods
+        }
+        second_run, second_recorded = self.build_use_cases(deliveries=stored)
+        await second_run.process_scheduled_reports(now)
+
+        ensure(
+            len(second_recorded.aggregated) < len(first_recorded.aggregated),
+            "処理済みの期間は再集計しません",
+        )
+        ensure(not second_recorded.empty_periods)

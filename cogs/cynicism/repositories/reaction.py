@@ -4,12 +4,12 @@ import datetime
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import delete, distinct, func, or_, select, tuple_
+from sqlalchemy import delete, distinct, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
-from cogs.cynicism.constants import CYNICISM_EMOJI, JST, REACTION_SOURCE
+from cogs.cynicism.constants import JST, REACTION_SOURCE
 from cogs.cynicism.database import CynicismDatabase, CynicismReaction
 from cogs.cynicism.models import ChannelScope, MemberReactionCounts
 from cogs.cynicism.periods import CynicismPeriod
@@ -17,6 +17,8 @@ from cogs.talkdata.database import DiscordMember, DiscordMessage
 
 # TalkDataが外部キー参照のために持つダミーレコード。集計対象から除外する。
 TALKDATA_DUMMY_ID = 0
+# 編集履歴の行を除き、1メッセージにつき1行だけを対象にする。
+ORIGINAL_EDIT_COUNT = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,16 +27,9 @@ class CynicismReactionEvent:
 
     message_id: int
     reactor_id: int
-    emoji_name: str
     is_burst: bool
     source: str
     evidence_message_id: int | None
-    channel_id: int
-    message_author_id: int
-    message_author_is_bot: bool
-    reactor_is_bot: bool
-    message_posted_at: datetime.datetime
-    recorded_at: datetime.datetime
 
 
 class CynicismReactionRepository:
@@ -51,22 +46,14 @@ class CynicismReactionRepository:
                 .values(
                     message_id=event.message_id,
                     reactor_id=event.reactor_id,
-                    emoji_name=event.emoji_name,
                     is_burst=event.is_burst,
                     source=event.source,
                     evidence_message_id=event.evidence_message_id,
-                    channel_id=event.channel_id,
-                    message_author_id=event.message_author_id,
-                    message_author_is_bot=event.message_author_is_bot,
-                    reactor_is_bot=event.reactor_is_bot,
-                    message_posted_at=event.message_posted_at,
-                    recorded_at=event.recorded_at,
                 )
                 .on_conflict_do_nothing(
                     index_elements=[
                         CynicismReaction.message_id,
                         CynicismReaction.reactor_id,
-                        CynicismReaction.emoji_name,
                         CynicismReaction.is_burst,
                         CynicismReaction.source,
                     ]
@@ -74,28 +61,19 @@ class CynicismReactionRepository:
             )
             await session.execute(statement)
 
-    async def remove_reaction(self, message_id: int, reactor_id: int, emoji_name: str, *, is_burst: bool) -> None:
+    async def remove_reaction(self, message_id: int, reactor_id: int, *, is_burst: bool) -> None:
         """取り消されたリアクション1件分の記録を削除する。"""
         await self._delete(
             CynicismReaction.message_id == message_id,
             CynicismReaction.reactor_id == reactor_id,
-            CynicismReaction.emoji_name == emoji_name,
             CynicismReaction.is_burst == is_burst,
             CynicismReaction.source == REACTION_SOURCE,
         )
 
     async def remove_message_reactions(self, message_id: int) -> None:
-        """メッセージから全リアクションが消された場合の記録を削除する。"""
+        """メッセージからリアクションが一括削除された場合の記録を削除する。"""
         await self._delete(
             CynicismReaction.message_id == message_id,
-            CynicismReaction.source == REACTION_SOURCE,
-        )
-
-    async def remove_emoji_reactions(self, message_id: int, emoji_name: str) -> None:
-        """メッセージから特定の絵文字が一括削除された場合の記録を削除する。"""
-        await self._delete(
-            CynicismReaction.message_id == message_id,
-            CynicismReaction.emoji_name == emoji_name,
             CynicismReaction.source == REACTION_SOURCE,
         )
 
@@ -105,8 +83,9 @@ class CynicismReactionRepository:
 
     async def earliest_recorded_date(self) -> datetime.date | None:
         """記録済みの🥶が向けられた、最も古い発言の日付(JST)を返す。"""
+        statement = select(func.min(DiscordMessage.post_time)).select_from(CynicismReaction).join(*_talkdata_join())
         async with self._database.session() as session:
-            earliest = await session.scalar(select(func.min(CynicismReaction.message_posted_at)))
+            earliest = await session.scalar(statement)
             return None if earliest is None else earliest.astimezone(JST).date()
 
     async def aggregate_counts(
@@ -121,27 +100,23 @@ class CynicismReactionRepository:
         reactor_pairs = distinct(tuple_(CynicismReaction.message_id, CynicismReaction.reactor_id))
         statement = (
             select(
-                CynicismReaction.message_author_id,
+                DiscordMessage.member_id,
                 func.count(reactor_pairs).filter(CynicismReaction.reactor_id == papyrus_user_id),
-                func.count(reactor_pairs).filter(CynicismReaction.reactor_is_bot.is_(False)),
+                func.count(reactor_pairs).filter(CynicismReaction.reactor_id != papyrus_user_id),
                 func.count(distinct(CynicismReaction.message_id)),
             )
+            .select_from(CynicismReaction)
+            .join(*_talkdata_join())
             .where(
-                CynicismReaction.emoji_name == CYNICISM_EMOJI,
-                CynicismReaction.message_posted_at >= period.start_at,
-                CynicismReaction.message_posted_at < period.end_at,
+                DiscordMessage.post_time >= period.start_at,
+                DiscordMessage.post_time < period.end_at,
                 # 自分の発言へ自分で🥶を付けてポイントを稼げないようにする。
-                CynicismReaction.reactor_id != CynicismReaction.message_author_id,
-                CynicismReaction.message_author_is_bot.is_(False),
-                # 判定主体はPapyrusと人間に限り、他のBotによる🥶は数えない。
-                or_(
-                    CynicismReaction.reactor_is_bot.is_(False),
-                    CynicismReaction.reactor_id == papyrus_user_id,
-                ),
+                CynicismReaction.reactor_id != DiscordMessage.member_id,
+                DiscordMessage.member_id != TALKDATA_DUMMY_ID,
+                *_scope_conditions(DiscordMessage.channel_id, scope),
             )
-            .group_by(CynicismReaction.message_author_id)
+            .group_by(DiscordMessage.member_id)
         )
-        statement = statement.where(*_scope_conditions(CynicismReaction.channel_id, scope))
 
         async with self._database.session() as session:
             result = await session.execute(statement)
@@ -165,16 +140,15 @@ class CynicismReactionRepository:
         statement = (
             select(DiscordMessage.member_id, func.count(distinct(DiscordMessage.id)).label("message_count"))
             .where(
-                # 編集のたびに同じidで行が増えるため、元の投稿だけを数える。
-                DiscordMessage.edit_count == 0,
+                DiscordMessage.edit_count == ORIGINAL_EDIT_COUNT,
                 DiscordMessage.post_time >= period.start_at,
                 DiscordMessage.post_time < period.end_at,
                 DiscordMessage.id != TALKDATA_DUMMY_ID,
                 DiscordMessage.member_id != TALKDATA_DUMMY_ID,
+                *_scope_conditions(DiscordMessage.channel_id, scope),
             )
             .group_by(DiscordMessage.member_id)
         )
-        statement = statement.where(*_scope_conditions(DiscordMessage.channel_id, scope))
 
         async with self._database.session() as session:
             result = await session.execute(statement)
@@ -194,6 +168,14 @@ class CynicismReactionRepository:
         """条件に一致する記録を削除する。"""
         async with self._database.session() as session:
             await session.execute(delete(CynicismReaction).where(*conditions))
+
+
+def _talkdata_join() -> tuple[type[DiscordMessage], ColumnElement[bool]]:
+    """🥶の記録を、TalkDataが持つ元の投稿へ結合する条件を返す。"""
+    return (
+        DiscordMessage,
+        (DiscordMessage.id == CynicismReaction.message_id) & (DiscordMessage.edit_count == ORIGINAL_EDIT_COUNT),
+    )
 
 
 def _scope_conditions(

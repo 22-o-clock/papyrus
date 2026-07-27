@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import BigInteger, Boolean, Date, Index, Numeric, SmallInteger, Table, Text, text
+from sqlalchemy import BigInteger, Boolean, Date, Numeric, SmallInteger, Table, Text, text
 from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
@@ -25,30 +25,23 @@ from .constants import DEFAULT_HUMAN_WEIGHT, DEFAULT_PAPYRUS_WEIGHT, REACTION_SO
 
 
 class CynicismReaction(Base):
-    """冷笑ポイントの根拠となる🥶の付与1件。"""
+    """冷笑ポイントの根拠となる🥶の付与1件。
+
+    発言者、投稿時刻、チャンネルはTalkDataを正本とし、集計時に `talkdata.message` から結合して取得する。
+    冷笑率の分母も同じテーブルを見るため、ここでは重複して保持しない。
+    """
 
     __tablename__ = "cynicism_reaction"
 
     message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     reactor_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
-    emoji_name: Mapped[str] = mapped_column(Text, primary_key=True)
     is_burst: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False)
     # 同じ相手へリアクションと返信の両方で🥶を向けた場合に、片方を取り消しても他方が残るよう主キーへ含める。
     source: Mapped[str] = mapped_column(Text, primary_key=True, default=REACTION_SOURCE)
     # 返信由来の場合の返信メッセージ自身のID。リアクション由来ではNULL。
     evidence_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
-    channel_id: Mapped[int] = mapped_column(BigInteger)
-    message_author_id: Mapped[int] = mapped_column(BigInteger)
-    message_author_is_bot: Mapped[bool] = mapped_column(Boolean, default=False)
-    reactor_is_bot: Mapped[bool] = mapped_column(Boolean, default=False)
-    # 集計期間の判定基準。平均の分母と時間軸を揃えるため、🥶を向けられた発言の投稿時刻を使う。
-    message_posted_at: Mapped[datetime.datetime] = mapped_column(TIMESTAMP(timezone=True))
-    recorded_at: Mapped[datetime.datetime] = mapped_column(TIMESTAMP(timezone=True))
 
-    __table_args__ = (
-        Index("ix_cynicism_reaction_posted_at", "message_posted_at"),
-        {"schema": TALKDATA_SCHEMA},
-    )
+    __table_args__ = ({"schema": TALKDATA_SCHEMA},)
 
 
 class CynicismConfiguration(Base):
@@ -66,7 +59,10 @@ class CynicismConfiguration(Base):
 
 
 class CynicismReportDelivery(Base):
-    """期間種別ごとの、ランキング発表メッセージの配送記録。"""
+    """期間種別ごとの、ランキング発表の処理記録。
+
+    対象の🥶が無く投稿しなかった期間も残すことで、定期処理が同じ期間を毎分集計し直さないようにする。
+    """
 
     __tablename__ = "cynicism_report_deliveries"
     __table_args__ = ({"schema": TALKDATA_SCHEMA},)
@@ -74,11 +70,14 @@ class CynicismReportDelivery(Base):
     period_type: Mapped[str] = mapped_column(Text, primary_key=True)
     period_start: Mapped[datetime.date] = mapped_column(Date, primary_key=True)
     target_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
-    message_id: Mapped[int] = mapped_column(BigInteger)
+    # POSTED_STATUS または EMPTY_STATUS。
+    status: Mapped[str] = mapped_column(Text)
+    # 投稿しなかった期間ではNULL。
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # 内容が変わっていない再集計でDiscordのメッセージ編集を発行しないための指紋。
     content_digest: Mapped[str] = mapped_column(Text)
-    first_posted_at: Mapped[datetime.datetime] = mapped_column(TIMESTAMP(timezone=True))
-    last_updated_at: Mapped[datetime.datetime] = mapped_column(TIMESTAMP(timezone=True))
+    first_processed_at: Mapped[datetime.datetime] = mapped_column(TIMESTAMP(timezone=True))
+    last_processed_at: Mapped[datetime.datetime] = mapped_column(TIMESTAMP(timezone=True))
 
 
 class CynicismDatabase:

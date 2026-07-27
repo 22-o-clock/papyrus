@@ -54,7 +54,7 @@ class CynicismReportMessageDelivery:
         self.validate_message_owner(message)
         if delivery is not None and delivery.message_id == message.id and delivery.content_digest == digest:
             # 再集計しても内容が変わらない場合は、毎分の更新でDiscordを叩かない。
-            return DeliveryResult(message, delivery.last_updated_at, changed=False)
+            return DeliveryResult(message, delivery.last_processed_at, changed=False)
 
         await message.edit(embed=embed)
         self._exclude_from_long_term_memory(message)
@@ -83,7 +83,8 @@ class CynicismReportMessageDelivery:
         delivery: ReportDelivery | None,
     ) -> discord.Message | None:
         """永続化済みIDのメッセージを取得し、削除済みなら未発見として扱う。"""
-        if delivery is None:
+        # 投稿しなかった期間の記録にはメッセージIDが無い。
+        if delivery is None or delivery.message_id is None:
             return None
         try:
             return await target.fetch_message(delivery.message_id)
