@@ -21,6 +21,7 @@ MEMORY_OPERATIONS = {
 FEATURE_LABELS = {
     "response_judgment": "応答要否判定",
     "draft_generation": "応答生成",
+    "draft_generation_pending_memory_followup": "応答生成 (未反映記憶取得後)",
     "attachment_analysis": "添付ファイル解析",
     "memory_document_update": "長期記憶文書の更新",
     "memory_document_shorten": "長期記憶文書の短縮再生成",
@@ -33,9 +34,10 @@ FEATURE_LABELS = {
 ITEM_LABELS = {
     "response_judgment": "判定",
     "draft_generation": "応答",
+    "draft_generation_pending_memory_followup": "応答",
     "attachment_analysis": "添付",
-    "memory_document_update": "会話",
-    "memory_document_shorten": "会話",
+    "memory_document_update": "チャンネル",
+    "memory_document_shorten": "文書",
     "memory_extraction": "メッセージ",
     "memory_reconciliation": "判定",
     "memory_embedding": "記憶",

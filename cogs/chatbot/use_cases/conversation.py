@@ -839,7 +839,7 @@ class ConversationUseCases:
             return
 
         async def generate_response() -> LLMMessage:
-            long_term_memory_context = await self.memory_search_use_cases.build_response_context(
+            response_memory = await self.memory_search_use_cases.build_response_memory(
                 message.channel.id,
                 resolved_member_aliases,
             )
@@ -848,7 +848,9 @@ class ConversationUseCases:
                 ResponseGenerationOptions(
                     response_mode=response_mode,
                     required_reply_to_message_id=required_reply_to_message_id,
-                    long_term_memory_context=long_term_memory_context,
+                    long_term_memory_context=response_memory.long_term_memory,
+                    pending_other_channel_index=response_memory.pending_index,
+                    pending_other_channel_context=response_memory.pending_context,
                     custom_profile=custom_profile,
                     resolved_member_aliases=resolved_member_aliases,
                     available_custom_emojis=_collect_available_custom_emojis(message, response_mode),

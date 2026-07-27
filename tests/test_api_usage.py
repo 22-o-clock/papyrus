@@ -252,6 +252,11 @@ class ApiUsageEmbedTest(TestCase):
         rows = [
             create_usage("response_judgment", "gpt-5.4-nano", input_tokens=1_000),
             create_usage("draft_generation", "gpt-5.6-terra", input_tokens=1_000),
+            create_usage(
+                "draft_generation_pending_memory_followup",
+                "gpt-5.6-luna",
+                input_tokens=1_000,
+            ),
         ]
         for row in rows:
             row.usage_date = report_date
@@ -267,16 +272,22 @@ class ApiUsageEmbedTest(TestCase):
         field_names = [str(field.name or "") for field in embed.fields]
         ensure(any(name.startswith("応答要否判定 —") for name in field_names))
         ensure(any(name.startswith("応答生成 —") for name in field_names))
+        ensure(any(name.startswith("応答生成 (未反映記憶取得後) —") for name in field_names))
         ensure(all("応答生成・行動判断" not in name for name in field_names))
         judgment_field = next(field for field in embed.fields if str(field.name or "").startswith("応答要否判定 —"))
         ensure_contains("判定 1件", str(judgment_field.value))
+        followup_field = next(
+            field for field in embed.fields if str(field.name or "").startswith("応答生成 (未反映記憶取得後) —")
+        )
+        ensure_contains("応答 1件", str(followup_field.value))
 
     def test_embed_prioritizes_feature_costs_and_long_term_memory_breakdown(self) -> None:
         report_date = datetime.date(2026, 7, 14)
         features = aggregate_feature_usages(
             [
                 create_usage("draft_generation", "gpt-5.6-terra", input_tokens=1_000, output_tokens=100),
-                create_usage("memory_document_update", "gpt-5.6-luna", item_count=1, input_tokens=2_000),
+                create_usage("memory_document_update", "gpt-5.6-luna", item_count=2, input_tokens=2_000),
+                create_usage("memory_document_shorten", "gpt-5.6-luna", item_count=3, input_tokens=500),
             ]
         )
         summary = OpenAIUsageSummary(report_date=report_date, costs={"Text models": Decimal("0.1234")})
@@ -292,6 +303,11 @@ class ApiUsageEmbedTest(TestCase):
         ensure_equal(field_names[0], "コスト概要")
         ensure(any(name.startswith("長期記憶 合計") for name in field_names))
         ensure(any("長期記憶文書の更新" in name for name in field_names))
+        memory_fields = {
+            str(field.name or ""): str(field.value) for field in embed.fields if "長期記憶文書" in str(field.name or "")
+        }
+        ensure(any("チャンネル 2件" in value for value in memory_fields.values()))
+        ensure(any("文書 3件" in value for value in memory_fields.values()))
         ensure_contains("input 1,000 tokens", "\n".join(str(field.value) for field in embed.fields))
         ensure_contains("部分集計", str(embed.fields[0].value))
         ensure_contains("api-usage-report:2026-07-14", embed.footer.text or "")
