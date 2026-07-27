@@ -1,8 +1,10 @@
+import asyncio
 import unittest
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 import discord
 from discord import Message, MessageReference
@@ -76,6 +78,67 @@ class HistorySyncRangeTest(unittest.TestCase):
 
         if get_history_sync_after(now - timedelta(days=60), now) != now - timedelta(days=30):
             self.fail("保存済みチャンネルの履歴取得が30日を超えています")
+
+
+class StartupHistorySyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_initializes_long_term_memory_before_releasing_message_events(self) -> None:
+        events: list[str] = []
+        use_cases = object.__new__(ConversationUseCases)
+        use_cases.settings_use_cases = SimpleNamespace(initialize=AsyncMock())
+        use_cases.runtime_environment = SimpleNamespace(is_debug=False)
+        use_cases.__dict__["_history_sync_complete"] = asyncio.Event()
+        use_cases.__dict__["_history_sync_lock"] = asyncio.Lock()
+
+        async def synchronize() -> None:
+            events.append("history")
+
+        async def initialize_memory() -> None:
+            if use_cases._history_sync_complete.is_set():  # noqa: SLF001
+                self.fail("長期記憶の初期化前に通常メッセージ処理を解放しています")
+            events.append("memory")
+
+        use_cases._synchronize_recent_discord_history = AsyncMock(side_effect=synchronize)  # type: ignore[method-assign]  # noqa: SLF001
+        use_cases._initialize_long_term_memory_if_enabled = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+            side_effect=initialize_memory
+        )
+
+        await use_cases.on_ready()
+
+        if events != ["history", "memory"] or not use_cases._history_sync_complete.is_set():  # noqa: SLF001
+            self.fail("履歴同期、長期記憶初期化、通常処理解放の順序が正しくありません")
+
+    async def test_history_sync_only_saves_messages_until_all_channels_are_complete(self) -> None:
+        synchronized_message = SimpleNamespace(id=10)
+
+        async def history(**_kwargs: object) -> AsyncIterator[SimpleNamespace]:
+            yield synchronized_message
+
+        channel = SimpleNamespace(
+            id=20,
+            permissions_for=Mock(return_value=SimpleNamespace(view_channel=True, read_message_history=True)),
+            history=history,
+        )
+        guild = SimpleNamespace(me=SimpleNamespace(), text_channels=[channel], threads=[])
+        use_cases = object.__new__(ConversationUseCases)
+        use_cases.bot = SimpleNamespace(guilds=[guild])
+        use_cases.runtime_environment = SimpleNamespace(
+            should_process_chatbot_channel=Mock(return_value=True),
+        )
+        use_cases.short_term_message_repository = SimpleNamespace(
+            get_latest_created_at=AsyncMock(return_value=None),
+        )
+        use_cases._ensure_channel_state = AsyncMock(return_value=SimpleNamespace())  # type: ignore[method-assign]  # noqa: SLF001
+        use_cases._refresh_retained_message_reactions = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+        use_cases._append_message_to_short_term_memory = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+        use_cases._enqueue_long_term_memory = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+
+        await use_cases._synchronize_recent_discord_history()  # noqa: SLF001
+
+        use_cases._append_message_to_short_term_memory.assert_awaited_once_with(  # noqa: SLF001
+            synchronized_message,
+            ANY,
+        )
+        use_cases._enqueue_long_term_memory.assert_not_awaited()  # noqa: SLF001
 
 
 class ShouldRespondTest(unittest.TestCase):

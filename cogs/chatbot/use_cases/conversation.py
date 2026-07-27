@@ -225,16 +225,20 @@ class ConversationUseCases:
         self._history_sync_complete.clear()
         if self.runtime_environment.is_debug:
             logger.info("Skipped chatbot Discord history sync in debug environment")
-            self._history_sync_complete.set()
-            await self._initialize_long_term_memory_if_enabled()
+            try:
+                await self._initialize_long_term_memory_if_enabled()
+            finally:
+                self._history_sync_complete.set()
             return
         try:
             async with self._history_sync_lock:
                 await self._synchronize_recent_discord_history()
         finally:
-            # 一部チャンネルの失敗で、通常の応答まで永続的に停止させない。
-            self._history_sync_complete.set()
-        await self._initialize_long_term_memory_if_enabled()
+            try:
+                await self._initialize_long_term_memory_if_enabled()
+            finally:
+                # 一部チャンネルの失敗で、通常の応答まで永続的に停止させない。
+                self._history_sync_complete.set()
 
     async def _initialize_long_term_memory_if_enabled(self) -> None:
         """共有記憶を書き換えるバックグラウンド処理を本番だけで開始します。"""
@@ -267,8 +271,6 @@ class ConversationUseCases:
                     channel_message_count = 0
                     async for message in channel.history(after=after, oldest_first=True, limit=None):
                         await self._append_message_to_short_term_memory(message, state)
-                        if self.runtime_environment.is_production:
-                            await self._enqueue_long_term_memory(message)
                         channel_message_count += 1
                     synchronized_message_count += channel_message_count
                     if channel_message_count:

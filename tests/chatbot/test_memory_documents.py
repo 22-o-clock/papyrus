@@ -181,6 +181,51 @@ class MemorySourceExclusionTest(unittest.IsolatedAsyncioTestCase):
 
 
 class MemoryDocumentBatchingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_initialization_enqueues_one_batch_after_restoring_jobs(self) -> None:
+        events: list[str] = []
+        messages = [
+            SimpleNamespace(
+                message_id=index,
+                is_long_term_memory_excluded=False,
+                is_forwarded=False,
+                is_bot=False,
+                is_self=False,
+            )
+            for index in range(1, 51)
+        ]
+
+        async def restore_interrupted() -> None:
+            events.append("restore")
+
+        async def get_pending_messages() -> list[SimpleNamespace]:
+            events.append("read_pending")
+            return messages
+
+        async def enqueue(*_args: object, **_kwargs: object) -> None:
+            events.append("enqueue")
+
+        repository = SimpleNamespace(
+            restore_interrupted=AsyncMock(side_effect=restore_interrupted),
+            get_pending_messages=AsyncMock(side_effect=get_pending_messages),
+            enqueue=AsyncMock(side_effect=enqueue),
+        )
+        use_cases = object.__new__(LongTermMemoryUseCases)
+        use_cases._documents = cast("Any", repository)  # noqa: SLF001
+        use_cases._message_token_count = Mock(return_value=1)  # type: ignore[method-assign]  # noqa: SLF001
+        use_cases._schedule_worker = Mock()  # type: ignore[method-assign]  # noqa: SLF001
+        use_cases._schedule_daily_flush = Mock()  # type: ignore[method-assign]  # noqa: SLF001
+
+        await use_cases.initialize()
+
+        if events != ["restore", "read_pending", "enqueue"]:
+            self.fail("起動時のジョブ復元後に未反映全体を一度だけ判定していません")
+        repository.enqueue.assert_awaited_once_with(
+            0,
+            50,
+            "message_count",
+            wait_for_attachments=True,
+        )
+
     async def test_enqueues_one_server_batch_at_fifty_pending_messages(self) -> None:
         messages = [
             SimpleNamespace(

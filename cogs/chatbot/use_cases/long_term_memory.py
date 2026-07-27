@@ -74,6 +74,7 @@ class LongTermMemoryUseCases:
     async def initialize(self) -> None:
         """中断ジョブを復元し、サーバー共通workerと午前4時flushを開始します。"""
         await self._documents.restore_interrupted()
+        await self._enqueue_if_threshold_reached()
         self._schedule_worker()
         self._schedule_daily_flush()
 
@@ -126,7 +127,7 @@ class LongTermMemoryUseCases:
             deadline += datetime.timedelta(days=1)
         return (deadline - local_now).total_seconds()
 
-    async def _enqueue_if_threshold_reached(self, latest_message_id: int) -> None:
+    async def _enqueue_if_threshold_reached(self, latest_message_id: int | None = None) -> None:
         messages = await self._documents.get_pending_messages()
         memory_evidence = [message for message in messages if self._is_memory_evidence(message)]
         source_count = sum(self._is_update_source(message) for message in memory_evidence)
@@ -138,7 +139,7 @@ class LongTermMemoryUseCases:
 
         await self._documents.enqueue(
             MEMORY_DOCUMENT_BATCH_JOB_ID,
-            latest_message_id,
+            latest_message_id if latest_message_id is not None else messages[-1].message_id,
             "message_count" if source_count >= MEMORY_DOCUMENT_MESSAGE_TRIGGER else "token_count",
             wait_for_attachments=True,
         )
