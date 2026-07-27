@@ -4,6 +4,7 @@ import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock
 
 import discord
 from discord import Message
@@ -18,6 +19,7 @@ from cogs.chatbot.models import (
 from cogs.chatbot.responses_api import (
     MEMORY_DOCUMENT_SHORTEN_INSTRUCTIONS,
     MEMORY_DOCUMENT_UPDATE_INSTRUCTIONS,
+    PENDING_OTHER_CHANNEL_TOOL_NAME,
     RESPONSE_JUDGMENT_TIMEOUT_SECONDS,
     AttachmentInMemory,
     GeneratedReactionResponse,
@@ -38,6 +40,8 @@ from cogs.chatbot.responses_api import (
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
+
+FUNCTION_CALL_RESPONSE_COUNT = 2
 
 
 @dataclass
@@ -414,7 +418,37 @@ class FakeResponses:
             output = GeneratedReactionResponse(reply_to_message_id=1, reaction_emoji="👍")
         else:
             output = GeneratedTextResponse(action="message", content="短い返答")
-        return SimpleNamespace(output_parsed=output)
+        return SimpleNamespace(output_parsed=output, output=[])
+
+
+class PendingMemoryToolResponses:
+    """未反映情報のFunction callと、その結果を使う最終生成を再現します。"""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def parse(self, **kwargs: object) -> SimpleNamespace:
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            tool_call = SimpleNamespace(
+                type="function_call",
+                name=PENDING_OTHER_CHANNEL_TOOL_NAME,
+                call_id="pending-call",
+                arguments="{}",
+                model_dump=Mock(
+                    return_value={
+                        "type": "function_call",
+                        "name": PENDING_OTHER_CHANNEL_TOOL_NAME,
+                        "call_id": "pending-call",
+                        "arguments": "{}",
+                    }
+                ),
+            )
+            return SimpleNamespace(output_parsed=None, output=[tool_call])
+        return SimpleNamespace(
+            output_parsed=GeneratedTextResponse(action="message", content="取得後の返答"),
+            output=[],
+        )
 
 
 class FailingResponses:
@@ -506,6 +540,40 @@ class ResponsePipelineTest(unittest.IsolatedAsyncioTestCase):
             self.fail("text生成へ不要なreactionまたはsilenceの選択指示が混入しています")
         if "## chat役割" not in instructions or "## assistant役割" in instructions:
             self.fail("chat生成へassistant役割の指示が混入しています")
+        tools = cast("list[dict[str, object]]", responses.calls[0]["tools"])
+        if any(tool.get("name") == PENDING_OTHER_CHANNEL_TOOL_NAME for tool in tools):
+            self.fail("未反映情報がない応答へFunction toolを追加しています")
+
+    async def test_fetches_pending_other_channel_messages_only_after_function_call(self) -> None:
+        responses = PendingMemoryToolResponses()
+        client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
+        pipeline = ResponsePipeline(client, "Bot")
+        await pipeline.add_message_to_memory(
+            make_message(MessageSpec(message_id=1, author_id=10, author_name="発言者", content="他ではどうなった？"))
+        )
+
+        generated = await pipeline.generate_response(
+            ChannelRole.CHAT,
+            ResponseGenerationOptions(
+                response_mode=ResponseMode.TEXT,
+                pending_other_channel_index='{"channels":[{"channel_name":"別チャンネル"}]}',
+                pending_other_channel_context='{"messages":[{"content":"未反映の重要情報"}]}',
+            ),
+        )
+
+        if generated.content != "取得後の返答" or len(responses.calls) != FUNCTION_CALL_RESPONSE_COUNT:
+            self.fail("Function call後の2段目を最終回答として使用できていません")
+        first_input = str(responses.calls[0]["input"])
+        second_input = str(responses.calls[1]["input"])
+        if "別チャンネル" not in first_input or "未反映の重要情報" in first_input:
+            self.fail("最初のcallへ索引だけを渡せていません")
+        if "未反映の重要情報" not in second_input:
+            self.fail("Function call後に未反映本文を渡していません")
+        first_tools = cast("list[dict[str, object]]", responses.calls[0]["tools"])
+        if not any(tool.get("name") == PENDING_OTHER_CHANNEL_TOOL_NAME for tool in first_tools):
+            self.fail("未反映情報のFunction toolが最初のcallにありません")
+        if responses.calls[1].get("tool_choice") != "none":
+            self.fail("未反映情報のFunction toolを1応答で複数回呼べる状態です")
 
     async def test_explicit_call_is_fixed_to_trigger_reply(self) -> None:
         responses = FakeResponses()

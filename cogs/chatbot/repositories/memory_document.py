@@ -6,6 +6,8 @@ from sqlalchemy.dialects.postgresql import TIMESTAMP, insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import mapped_column
 
+from cogs.chatbot.constants import MEMORY_DOCUMENT_BATCH_JOB_ID
+
 from .base import ChatbotBase
 from .member_alias import (
     ChatbotMemberAlias,
@@ -13,6 +15,7 @@ from .member_alias import (
     determine_member_alias_status,
     normalize_member_alias,
 )
+from .short_term_message import ChatbotStoredMessage
 
 
 class ChatbotMemoryDocument(ChatbotBase):
@@ -101,6 +104,68 @@ class ChatbotMemoryDocumentRepository:
             )
             return list(result.scalars().all())
 
+    async def get_pending_messages(
+        self,
+        *,
+        exclude_channel_id: int | None = None,
+    ) -> list[ChatbotStoredMessage]:
+        """チャンネルごとのカーソルより新しい未反映メッセージを返します。"""
+        async with self._session_factory() as session:
+            statement = (
+                select(ChatbotStoredMessage)
+                .outerjoin(
+                    ChatbotMemoryProcessingCursor,
+                    ChatbotMemoryProcessingCursor.channel_id == ChatbotStoredMessage.channel_id,
+                )
+                .where(
+                    or_(
+                        ChatbotMemoryProcessingCursor.channel_id.is_(None),
+                        ChatbotMemoryProcessingCursor.last_processed_message_id.is_(None),
+                        ChatbotStoredMessage.message_id > ChatbotMemoryProcessingCursor.last_processed_message_id,
+                    )
+                )
+                .order_by(ChatbotStoredMessage.created_at, ChatbotStoredMessage.message_id)
+            )
+            if exclude_channel_id is not None:
+                statement = statement.where(ChatbotStoredMessage.channel_id != exclude_channel_id)
+            result = await session.execute(statement)
+            return list(result.scalars().all())
+
+    async def get_response_snapshot(
+        self,
+        user_ids: set[int],
+        *,
+        exclude_channel_id: int,
+    ) -> tuple[list[ChatbotMemoryDocument], list[ChatbotStoredMessage]]:
+        """未反映情報を先に読み、続けて応答用の長期記憶を返します。"""
+        conditions = [ChatbotMemoryDocument.document_type.in_(("bot", "shared"))]
+        if user_ids:
+            conditions.append(
+                (ChatbotMemoryDocument.document_type == "person")
+                & ChatbotMemoryDocument.target_user_id.in_(user_ids)
+            )
+        async with self._session_factory() as session:
+            pending_result = await session.execute(
+                select(ChatbotStoredMessage)
+                .outerjoin(
+                    ChatbotMemoryProcessingCursor,
+                    ChatbotMemoryProcessingCursor.channel_id == ChatbotStoredMessage.channel_id,
+                )
+                .where(
+                    ChatbotStoredMessage.channel_id != exclude_channel_id,
+                    or_(
+                        ChatbotMemoryProcessingCursor.channel_id.is_(None),
+                        ChatbotMemoryProcessingCursor.last_processed_message_id.is_(None),
+                        ChatbotStoredMessage.message_id > ChatbotMemoryProcessingCursor.last_processed_message_id,
+                    ),
+                )
+                .order_by(ChatbotStoredMessage.created_at, ChatbotStoredMessage.message_id)
+            )
+            document_result = await session.execute(
+                select(ChatbotMemoryDocument).where(or_(*conditions)).order_by(ChatbotMemoryDocument.document_key)
+            )
+            return list(document_result.scalars().all()), list(pending_result.scalars().all())
+
     async def get_cursor(self, channel_id: int) -> ChatbotMemoryProcessingCursor | None:
         async with self._session_factory() as session:
             return await session.get(ChatbotMemoryProcessingCursor, channel_id)
@@ -181,6 +246,24 @@ class ChatbotMemoryDocumentRepository:
             await session.execute(
                 update(ChatbotMemoryUpdateJob).where(ChatbotMemoryUpdateJob.status == "processing").values(status="pending")
             )
+            result = await session.execute(select(ChatbotMemoryUpdateJob))
+            existing_jobs = list(result.scalars().all())
+            if not existing_jobs or (
+                len(existing_jobs) == 1 and existing_jobs[0].channel_id == MEMORY_DOCUMENT_BATCH_JOB_ID
+            ):
+                return
+            await session.execute(delete(ChatbotMemoryUpdateJob))
+            session.add(
+                ChatbotMemoryUpdateJob(
+                    channel_id=MEMORY_DOCUMENT_BATCH_JOB_ID,
+                    end_message_id=max(job.end_message_id for job in existing_jobs),
+                    trigger="restored_batch",
+                    wait_for_attachments=any(job.wait_for_attachments for job in existing_jobs),
+                    status="pending",
+                    attempt_count=0,
+                    queued_at=min(job.queued_at for job in existing_jobs),
+                )
+            )
 
     async def mark_failed(self, channel_id: int) -> None:
         async with self._session_factory.begin() as session:
@@ -188,14 +271,13 @@ class ChatbotMemoryDocumentRepository:
                 update(ChatbotMemoryUpdateJob).where(ChatbotMemoryUpdateJob.channel_id == channel_id).values(status="failed")
             )
 
-    async def complete(
+    async def complete_batch(
         self,
-        channel_id: int,
-        end_message_id: int,
+        end_message_ids: dict[int, int],
         documents: list[MemoryDocumentInput],
         aliases: list[MemoryAliasInput],
     ) -> None:
-        """文書群、別名、カーソルを一つのトランザクションで更新します。"""
+        """文書群、別名、複数チャンネルのカーソルを一つのトランザクションで更新します。"""
         now = datetime.datetime.now(datetime.UTC)
         async with self._session_factory.begin() as session:
             for document in documents:
@@ -273,15 +355,16 @@ class ChatbotMemoryDocumentRepository:
                     )
                     .values(status=status, updated_at=now)
                 )
-            cursor_statement = insert(ChatbotMemoryProcessingCursor).values(
-                channel_id=channel_id,
-                last_processed_message_id=end_message_id,
-                updated_at=now,
-            )
-            await session.execute(
-                cursor_statement.on_conflict_do_update(
-                    index_elements=[ChatbotMemoryProcessingCursor.channel_id],
-                    set_={"last_processed_message_id": end_message_id, "updated_at": now},
+            for channel_id, end_message_id in end_message_ids.items():
+                cursor_statement = insert(ChatbotMemoryProcessingCursor).values(
+                    channel_id=channel_id,
+                    last_processed_message_id=end_message_id,
+                    updated_at=now,
                 )
-            )
-            await session.execute(delete(ChatbotMemoryUpdateJob).where(ChatbotMemoryUpdateJob.channel_id == channel_id))
+                await session.execute(
+                    cursor_statement.on_conflict_do_update(
+                        index_elements=[ChatbotMemoryProcessingCursor.channel_id],
+                        set_={"last_processed_message_id": end_message_id, "updated_at": now},
+                    )
+                )
+            await session.execute(delete(ChatbotMemoryUpdateJob))
