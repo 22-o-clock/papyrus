@@ -277,9 +277,7 @@ class ApiUsageEmbedTest(TestCase):
         judgment_field = next(field for field in embed.fields if str(field.name or "").startswith("応答要否判定 —"))
         ensure_contains("判定 1件", str(judgment_field.value))
         followup_field = next(
-            field
-            for field in embed.fields
-            if str(field.name or "").startswith("応答生成 (未反映記憶取得後) —")
+            field for field in embed.fields if str(field.name or "").startswith("応答生成 (未反映記憶取得後) —")
         )
         ensure_contains("応答 1件", str(followup_field.value))
 
@@ -306,9 +304,7 @@ class ApiUsageEmbedTest(TestCase):
         ensure(any(name.startswith("長期記憶 合計") for name in field_names))
         ensure(any("長期記憶文書の更新" in name for name in field_names))
         memory_fields = {
-            str(field.name or ""): str(field.value)
-            for field in embed.fields
-            if "長期記憶文書" in str(field.name or "")
+            str(field.name or ""): str(field.value) for field in embed.fields if "長期記憶文書" in str(field.name or "")
         }
         ensure(any("チャンネル 2件" in value for value in memory_fields.values()))
         ensure(any("文書 3件" in value for value in memory_fields.values()))

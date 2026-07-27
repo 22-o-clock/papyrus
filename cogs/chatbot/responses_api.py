@@ -830,9 +830,7 @@ class DraftGenerator:
             resolved_member_aliases=options.resolved_member_aliases or {},
             content_overrides=content_overrides,
         )
-        pending_tool_available = (
-            options.response_mode is ResponseMode.TEXT and bool(options.pending_other_channel_context)
-        )
+        pending_tool_available = options.response_mode is ResponseMode.TEXT and bool(options.pending_other_channel_context)
         llm_input: list[dict[str, Any]] = [
             {
                 "role": "user",
@@ -843,8 +841,7 @@ class DraftGenerator:
                             serialized_memory
                             + (f"\n\n長期記憶:\n{options.long_term_memory_context}" if options.long_term_memory_context else "")
                             + (
-                                "\n\n長期記憶へ未反映の他チャンネル情報の索引:\n"
-                                + options.pending_other_channel_index
+                                "\n\n長期記憶へ未反映の他チャンネル情報の索引:\n" + options.pending_other_channel_index
                                 if pending_tool_available and options.pending_other_channel_index
                                 else ""
                             )

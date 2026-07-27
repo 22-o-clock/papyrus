@@ -98,15 +98,9 @@ class MemorySearchUseCases:
         )
 
     def _serialize_pending_messages(self, messages: list[ChatbotStoredMessage]) -> tuple[str, str]:
-        eligible = [
-            message
-            for message in messages
-            if not message.is_long_term_memory_excluded
-        ]
+        eligible = [message for message in messages if not message.is_long_term_memory_excluded]
         source_channel_ids = {
-            message.channel_id
-            for message in eligible
-            if not message.is_forwarded and (not message.is_bot or message.is_self)
+            message.channel_id for message in eligible if not message.is_forwarded and (not message.is_bot or message.is_self)
         }
         eligible = [message for message in eligible if message.channel_id in source_channel_ids]
         if not eligible:

@@ -141,8 +141,7 @@ class ChatbotMemoryDocumentRepository:
         conditions = [ChatbotMemoryDocument.document_type.in_(("bot", "shared"))]
         if user_ids:
             conditions.append(
-                (ChatbotMemoryDocument.document_type == "person")
-                & ChatbotMemoryDocument.target_user_id.in_(user_ids)
+                (ChatbotMemoryDocument.document_type == "person") & ChatbotMemoryDocument.target_user_id.in_(user_ids)
             )
         async with self._session_factory() as session:
             pending_result = await session.execute(
@@ -248,9 +247,7 @@ class ChatbotMemoryDocumentRepository:
             )
             result = await session.execute(select(ChatbotMemoryUpdateJob))
             existing_jobs = list(result.scalars().all())
-            if not existing_jobs or (
-                len(existing_jobs) == 1 and existing_jobs[0].channel_id == MEMORY_DOCUMENT_BATCH_JOB_ID
-            ):
+            if not existing_jobs or (len(existing_jobs) == 1 and existing_jobs[0].channel_id == MEMORY_DOCUMENT_BATCH_JOB_ID):
                 return
             await session.execute(delete(ChatbotMemoryUpdateJob))
             session.add(

@@ -14,6 +14,10 @@ OpenAI API callを追加・変更する場合は、機能の実装と同じ変�
 - 新しい `operation` は `FEATURE_LABELS` と `ITEM_LABELS`、必要なら `MEMORY_OPERATIONS` に追加する。
 - 長期記憶文書の通常更新は `memory_document_update`、文字数超過時の再生成は
   `memory_document_shorten` として分けて計測する。
+- `memory_document_update` の `item_count` には同じcallで処理したチャンネル数、
+  `memory_document_shorten` には短縮した文書数を記録する。
+- 未反映の他チャンネル情報をFunction Callingで取得した後の再生成は
+  `draft_generation_pending_memory_followup` として通常の `draft_generation` から分けて計測する。
 - DEBUGログでは、operation、モデル、input、cached input、cache write、output、reasoning、totalの各token数と、
   Web検索・Code Interpreterの利用回数を確認できる状態を維持する。
 
