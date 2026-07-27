@@ -672,6 +672,12 @@ class MemoryDocumentUpdateResult(BaseModel):
     aliases: list[MemberAliasCandidate] = Field(default_factory=list)
 
 
+class MemoryDocumentShortenResult(BaseModel):
+    """入力順に短縮した長期記憶Markdown本文。"""
+
+    contents: list[str] = Field(default_factory=list)
+
+
 class MemoryDocumentUpdater:
     """会話単位で長期記憶Markdown文書を更新します。"""
 
@@ -681,28 +687,46 @@ class MemoryDocumentUpdater:
     async def update(
         self,
         payload: dict[str, object],
-        *,
-        shorten: bool = False,
     ) -> MemoryDocumentUpdateResult:
         """既存文書と会話を渡し、変更された文書だけを受け取ります。"""
-        instructions = MEMORY_DOCUMENT_UPDATE_INSTRUCTIONS
-        if shorten:
-            instructions += f"\n\n{MEMORY_DOCUMENT_SHORTEN_INSTRUCTIONS}"
+        operation = "memory_document_update"
         response = await observe_chatbot_api_call(
-            "memory_document_shorten" if shorten else "memory_document_update",
+            operation,
             MEMORY_DOCUMENT_UPDATE_MODEL,
             self.client.responses.parse(
                 model=MEMORY_DOCUMENT_UPDATE_MODEL,
                 reasoning={"effort": "medium"},
-                instructions=instructions,
+                instructions=MEMORY_DOCUMENT_UPDATE_INSTRUCTIONS,
                 input=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 text_format=MemoryDocumentUpdateResult,
+                metadata={"operation": operation},
             ),
             item_count=1,
         )
         if response.output_parsed is None:
             logger.warning("Failed to parse memory document update response")
             return MemoryDocumentUpdateResult()
+        return response.output_parsed
+
+    async def shorten(self, payload: dict[str, object]) -> MemoryDocumentShortenResult:
+        """対象文書の本文だけを短縮し、入力順に受け取ります。"""
+        operation = "memory_document_shorten"
+        response = await observe_chatbot_api_call(
+            operation,
+            MEMORY_DOCUMENT_UPDATE_MODEL,
+            self.client.responses.parse(
+                model=MEMORY_DOCUMENT_UPDATE_MODEL,
+                reasoning={"effort": "medium"},
+                instructions=MEMORY_DOCUMENT_SHORTEN_INSTRUCTIONS,
+                input=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                text_format=MemoryDocumentShortenResult,
+                metadata={"operation": operation},
+            ),
+            item_count=1,
+        )
+        if response.output_parsed is None:
+            logger.warning("Failed to parse memory document shorten response")
+            return MemoryDocumentShortenResult()
         return response.output_parsed
 
 

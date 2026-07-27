@@ -16,12 +16,15 @@ from cogs.chatbot.models import (
     ResponseMode,
 )
 from cogs.chatbot.responses_api import (
+    MEMORY_DOCUMENT_SHORTEN_INSTRUCTIONS,
+    MEMORY_DOCUMENT_UPDATE_INSTRUCTIONS,
     RESPONSE_JUDGMENT_TIMEOUT_SECONDS,
     AttachmentInMemory,
     GeneratedReactionResponse,
     GeneratedRequiredReply,
     GeneratedTextResponse,
     LLMMessage,
+    MemoryDocumentShortenResult,
     MemoryDocumentUpdater,
     MemoryDocumentUpdateResult,
     MessageInMemory,
@@ -684,12 +687,20 @@ class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
             self.fail("長期記憶文書の更新がLunaを使用していません")
         if responses.calls[0]["reasoning"] != {"effort": "medium"}:
             self.fail("長期記憶文書の更新の推論強度がmediumになっていません")
+        if responses.calls[0]["metadata"] != {"operation": "memory_document_update"}:
+            self.fail("長期記憶文書の更新種別をPlatformのmetadataへ設定していません")
 
     async def test_uses_separate_instructions_for_shortening_retry(self) -> None:
         responses = ConfigRecordingResponses(MemoryDocumentUpdateResult())
         client = cast("AsyncOpenAI", SimpleNamespace(responses=responses))
 
-        await MemoryDocumentUpdater(client).update({"proposed_result": {}}, shorten=True)
+        await MemoryDocumentUpdater(client).shorten({"documents": []})
 
-        if "固定見出しの不一致" not in str(responses.calls[0]["instructions"]):
-            self.fail("文字数超過時に短縮専用の指示を使用していません")
+        if responses.calls[0]["instructions"] != MEMORY_DOCUMENT_SHORTEN_INSTRUCTIONS:
+            self.fail("文字数超過時に独立した短縮専用の指示を使用していません")
+        if MEMORY_DOCUMENT_UPDATE_INSTRUCTIONS in str(responses.calls[0]["instructions"]):
+            self.fail("短縮callへ通常更新の指示を重複送信しています")
+        if responses.calls[0]["metadata"] != {"operation": "memory_document_shorten"}:
+            self.fail("短縮処理の種別をPlatformのmetadataへ設定していません")
+        if responses.calls[0]["text_format"] is not MemoryDocumentShortenResult:
+            self.fail("短縮callが本文以外の識別情報も再生成する出力形式になっています")

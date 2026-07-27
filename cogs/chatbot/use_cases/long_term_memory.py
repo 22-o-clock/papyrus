@@ -11,10 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from cogs.chatbot.constants import (
     CONVERSATION_INACTIVITY_SECONDS,
     MEMORY_DOCUMENT_ATTACHMENT_WAIT_SECONDS,
+    MEMORY_DOCUMENT_BOT_MAX_CHARACTERS,
+    MEMORY_DOCUMENT_BOT_SHORTEN_TRIGGER_CHARACTERS,
+    MEMORY_DOCUMENT_BOT_TARGET_CHARACTERS,
     MEMORY_DOCUMENT_MESSAGE_TRIGGER,
     MEMORY_DOCUMENT_NEW_CONTEXT_TOKENS,
     MEMORY_DOCUMENT_PERSON_MAX_CHARACTERS,
+    MEMORY_DOCUMENT_PERSON_SHORTEN_TRIGGER_CHARACTERS,
+    MEMORY_DOCUMENT_PERSON_TARGET_CHARACTERS,
     MEMORY_DOCUMENT_SHARED_MAX_CHARACTERS,
+    MEMORY_DOCUMENT_SHARED_SHORTEN_TRIGGER_CHARACTERS,
+    MEMORY_DOCUMENT_SHARED_TARGET_CHARACTERS,
     MEMORY_DOCUMENT_TOKEN_TRIGGER,
     MEMORY_DOCUMENT_TOTAL_CONTEXT_TOKENS,
 )
@@ -30,7 +37,10 @@ from cogs.chatbot.repositories.short_term_message import (
     ChatbotStoredMessage,
 )
 from cogs.chatbot.responses_api import MemoryDocumentUpdater, MemoryDocumentUpdateResult
-from cogs.chatbot.services.memory_document_format import has_required_memory_document_headings
+from cogs.chatbot.services.memory_document_format import (
+    MEMORY_DOCUMENT_HEADINGS,
+    has_required_memory_document_headings,
+)
 from cogs.chatbot.services.prompt_context import omit_empty_values
 
 logger = getLogger(__name__)
@@ -273,14 +283,7 @@ class LongTermMemoryUseCases:
             ],
         }
         result = await self._updater.update(payload)
-        if self._needs_document_retry(result):
-            payload["proposed_result"] = result.model_dump()
-            payload["character_limits"] = {
-                "person": MEMORY_DOCUMENT_PERSON_MAX_CHARACTERS,
-                "bot": MEMORY_DOCUMENT_PERSON_MAX_CHARACTERS,
-                "shared": MEMORY_DOCUMENT_SHARED_MAX_CHARACTERS,
-            }
-            result = await self._updater.update(payload, shorten=True)
+        result = await self._shorten_documents_if_needed(result)
         documents = self._validate_documents(result, {member.id for member in members})
         aliases = self._validate_aliases(
             result,
@@ -357,7 +360,7 @@ class LongTermMemoryUseCases:
             elif update_result.target_user_id is not None:
                 raise MemoryDocumentValidationError
             elif update_result.document_type == "bot":
-                maximum = MEMORY_DOCUMENT_PERSON_MAX_CHARACTERS
+                maximum = MEMORY_DOCUMENT_BOT_MAX_CHARACTERS
             if update_result.document_key != expected_key or expected_key in seen_keys:
                 raise MemoryDocumentValidationError
             if len(update_result.content) > maximum:
@@ -411,17 +414,67 @@ class LongTermMemoryUseCases:
             )
         return aliases
 
-    def _needs_document_retry(self, result: MemoryDocumentUpdateResult) -> bool:
-        return any(
-            len(document.content)
-            > (
-                MEMORY_DOCUMENT_SHARED_MAX_CHARACTERS
-                if document.document_type == "shared"
-                else MEMORY_DOCUMENT_PERSON_MAX_CHARACTERS
-            )
-            or not has_required_memory_document_headings(document.document_type, document.content)
+    async def _shorten_documents_if_needed(
+        self,
+        result: MemoryDocumentUpdateResult,
+    ) -> MemoryDocumentUpdateResult:
+        documents = [
+            document
             for document in result.updates
+            if len(document.content) > self._document_character_limits(document.document_type)[1]
+            or not has_required_memory_document_headings(document.document_type, document.content)
+        ]
+        if not documents:
+            return result
+
+        expected_keys = {document.document_key for document in documents}
+        if len(expected_keys) != len(documents):
+            raise MemoryDocumentValidationError
+        shortened = await self._updater.shorten(
+            {
+                "documents": [
+                    {
+                        "content": document.content,
+                        "target_characters": self._document_character_limits(document.document_type)[0],
+                        "required_headings": MEMORY_DOCUMENT_HEADINGS[document.document_type],
+                    }
+                    for document in documents
+                ]
+            }
         )
+        if len(shortened.contents) != len(documents):
+            raise MemoryDocumentValidationError
+        replacements = {
+            original.document_key: original.model_copy(update={"content": content})
+            for original, content in zip(documents, shortened.contents, strict=True)
+        }
+
+        return MemoryDocumentUpdateResult(
+            updates=[replacements.get(document.document_key, document) for document in result.updates],
+            aliases=result.aliases,
+        )
+
+    @staticmethod
+    def _document_character_limits(document_type: str) -> tuple[int, int, int]:
+        if document_type == "person":
+            return (
+                MEMORY_DOCUMENT_PERSON_TARGET_CHARACTERS,
+                MEMORY_DOCUMENT_PERSON_SHORTEN_TRIGGER_CHARACTERS,
+                MEMORY_DOCUMENT_PERSON_MAX_CHARACTERS,
+            )
+        if document_type == "bot":
+            return (
+                MEMORY_DOCUMENT_BOT_TARGET_CHARACTERS,
+                MEMORY_DOCUMENT_BOT_SHORTEN_TRIGGER_CHARACTERS,
+                MEMORY_DOCUMENT_BOT_MAX_CHARACTERS,
+            )
+        if document_type == "shared":
+            return (
+                MEMORY_DOCUMENT_SHARED_TARGET_CHARACTERS,
+                MEMORY_DOCUMENT_SHARED_SHORTEN_TRIGGER_CHARACTERS,
+                MEMORY_DOCUMENT_SHARED_MAX_CHARACTERS,
+            )
+        raise MemoryDocumentValidationError
 
     def _is_update_source(self, message: ChatbotStoredMessage) -> bool:
         return self._is_memory_evidence(message) and not message.is_forwarded and (not message.is_bot or message.is_self)
