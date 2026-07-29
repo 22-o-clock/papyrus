@@ -16,6 +16,8 @@ ENABLED_COGS_KEY = "ENABLED_COGS"
 DEBUG_CHATBOT_CHANNEL_ID_KEY = "CHANNEL_ID_DEBUG_CHATBOT"
 PRODUCTION_API_USAGE_REPORT_TARGET_ID_KEY = "THREAD_ID_API_USAGE_REPORT"
 DEBUG_API_USAGE_REPORT_TARGET_ID_KEY = "THREAD_ID_DEBUG_API_USAGE_REPORT"
+PRODUCTION_CYNICISM_REPORT_TARGET_ID_KEY = "CHANNEL_ID_CYNICISM_REPORT"
+DEBUG_CYNICISM_REPORT_TARGET_ID_KEY = "CHANNEL_ID_DEBUG_CYNICISM_REPORT"
 OPTIONAL_ENVIRONMENT_KEYS = (
     "AUDIT_IMMUNITY",
     "LASTFM_IDS",
@@ -25,6 +27,8 @@ OPTIONAL_ENVIRONMENT_KEYS = (
 REQUIRED_ENVIRONMENT_KEYS = (
     "CHATBOT_SUPABASE_CONNECTION_STRING",
     DEBUG_CHATBOT_CHANNEL_ID_KEY,
+    DEBUG_CYNICISM_REPORT_TARGET_ID_KEY,
+    PRODUCTION_CYNICISM_REPORT_TARGET_ID_KEY,
     "CHANNEL_ID_LISTEN_ONLY_MEMBER",
     "CHANNEL_ID_LOBBY",
     DEBUG_API_USAGE_REPORT_TARGET_ID_KEY,
@@ -44,6 +48,8 @@ REQUIRED_ENVIRONMENT_KEYS = (
 )
 INTEGER_ENVIRONMENT_KEYS = (
     DEBUG_CHATBOT_CHANNEL_ID_KEY,
+    DEBUG_CYNICISM_REPORT_TARGET_ID_KEY,
+    PRODUCTION_CYNICISM_REPORT_TARGET_ID_KEY,
     "CHANNEL_ID_LISTEN_ONLY_MEMBER",
     "CHANNEL_ID_LOBBY",
     DEBUG_API_USAGE_REPORT_TARGET_ID_KEY,
@@ -61,6 +67,7 @@ AVAILABLE_COG_NAMES = (
     "audit",
     "api_usage",
     "chatbot",
+    "cynicism",
     "hwh",
     "monitor",
     "moving",
@@ -88,6 +95,7 @@ class RuntimeEnvironment:
     enabled_cogs: tuple[str, ...]
     chatbot_test_channel_ids: frozenset[int]
     api_usage_report_target_id: int
+    cynicism_report_target_id: int
 
     @property
     def is_debug(self) -> bool:
@@ -124,11 +132,15 @@ def configure_runtime_environment(environ: Mapping[str, str] | None = None) -> R
         if environment is BotEnvironment.DEBUG
         else PRODUCTION_API_USAGE_REPORT_TARGET_ID_KEY
     )
+    cynicism_report_target_key = (
+        DEBUG_CYNICISM_REPORT_TARGET_ID_KEY if environment is BotEnvironment.DEBUG else PRODUCTION_CYNICISM_REPORT_TARGET_ID_KEY
+    )
     runtime = RuntimeEnvironment(
         environment=environment,
         enabled_cogs=_parse_enabled_cogs(values[ENABLED_COGS_KEY]),
         chatbot_test_channel_ids=frozenset((int(values[DEBUG_CHATBOT_CHANNEL_ID_KEY]),)),
         api_usage_report_target_id=int(values[api_usage_report_target_key]),
+        cynicism_report_target_id=int(values[cynicism_report_target_key]),
     )
     _runtime_environment = runtime
     logger.info(
