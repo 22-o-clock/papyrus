@@ -25,6 +25,7 @@ Papyrusで利用できる操作と、メッセージやDiscordイベントを契
 ### 冷笑ランキング
 
 - `/cynicism ranking`: 指定期間の冷笑王ランキングを表示します。
+- `/cynicism messages`: 指定メンバーが期間内に冷笑ポイントを獲得した発言を、CSVファイルとして出力します。
 - `/cynicism status`: 冷笑ポイントの重み、集計状態、発表状況を表示します。
 - `/cynicism publish`: 指定期間のランキングを発表チャンネルへ投稿または更新します。
 - `/cynicism weight`: Papyrusと人間の🥶の重みを変更します。

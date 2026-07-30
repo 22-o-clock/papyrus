@@ -1,7 +1,9 @@
 """冷笑王ランキングの集計、発表、運用設定。"""
 
 import asyncio
+import csv
 import datetime
+import io
 import os
 from decimal import Decimal
 from logging import getLogger
@@ -29,6 +31,7 @@ from cogs.cynicism.services.ranking import build_ranking
 from cogs.cynicism.services.report_builder import (
     build_empty_notice,
     build_ranking_embed,
+    format_points,
     format_weight,
     ranking_digest,
 )
@@ -38,6 +41,8 @@ from core.exception import ArgumentError, MissingRequiredRoleError
 from core.runtime_environment import RuntimeEnvironment
 
 logger = getLogger(__name__)
+
+MESSAGES_CSV_HEADER = ("発言者", "タイムスタンプ", "本文テキスト", "冷笑ポイント", "冷笑絵文字をつけたアカウント", "発言のURL")
 
 
 class CynicismReportUseCases:
@@ -94,6 +99,61 @@ class CynicismReportUseCases:
             return
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime.now(JST))
         message = await interaction.followup.send(embed=embed, wait=True)
+        # 表示のたびにChatbotが読み込んでトークンを消費しないよう、長期記憶の根拠から外す。
+        self._bot.dispatch("exclude_from_long_term_memory", message)
+
+    async def export_messages(
+        self,
+        interaction: Interaction,
+        member: discord.Member,
+        period_type: str,
+        start: str | None,
+    ) -> None:
+        """指定メンバーが期間内に冷笑ポイントを獲得した発言をCSVとして出力する。"""
+        period = self._resolve_period(period_type, start, default_to_completed=False)
+        await interaction.response.defer(thinking=True)
+        scope = channel_scope(self._runtime_environment)
+        records = await self._reactions.list_member_reactions(period, member_id=member.id, scope=scope)
+        if not records:
+            await interaction.followup.send(
+                f"{member.display_name} の{period.label}冷笑ポイント ({format_period(period)}) は見つかりませんでした。",
+            )
+            return
+
+        settings = await self._configuration.get()
+        papyrus_user_id = self._bot.user.id if self._bot.user is not None else 0
+        reactor_ids = sorted({reactor_id for record in records for reactor_id in record.reactor_ids})
+        stored_names = await self._reactions.get_display_names(reactor_ids)
+        identities = resolve_identities(self._bot, interaction.guild, reactor_ids, stored_names)
+
+        # ExcelでもUTF-8として開けるようBOM付きにする (utf-8-sig)。
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(MESSAGES_CSV_HEADER)
+        for record in records:
+            papyrus_count = sum(1 for reactor_id in record.reactor_ids if reactor_id == papyrus_user_id)
+            human_count = len(record.reactor_ids) - papyrus_count
+            points = papyrus_count * settings.weights.papyrus + human_count * settings.weights.human
+            reactor_names = ", ".join(
+                identities[reactor_id].display_name if reactor_id in identities else str(reactor_id)
+                for reactor_id in record.reactor_ids
+            )
+            writer.writerow(
+                [
+                    member.display_name,
+                    record.post_time.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S"),
+                    record.content,
+                    format_points(points),
+                    reactor_names,
+                    f"https://discord.com/channels/{self._server_id}/{record.channel_id}/{record.message_id}",
+                ]
+            )
+
+        attachment = discord.File(
+            io.BytesIO(buffer.getvalue().encode("utf-8-sig")),
+            filename=f"cynicism_messages_{member.id}_{period.period_type.value}_{period.start_date.isoformat()}.csv",
+        )
+        message = await interaction.followup.send(file=attachment, wait=True)
         # 表示のたびにChatbotが読み込んでトークンを消費しないよう、長期記憶の根拠から外す。
         self._bot.dispatch("exclude_from_long_term_memory", message)
 

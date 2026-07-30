@@ -28,7 +28,7 @@ EXPECTED_GROUP_COMMANDS = {
         "role_show",
     },
     "copy": {"all", "range", "to_new_thread"},
-    "cynicism": {"pause", "publish", "ranking", "resume", "status", "weight"},
+    "cynicism": {"messages", "pause", "publish", "ranking", "resume", "status", "weight"},
     "moderation": {
         "expression_config",
         "post_ban",
@@ -62,7 +62,7 @@ COMMAND_GROUPS = (
 )
 
 INDEPENDENT_COMMANDS = (Notify.remind, Speak.choice_command, Speak.hi)
-EXPECTED_SLASH_COMMAND_COUNT = 47
+EXPECTED_SLASH_COMMAND_COUNT = 48
 
 
 def ensure(condition: object) -> None:
