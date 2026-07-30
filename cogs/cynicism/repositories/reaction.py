@@ -5,13 +5,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import delete, distinct, func, select, tuple_
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import array_agg, insert
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
 from cogs.cynicism.constants import JST, REACTION_SOURCE
 from cogs.cynicism.database import CynicismDatabase, CynicismReaction
-from cogs.cynicism.models import ChannelScope, MemberReactionCounts
+from cogs.cynicism.models import ChannelScope, CynicismMessageRecord, MemberReactionCounts
 from cogs.cynicism.periods import CynicismPeriod
 from cogs.talkdata.database import DiscordMember, DiscordMessage
 
@@ -153,6 +153,48 @@ class CynicismReactionRepository:
         async with self._database.session() as session:
             result = await session.execute(statement)
             return {row.member_id: row.message_count for row in result.all()}
+
+    async def list_member_reactions(
+        self,
+        period: CynicismPeriod,
+        *,
+        member_id: int,
+        scope: ChannelScope,
+    ) -> list[CynicismMessageRecord]:
+        """期間内に対象メンバーの発言へ向けられた🥶を、発言ごとの明細として返す。"""
+        statement = (
+            select(
+                DiscordMessage.id,
+                DiscordMessage.channel_id,
+                DiscordMessage.post_time,
+                DiscordMessage.content,
+                array_agg(distinct(CynicismReaction.reactor_id)),
+            )
+            .select_from(CynicismReaction)
+            .join(*_talkdata_join())
+            .where(
+                DiscordMessage.member_id == member_id,
+                DiscordMessage.post_time >= period.start_at,
+                DiscordMessage.post_time < period.end_at,
+                CynicismReaction.reactor_id != DiscordMessage.member_id,
+                *_scope_conditions(DiscordMessage.channel_id, scope),
+            )
+            .group_by(DiscordMessage.id, DiscordMessage.channel_id, DiscordMessage.post_time, DiscordMessage.content)
+            .order_by(DiscordMessage.post_time)
+        )
+
+        async with self._database.session() as session:
+            result = await session.execute(statement)
+            return [
+                CynicismMessageRecord(
+                    message_id=message_id,
+                    channel_id=channel_id,
+                    post_time=post_time,
+                    content=content,
+                    reactor_ids=tuple(reactor_ids),
+                )
+                for message_id, channel_id, post_time, content, reactor_ids in result.all()
+            ]
 
     async def get_display_names(self, member_ids: Sequence[int]) -> dict[int, str]:
         """TalkDataに記録された表示名を返す。退出済みメンバーの表示に使う。"""

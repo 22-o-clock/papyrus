@@ -1,5 +1,7 @@
 import asyncio
+import csv
 import datetime
+import io
 import unittest
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,6 +15,7 @@ import discord
 from cogs.cynicism.constants import CYNICISM_EMOJI, JST, REACTION_SOURCE, REPLY_SOURCE
 from cogs.cynicism.models import (
     ChannelScope,
+    CynicismMessageRecord,
     CynicismSettings,
     CynicismWeights,
     MemberReactionCounts,
@@ -42,7 +45,7 @@ from cogs.cynicism.services.report_builder import (
 )
 from cogs.cynicism.services.schedule import publish_time, publishable_periods, refreshable_periods
 from cogs.cynicism.services.scope import channel_scope
-from cogs.cynicism.use_cases.reporting import CynicismReportUseCases
+from cogs.cynicism.use_cases.reporting import MESSAGES_CSV_HEADER, CynicismReportUseCases
 from cogs.cynicism.use_cases.tracking import CynicismTrackingUseCases
 from core.exception import ArgumentError
 
@@ -909,6 +912,7 @@ class InteractionRecorder:
         self.followup = SimpleNamespace(send=self._followup_send)
         self.user = user
         self.guild = None
+        self.followup_kwargs: dict[str, object] | None = None
 
     async def _defer(self, **_: object) -> None:
         self.calls.append("defer")
@@ -916,8 +920,9 @@ class InteractionRecorder:
     async def _send_message(self, *_: object, **__: object) -> None:
         self.calls.append("response.send_message")
 
-    async def _followup_send(self, *_: object, **__: object) -> None:
+    async def _followup_send(self, *_: object, **kwargs: object) -> None:
         self.calls.append("followup.send")
+        self.followup_kwargs = kwargs
 
     async def record_database_access(self, *_: object, **__: object) -> object:
         self.calls.append("database")
@@ -995,6 +1000,93 @@ class InteractionDeadlineTest(unittest.IsolatedAsyncioTestCase):
             ensure(interaction.calls == [], "入力の検証だけで弾ける場合は応答を保留しません")
             return
         self.fail("許容範囲外の重みは利用者向けエラーにする必要があります")
+
+
+class ExportMessagesTest(unittest.IsolatedAsyncioTestCase):
+    """発言一覧のCSV出力は、期間解決・チャンネル範囲判定・表示名解決を既存の実装に委譲する。"""
+
+    def build_use_cases(
+        self,
+        *,
+        records: list[CynicismMessageRecord] | None = None,
+        display_names: dict[int, str] | None = None,
+    ) -> CynicismReportUseCases:
+        use_cases = object.__new__(CynicismReportUseCases)
+        use_cases._runtime_environment = cast(  # noqa: SLF001
+            "Any",
+            SimpleNamespace(is_debug=False, chatbot_test_channel_ids=frozenset({TEST_CHANNEL_ID})),
+        )
+        use_cases._configuration = cast("Any", SimpleNamespace(get=AsyncMock(return_value=make_settings())))  # noqa: SLF001
+        use_cases._reactions = cast(  # noqa: SLF001
+            "Any",
+            SimpleNamespace(
+                list_member_reactions=AsyncMock(return_value=records or []),
+                get_display_names=AsyncMock(return_value=display_names or {}),
+            ),
+        )
+        bot = Mock()
+        bot.user = SimpleNamespace(id=PAPYRUS_USER_ID)
+        bot.get_user = Mock(
+            side_effect=lambda member_id: (
+                SimpleNamespace(display_name="Papyrus", bot=True) if member_id == PAPYRUS_USER_ID else None
+            )
+        )
+        use_cases._bot = bot  # noqa: SLF001
+        use_cases._server_id = GUILD_ID  # noqa: SLF001
+        return use_cases
+
+    def make_member(self, *, display_name: str = "被発言者") -> discord.Member:
+        member = Mock(spec=discord.Member)
+        member.id = AUTHOR_USER_ID
+        member.display_name = display_name
+        return member
+
+    async def test_defers_before_touching_the_database(self) -> None:
+        interaction = InteractionRecorder()
+        use_cases = self.build_use_cases()
+
+        await use_cases.export_messages(cast("Any", interaction), self.make_member(), "weekly", None)
+
+        ensure(interaction.calls[0] == "defer", "DBアクセスより先に応答を保留する必要があります")
+        ensure(interaction.calls[-1] == "followup.send")
+
+    async def test_no_records_sends_a_notice_without_a_file(self) -> None:
+        interaction = InteractionRecorder()
+        use_cases = self.build_use_cases(records=[])
+
+        await use_cases.export_messages(cast("Any", interaction), self.make_member(), "weekly", None)
+
+        ensure(interaction.followup_kwargs is not None)
+        ensure("file" not in cast("dict[str, object]", interaction.followup_kwargs))
+
+    async def test_csv_contains_one_row_per_message_with_the_expected_columns(self) -> None:
+        interaction = InteractionRecorder()
+        post_time = datetime.datetime(2026, 7, 28, 21, 0, tzinfo=JST)
+        records = [
+            CynicismMessageRecord(
+                message_id=TARGET_MESSAGE_ID,
+                channel_id=CHANNEL_ID,
+                post_time=post_time,
+                content="そんなの意味なくない?",
+                reactor_ids=(PAPYRUS_USER_ID, HUMAN_USER_ID),
+            )
+        ]
+        use_cases = self.build_use_cases(records=records, display_names={HUMAN_USER_ID: "人間さん"})
+        member = self.make_member(display_name="発言者さん")
+
+        await use_cases.export_messages(cast("Any", interaction), member, "weekly", None)
+
+        kwargs = cast("dict[str, Any]", interaction.followup_kwargs)
+        ensure(not kwargs.get("ephemeral"), "他の利用者も見られるよう公開で送る必要があります")
+        attachment = kwargs["file"]
+        rows = list(csv.reader(io.StringIO(attachment.fp.read().decode("utf-8-sig"))))
+        ensure(rows[0] == list(MESSAGES_CSV_HEADER))
+        ensure(rows[1][0] == "発言者さん", "発言者列は対象メンバーの表示名にする必要があります")
+        ensure(rows[1][1] == "2026-07-28 21:00:00", "タイムスタンプはJSTで表示する必要があります")
+        ensure(rows[1][2] == "そんなの意味なくない?")
+        ensure(rows[1][3] == "4.0", "Papyrus 3.0 + 人間 1.0 の重みが適用される必要があります")
+        ensure(rows[1][4] == "Papyrus, 人間さん", "🥶を向けたアカウントを向けた順に列挙する必要があります")
+        ensure(rows[1][5] == f"https://discord.com/channels/{GUILD_ID}/{CHANNEL_ID}/{TARGET_MESSAGE_ID}")
 
 
 class ScheduledReportTest(unittest.IsolatedAsyncioTestCase):

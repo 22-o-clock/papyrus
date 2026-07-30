@@ -50,6 +50,17 @@ class MemberReactionCounts:
 
 
 @dataclass(frozen=True, slots=True)
+class CynicismMessageRecord:
+    """冷笑ポイントを獲得した発言1件と、🥶を向けたアカウントの内訳。"""
+
+    message_id: int
+    channel_id: int
+    post_time: datetime.datetime
+    content: str
+    reactor_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RankedMemberIdentity:
     """ランキング表示に必要なメンバー情報。"""
 

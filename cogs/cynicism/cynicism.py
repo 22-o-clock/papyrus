@@ -116,6 +116,22 @@ class Cynicism(commands.Cog):
     ) -> None:
         await self._report_use_cases.ranking(interaction, period, start)
 
+    @cynicism.command(name="messages", description="指定メンバーが冷笑ポイントを獲得した発言をCSVで出力します。")
+    @app_commands.describe(
+        member="対象メンバー",
+        period="集計期間の種別",
+        start="期間内の任意の日 (YYYY-MM-DD、省略時は進行中の期間)",
+    )
+    @app_commands.choices(period=PERIOD_CHOICES)
+    async def messages(
+        self,
+        interaction: Interaction,
+        member: discord.Member,
+        period: str = CynicismPeriodType.WEEKLY.value,
+        start: str | None = None,
+    ) -> None:
+        await self._report_use_cases.export_messages(interaction, member, period, start)
+
     @cynicism.command(name="status", description="冷笑ポイントの重みと発表状態を表示します。")
     async def status(self, interaction: Interaction) -> None:
         await self._report_use_cases.status(interaction)
