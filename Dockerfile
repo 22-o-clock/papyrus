@@ -32,6 +32,6 @@ RUN groupadd -g "${GROUP_ID}" "${USER_NAME}" && \
 
 COPY --from=builder --chown=${USER_NAME}:${USER_NAME} ${WORKDIR} ${WORKDIR}
 
-USER ${USER_NAME}
+USER ${USER_ID}:${GROUP_ID}
 
 CMD [ "python3", "main.py" ]
