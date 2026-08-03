@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock
 
 import discord
 
-from cogs.cynicism.constants import CYNICISM_EMOJI, JST, REACTION_SOURCE, REPLY_SOURCE
+from cogs.cynicism.constants import CUSTOM_CYNICISM_EMOJI_NAME, CYNICISM_EMOJI, JST, REACTION_SOURCE, REPLY_SOURCE
 from cogs.cynicism.models import (
     ChannelScope,
     CynicismMessageRecord,
@@ -242,13 +242,37 @@ class ReactionFilterTest(unittest.TestCase):
 
         ensure(not is_cynicism_emoji(emoji))
 
+    def test_target_custom_emoji_is_accepted(self) -> None:
+        emoji = discord.PartialEmoji(name=CUSTOM_CYNICISM_EMOJI_NAME, id=1234)
+
+        ensure(is_cynicism_emoji(emoji))
+
+    def test_other_custom_emoji_is_rejected(self) -> None:
+        emoji = discord.PartialEmoji(name="other_emoji", id=1234)
+
+        ensure(not is_cynicism_emoji(emoji))
+
+    def test_bare_name_without_id_is_rejected(self) -> None:
+        # `:name:`表記の絵文字IDが取れない場合、カスタム絵文字とは判定しない。
+        emoji = discord.PartialEmoji(name=CUSTOM_CYNICISM_EMOJI_NAME)
+
+        ensure(not is_cynicism_emoji(emoji))
+
     def test_cynicism_only_content_ignores_whitespace_and_variation_selector(self) -> None:
         for content in (CYNICISM_EMOJI, f"{CYNICISM_EMOJI}{CYNICISM_EMOJI}", f" {CYNICISM_EMOJI} ", f"{CYNICISM_EMOJI}️"):
             with self.subTest(content=content):
                 ensure(is_cynicism_only_content(content))
 
+    def test_cynicism_only_content_accepts_the_target_custom_emoji_tag(self) -> None:
+        tag = f"<:{CUSTOM_CYNICISM_EMOJI_NAME}:123456789012345678>"
+        for content in (tag, f"{tag}{tag}", f" {tag} ", f"{tag}{CYNICISM_EMOJI}"):
+            with self.subTest(content=content):
+                ensure(is_cynicism_only_content(content))
+
     def test_content_with_other_characters_is_rejected(self) -> None:
-        for content in (f"{CYNICISM_EMOJI}ですね", "", "   ", "冷笑"):
+        tag = f"<:{CUSTOM_CYNICISM_EMOJI_NAME}:123456789012345678>"
+        other_custom_emoji_tag = "<:other_emoji:123456789012345678>"
+        for content in (f"{CYNICISM_EMOJI}ですね", "", "   ", "冷笑", f"{tag}ですね", other_custom_emoji_tag):
             with self.subTest(content=content):
                 ensure(not is_cynicism_only_content(content))
 
