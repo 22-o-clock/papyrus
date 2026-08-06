@@ -5,8 +5,10 @@ from decimal import Decimal
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
 
-# 冷笑ポイントの対象とするUnicode絵文字。カスタム絵文字は対象外とする。
+# 冷笑ポイントの対象とするUnicode絵文字。
 CYNICISM_EMOJI = "🥶"
+# 冷笑ポイントの対象とするサーバー固有のカスタム絵文字の名前。
+CUSTOM_CYNICISM_EMOJI_NAME = "MEIKO_uh"
 # 一部のクライアントが絵文字へ付与する異体字セレクタ。本文判定の前に除去する。
 VARIATION_SELECTOR = "\ufe0f"
 
