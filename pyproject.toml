@@ -11,7 +11,7 @@ dependencies = [
     "discord-py[voice]>=2.7.1",
     "dotenv>=0.9.9",
     "jaconv>=0.4.0",
-    "openai>=2.14.0",
+    "openai>=2.52.0",
     "openpyxl>=3.1.5",
     "python-dateutil>=2.9.0.post0",
     "pykakasi>=2.3.0",
@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["ruff>=0.14.13", "ty>=0.0.12"]
+dev = ["ruff>=0.16.1", "ty>=0.0.12"]
 
 [tool.uv]
 # discord.py 2.7.1のvoice extraがPyNaCl 1.6系を除外するため、修正版を上流の次期制約に合わせて許可する。
@@ -48,6 +48,7 @@ ignore = [
     "D203",
     "D213",
     "COM812",
+    "CPY001",
     "ISC001",
     "PGH003",
 ]
