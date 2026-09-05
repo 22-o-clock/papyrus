@@ -1,9 +1,7 @@
 """冷笑王ランキングの集計、発表、運用設定。"""
 
 import asyncio
-import csv
 import datetime
-import io
 import os
 from dataclasses import replace
 from logging import getLogger
@@ -27,12 +25,12 @@ from cogs.cynicism.repositories.reaction import CynicismReactionRepository
 from cogs.cynicism.repositories.report import CynicismReportRepository
 from cogs.cynicism.services.member_resolution import resolve_identities
 from cogs.cynicism.services.message_delivery import CynicismReportMessageDelivery, ReportMessageOwnershipError
+from cogs.cynicism.services.message_list import build_message_embeds
 from cogs.cynicism.services.ranking import build_ranking
 from cogs.cynicism.services.report_builder import (
     build_empty_notice,
     build_ranking_embed,
     build_top_messages_files,
-    format_points,
     ranking_digest,
 )
 from cogs.cynicism.services.schedule import publishable_periods, refreshable_periods
@@ -41,8 +39,6 @@ from core.exception import ArgumentError, MissingRequiredRoleError
 from core.runtime_environment import RuntimeEnvironment
 
 logger = getLogger(__name__)
-
-MESSAGES_CSV_HEADER = ("発言者", "タイムスタンプ", "本文テキスト", "冷笑ポイント", "冷笑絵文字をつけたアカウント", "発言のURL")
 
 
 class CynicismReportUseCases:
@@ -102,16 +98,16 @@ class CynicismReportUseCases:
         # 表示のたびにChatbotが読み込んでトークンを消費しないよう、長期記憶の根拠から外す。
         self._bot.dispatch("exclude_from_long_term_memory", message)
 
-    async def export_messages(
+    async def show_messages(
         self,
         interaction: Interaction,
         member: discord.Member,
         period_type: str,
         start: str | None,
     ) -> None:
-        """指定メンバーが期間内に冷笑ポイントを獲得した発言をCSVとして出力する。"""
+        """指定メンバーの冷笑ポイント対象発言を、実行者だけにEmbedで紹介する。"""
         period = self._resolve_period(period_type, start, default_to_completed=False)
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         scope = channel_scope(self._runtime_environment)
         papyrus_user_id = self._bot.user.id if self._bot.user is not None else 0
         records = await self._reactions.list_member_reactions(
@@ -120,6 +116,8 @@ class CynicismReportUseCases:
         if not records:
             await interaction.followup.send(
                 f"{member.display_name} の{period.label}冷笑ポイント ({format_period(period)}) は見つかりませんでした。",
+                allowed_mentions=discord.AllowedMentions.none(),
+                ephemeral=True,
             )
             return
 
@@ -127,34 +125,15 @@ class CynicismReportUseCases:
         stored_names = await self._reactions.get_display_names(reactor_ids)
         identities = resolve_identities(self._bot, interaction.guild, reactor_ids, stored_names)
 
-        # ExcelでもUTF-8として開けるようBOM付きにする (utf-8-sig)。
-        buffer = io.StringIO()
-        writer = csv.writer(buffer)
-        writer.writerow(MESSAGES_CSV_HEADER)
-        for record in records:
-            points = len(record.reactor_ids)
-            reactor_names = ", ".join(
-                identities[reactor_id].display_name if reactor_id in identities else str(reactor_id)
-                for reactor_id in record.reactor_ids
-            )
-            writer.writerow(
-                [
-                    member.display_name,
-                    record.post_time.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S"),
-                    record.content,
-                    format_points(points),
-                    reactor_names,
-                    f"https://discord.com/channels/{self._server_id}/{record.channel_id}/{record.message_id}",
-                ]
-            )
-
-        attachment = discord.File(
-            io.BytesIO(buffer.getvalue().encode("utf-8-sig")),
-            filename=f"cynicism_messages_{member.id}_{period.period_type.value}_{period.start_date.isoformat()}.csv",
+        embeds = build_message_embeds(
+            records,
+            period=period,
+            display_name=member.display_name,
+            identities=identities,
+            guild_id=self._server_id,
         )
-        message = await interaction.followup.send(file=attachment, wait=True)
-        # 表示のたびにChatbotが読み込んでトークンを消費しないよう、長期記憶の根拠から外す。
-        self._bot.dispatch("exclude_from_long_term_memory", message)
+        for embed in embeds:
+            await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none(), ephemeral=True)
 
     async def publish(self, interaction: Interaction, period_type: str, start: str | None) -> None:
         """管理者操作で指定期間のランキングを発表チャンネルへ投稿・更新する。"""

@@ -1,5 +1,4 @@
 import asyncio
-import csv
 import datetime
 import io
 import unittest
@@ -7,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from decimal import Decimal
+from itertools import pairwise
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -37,6 +37,11 @@ from cogs.cynicism.services.message_delivery import (
     CynicismReportMessageDelivery,
     ReportMessageOwnershipError,
 )
+from cogs.cynicism.services.message_list import (
+    EMBED_DESCRIPTION_LIMIT,
+    MESSAGE_PREVIEW_LENGTH,
+    build_message_embeds,
+)
 from cogs.cynicism.services.ranking import build_ranking, cynicism_rate
 from cogs.cynicism.services.reaction_filter import is_cynicism_emoji
 from cogs.cynicism.services.report_builder import (
@@ -48,7 +53,7 @@ from cogs.cynicism.services.report_builder import (
 )
 from cogs.cynicism.services.schedule import publish_time, publishable_periods, refreshable_periods
 from cogs.cynicism.services.scope import channel_scope
-from cogs.cynicism.use_cases.reporting import MESSAGES_CSV_HEADER, CynicismReportUseCases
+from cogs.cynicism.use_cases.reporting import CynicismReportUseCases
 from cogs.cynicism.use_cases.tracking import CynicismTrackingUseCases
 from core.exception import ArgumentError
 
@@ -872,6 +877,75 @@ class ReactionRepositoryTest(unittest.IsolatedAsyncioTestCase):
         ensure(parameters["evidence_message_id"] is None)
 
 
+class MessageListTest(unittest.TestCase):
+    def make_embeds(self, records: list[CynicismMessageRecord]) -> list[discord.Embed]:
+        """同じ期間・表示名で紹介Embedを組み立てる。"""
+        return build_message_embeds(
+            records,
+            period=build_sample_ranking().period,
+            display_name="発言者",
+            identities={HUMAN_USER_ID: RankedMemberIdentity(HUMAN_USER_ID, "名前付き", is_bot=False)},
+            guild_id=GUILD_ID,
+        )
+
+    def test_each_message_is_one_line_with_points_minute_time_and_link(self) -> None:
+        record = CynicismMessageRecord(
+            TARGET_MESSAGE_ID,
+            CHANNEL_ID,
+            datetime.datetime(2026, 7, 28, 23, 0, 45, tzinfo=datetime.UTC),
+            "本文\n\n改行",
+            (HUMAN_USER_ID, AUTHOR_USER_ID),
+        )
+        embeds = self.make_embeds([record])
+        ensure(len(embeds) == 1)
+        ensure(embeds[0].title == "発言者 の週間冷笑ポイント")
+        ensure(
+            embeds[0].description
+            == (
+                "2026-07-24 22:00 〜 2026-07-31 22:00 (JST)\n"
+                f"- [07/29 08:00](https://discord.com/channels/{GUILD_ID}/{CHANNEL_ID}/{TARGET_MESSAGE_ID}) "
+                f"「本文 改行」 **2pt** (名前付き、{AUTHOR_USER_ID})"
+            )
+        )
+        ensure(embeds[0].footer.text is not None and "日時はJST" in embeds[0].footer.text)
+
+    def test_all_messages_are_linked_but_long_content_is_abbreviated(self) -> None:
+        records = [
+            CynicismMessageRecord(i, CHANNEL_ID, datetime.datetime(2026, 7, 28, tzinfo=JST), "界" * 4500, (HUMAN_USER_ID,))
+            for i in range(23)
+        ]
+        embeds = self.make_embeds(records)
+        ensure(len(embeds) == 2)  # noqa: PLR2004 - 23件の抜粋は文字数上限で2ページに分かれる。
+        ensure(all(len(embed.description or "") <= EMBED_DESCRIPTION_LIMIT for embed in embeds))
+        ensure(all(len(embed) <= 6000 for embed in embeds))  # noqa: PLR2004 - DiscordのEmbed上限。
+        for current, following in pairwise(embeds):
+            next_line = (following.description or "").splitlines()[1]
+            ensure(len((current.description or "") + "\n" + next_line) > EMBED_DESCRIPTION_LIMIT)
+        text = "\n".join(embed.description or "" for embed in embeds)
+        ensure(text.count("界") == len(records) * MESSAGE_PREVIEW_LENGTH)
+        ensure(text.count("…") == len(records))
+        links = [f"https://discord.com/channels/{GUILD_ID}/{CHANNEL_ID}/{record.message_id})" for record in records]
+        ensure(all(text.count(link) == 1 for link in links))
+        ensure([text.index(link) for link in links] == sorted(text.index(link) for link in links))
+
+    def test_markdown_heavy_content_stays_within_embed_limits(self) -> None:
+        records = [
+            CynicismMessageRecord(i, CHANNEL_ID, datetime.datetime(2026, 7, 28, tzinfo=JST), "*" * 500, (HUMAN_USER_ID,))
+            for i in range(30)
+        ]
+        embeds = self.make_embeds(records)
+        ensure(all(len(embed.description or "") <= EMBED_DESCRIPTION_LIMIT for embed in embeds))
+        ensure(sum((embed.description or "").count("[07/28 00:00]") for embed in embeds) == len(records))
+
+    def test_empty_body_remains_readable(self) -> None:
+        record = CynicismMessageRecord(1, CHANNEL_ID, datetime.datetime(2026, 7, 28, tzinfo=JST), "", (HUMAN_USER_ID,))
+        description = self.make_embeds([record])[0].description or ""
+        ensure("(本文なし)" in description and "1pt" in description)
+
+    def test_empty_records_produce_no_embeds(self) -> None:
+        ensure(self.make_embeds([]) == [])
+
+
 class InProgressPeriodTest(unittest.TestCase):
     def test_embed_marks_a_period_that_has_not_ended_yet(self) -> None:
         ranking = build_sample_ranking()
@@ -925,9 +999,11 @@ class InteractionRecorder:
         self.user = user
         self.guild = None
         self.followup_kwargs: dict[str, object] | None = None
+        self.defer_kwargs: dict[str, object] | None = None
 
-    async def _defer(self, **_: object) -> None:
+    async def _defer(self, **kwargs: object) -> None:
         self.calls.append("defer")
+        self.defer_kwargs = kwargs
 
     async def _send_message(self, *_: object, **__: object) -> None:
         self.calls.append("response.send_message")
@@ -993,8 +1069,8 @@ class InteractionDeadlineTest(unittest.IsolatedAsyncioTestCase):
                 ensure(interaction.calls[-1] == "followup.send")
 
 
-class ExportMessagesTest(unittest.IsolatedAsyncioTestCase):
-    """発言一覧のCSV出力は、期間解決・チャンネル範囲判定・表示名解決を既存の実装に委譲する。"""
+class ShowMessagesTest(unittest.IsolatedAsyncioTestCase):
+    """発言の紹介は、期間解決・チャンネル範囲判定・表示名解決を既存の実装に委譲する。"""
 
     def build_use_cases(
         self,
@@ -1036,48 +1112,49 @@ class ExportMessagesTest(unittest.IsolatedAsyncioTestCase):
         interaction = InteractionRecorder()
         use_cases = self.build_use_cases()
 
-        await use_cases.export_messages(cast("Any", interaction), self.make_member(), "weekly", None)
+        await use_cases.show_messages(cast("Any", interaction), self.make_member(), "weekly", None)
 
         ensure(interaction.calls[0] == "defer", "DBアクセスより先に応答を保留する必要があります")
         ensure(interaction.calls[-1] == "followup.send")
+        ensure(interaction.defer_kwargs == {"ephemeral": True, "thinking": True})
 
     async def test_no_records_sends_a_notice_without_a_file(self) -> None:
         interaction = InteractionRecorder()
         use_cases = self.build_use_cases(records=[])
 
-        await use_cases.export_messages(cast("Any", interaction), self.make_member(), "weekly", None)
+        await use_cases.show_messages(cast("Any", interaction), self.make_member(), "weekly", None)
 
         ensure(interaction.followup_kwargs is not None)
         ensure("file" not in cast("dict[str, object]", interaction.followup_kwargs))
+        ensure(cast("dict[str, object]", interaction.followup_kwargs)["ephemeral"] is True)
 
-    async def test_csv_contains_one_row_per_message_with_the_expected_columns(self) -> None:
+    async def test_sends_compact_embeds_with_inline_reactors_without_notifications(self) -> None:
         interaction = InteractionRecorder()
-        post_time = datetime.datetime(2026, 7, 28, 21, 0, tzinfo=JST)
+        send = AsyncMock(return_value=SimpleNamespace(id=99))
+        interaction.followup.send = send
         records = [
             CynicismMessageRecord(
-                message_id=TARGET_MESSAGE_ID,
-                channel_id=CHANNEL_ID,
-                post_time=post_time,
-                content="そんなの意味なくない?",
-                reactor_ids=(HUMAN_USER_ID,),
+                i, CHANNEL_ID, datetime.datetime(2026, 7, 28, 21, tzinfo=JST), "@everyone " + "本文" * 1500, (HUMAN_USER_ID,)
             )
+            for i in range(23)
         ]
         use_cases = self.build_use_cases(records=records, display_names={HUMAN_USER_ID: "人間さん"})
-        member = self.make_member(display_name="発言者さん")
-
-        await use_cases.export_messages(cast("Any", interaction), member, "weekly", None)
-
-        kwargs = cast("dict[str, Any]", interaction.followup_kwargs)
-        ensure(not kwargs.get("ephemeral"), "他の利用者も見られるよう公開で送る必要があります")
-        attachment = kwargs["file"]
-        rows = list(csv.reader(io.StringIO(attachment.fp.read().decode("utf-8-sig"))))
-        ensure(rows[0] == list(MESSAGES_CSV_HEADER))
-        ensure(rows[1][0] == "発言者さん", "発言者列は対象メンバーの表示名にする必要があります")
-        ensure(rows[1][1] == "2026-07-28 21:00:00", "タイムスタンプはJSTで表示する必要があります")
-        ensure(rows[1][2] == "そんなの意味なくない?")
-        ensure(rows[1][3] == "1", "リアクション1件を1ポイントとして数える必要があります")
-        ensure(rows[1][4] == "人間さん", "🥶を向けたアカウントを向けた順に列挙する必要があります")
-        ensure(rows[1][5] == f"https://discord.com/channels/{GUILD_ID}/{CHANNEL_ID}/{TARGET_MESSAGE_ID}")
+        await use_cases.show_messages(
+            cast("Any", interaction), self.make_member(display_name="発言者さん"), "weekly", "2026-07-30"
+        )
+        ensure(send.await_count == 2)  # noqa: PLR2004 - 23件の抜粋は文字数上限で2ページに分かれる。
+        for call in send.await_args_list:
+            ensure(call.args == ())
+            ensure(isinstance(call.kwargs["embed"], discord.Embed))
+            ensure("file" not in call.kwargs and "files" not in call.kwargs)
+            ensure(call.kwargs["ephemeral"] is True)
+            ensure(call.kwargs["allowed_mentions"].to_dict() == {"parse": []})
+            ensure(not call.kwargs.get("suppress_embeds"))
+        text = "\n".join(call.kwargs["embed"].description for call in send.await_args_list)
+        ensure("**1pt** (人間さん)" in text and "リアクター:" not in text)
+        ensure("21:00:00" not in text)
+        cast("Any", use_cases._reactions).get_display_names.assert_awaited_once_with([HUMAN_USER_ID])  # noqa: SLF001
+        cast("Mock", use_cases._bot.dispatch).assert_not_called()  # noqa: SLF001
 
 
 class ScheduledReportTest(unittest.IsolatedAsyncioTestCase):

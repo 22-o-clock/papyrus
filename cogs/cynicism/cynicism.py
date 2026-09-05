@@ -116,7 +116,7 @@ class Cynicism(commands.Cog):
         """指定期間の順位を表示する。日付を省略した場合は進行中の期間を使う。"""
         await self._report_use_cases.ranking(interaction, period, start)
 
-    @cynicism.command(name="messages", description="指定メンバーが冷笑ポイントを獲得した発言をCSVで出力します。")
+    @cynicism.command(name="messages", description="指定メンバーが冷笑ポイントを獲得した発言をEmbedで紹介します。")
     @app_commands.describe(
         member="対象メンバー",
         period="集計期間の種別",
@@ -130,8 +130,8 @@ class Cynicism(commands.Cog):
         period: str = CynicismPeriodType.WEEKLY.value,
         start: str | None = None,
     ) -> None:
-        """指定メンバーの発言明細をCSVで出力する。"""
-        await self._report_use_cases.export_messages(interaction, member, period, start)
+        """指定メンバーの発言明細を、実行者だけにEmbedで紹介する。"""
+        await self._report_use_cases.show_messages(interaction, member, period, start)
 
     @cynicism.command(name="status", description="冷笑ポイントの集計状態と発表状態を表示します。")
     async def status(self, interaction: Interaction) -> None:
