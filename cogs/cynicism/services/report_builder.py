@@ -32,7 +32,7 @@ def format_rate(rate: float) -> str:
 def ranking_digest(ranking: CynicismRanking) -> str:
     """内容が変化したかを判定するための指紋を返す。"""
     parts = [
-        "fixed-points-v1",
+        "rate-primary-v3",
         ranking.period.period_type.value,
         ranking.period.start_date.isoformat(),
         str(ranking.qualification_threshold),
@@ -52,7 +52,7 @@ def build_empty_notice(period: CynicismPeriod) -> str:
 
 
 def build_ranking_embed(ranking: CynicismRanking, *, updated_at: datetime.datetime) -> discord.Embed:
-    """合計と冷笑率の王とランキング表をまとめる。"""
+    """冷笑率による王と参考ポイントをまとめる。"""
     # 期間が終わる前に見た場合は順位が確定していないため、途中経過であることを明示する。
     is_in_progress = updated_at < ranking.period.end_at
     title = f"{ranking.period.label}冷笑王 (集計中)" if is_in_progress else f"{ranking.period.label}冷笑王"
@@ -61,26 +61,16 @@ def build_ranking_embed(ranking: CynicismRanking, *, updated_at: datetime.dateti
         description += "\n※期間の途中経過です。順位はまだ確定していません。"
     embed = discord.Embed(title=title, description=description, color=EMBED_COLOR)
 
-    total_champion = ranking.total_champion
-    if total_champion is not None:
-        embed.add_field(name="👑 冷笑王 (合計)", value=_format_champion(total_champion), inline=False)
-
     rate_champion = ranking.rate_champion
     if rate_champion is None:
         embed.add_field(
-            name="🧊 冷笑率王 (平均)",
+            name="👑 冷笑王 (冷笑率)",
             value=f"該当なし (期間内{ranking.qualification_threshold}発言以上が資格ライン)",
             inline=False,
         )
     else:
-        embed.add_field(name="🧊 冷笑率王 (平均)", value=_format_champion(rate_champion), inline=False)
+        embed.add_field(name="👑 冷笑王 (冷笑率)", value=_format_champion(rate_champion), inline=False)
 
-    if ranking.total_entries:
-        embed.add_field(
-            name="合計ランキング",
-            value=_format_total_lines(ranking.total_entries),
-            inline=False,
-        )
     if ranking.rate_entries:
         embed.add_field(
             name=f"冷笑率ランキング (期間内{ranking.qualification_threshold}発言以上)",
@@ -88,6 +78,12 @@ def build_ranking_embed(ranking: CynicismRanking, *, updated_at: datetime.dateti
             inline=False,
         )
 
+    if ranking.total_entries:
+        embed.add_field(
+            name="参考: 合計ポイントランキング",
+            value=_format_total_lines(ranking.total_entries),
+            inline=False,
+        )
     embed.add_field(name="サマリ", value=_format_summary(ranking), inline=False)
     embed.set_footer(
         text=(f"{report_marker(ranking.period)} | 集計基準=発言の投稿日時 (JST) | 最終更新 {updated_at:%Y-%m-%d %H:%M}")
@@ -98,8 +94,8 @@ def build_ranking_embed(ranking: CynicismRanking, *, updated_at: datetime.dateti
 def _format_champion(entry: RankingEntry) -> str:
     """王として表示する1名分の内訳を返す。"""
     return (
-        f"**{entry.display_name}** — {format_points(entry.points)} pt\n"
-        f"冷笑率 {format_rate(entry.rate)} / 発言 {entry.message_count}件\n"
+        f"**{entry.display_name}** — 冷笑率 {format_rate(entry.rate)}\n"
+        f"冷笑ポイント {format_points(entry.points)} pt / 発言 {entry.message_count}件\n"
         f"冷笑認定された発言 {entry.cynical_message_count}件"
     )
 

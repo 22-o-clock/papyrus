@@ -296,6 +296,10 @@ class RankingTest(unittest.TestCase):
         ranking = build_ranking(period, counts, {1: 10, 2: 100}, identities)
         ensure(ranking.rate_champion is not None and ranking.rate_champion.member_id == LIGHT_POSTER_ID)
         ensure(ranking.total_champion is not None and ranking.total_champion.member_id == HEAVY_POSTER_ID)
+        embed = build_ranking_embed(ranking, updated_at=period.end_at)
+        ensure(embed.fields[0].name == "👑 冷笑王 (冷笑率)")
+        ensure(embed.fields[0].value is not None and "少数精鋭" in embed.fields[0].value)
+        ensure(embed.fields[1].name is not None and embed.fields[1].name.startswith("冷笑率ランキング"))
 
     def test_bot_authors_are_excluded_from_the_ranking(self) -> None:
         counts = [MemberReactionCounts(member_id=1, human_count=3, cynical_message_count=1)]
@@ -395,7 +399,7 @@ class ReportBuilderTest(unittest.TestCase):
 
         ensure(report_marker(period) == "cynicism-report:monthly:2026-07-01")
 
-    def test_embed_shows_both_champions(self) -> None:
+    def test_embed_shows_rate_champion_and_reference_points(self) -> None:
         ranking = build_sample_ranking()
 
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime(2026, 7, 31, 22, 0, tzinfo=JST))
@@ -403,8 +407,8 @@ class ReportBuilderTest(unittest.TestCase):
         ensure(embed.title == "週間冷笑王")
         ensure(embed.description is not None and embed.description.startswith("2026-07-24 22:00 〜 2026-07-31 22:00 (JST)"))
         field_names = [field.name for field in embed.fields]
-        ensure(any(name is not None and "冷笑王 (合計)" in name for name in field_names))
-        ensure(any(name is not None and "冷笑率王 (平均)" in name for name in field_names))
+        ensure(any(name is not None and "参考: 合計ポイントランキング" in name for name in field_names))
+        ensure(any(name is not None and "冷笑王 (冷笑率)" in name for name in field_names))
         footer_text = embed.footer.text
         if footer_text is None:
             self.fail("フッターに識別子が必要です")
@@ -419,7 +423,7 @@ class ReportBuilderTest(unittest.TestCase):
 
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime(2026, 7, 31, 22, 0, tzinfo=JST))
 
-        rate_field = next(field for field in embed.fields if field.name is not None and "冷笑率王" in field.name)
+        rate_field = next(field for field in embed.fields if field.name is not None and "冷笑王" in field.name)
         ensure(rate_field.value is not None and "該当なし" in rate_field.value)
 
     def test_digest_is_stable_for_the_same_ranking(self) -> None:
