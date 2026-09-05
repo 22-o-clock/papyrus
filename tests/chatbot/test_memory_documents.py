@@ -9,13 +9,11 @@ from cogs.chatbot.responses_api import (
     MemoryDocumentShortenResult,
     MemoryDocumentUpdate,
     MemoryDocumentUpdateResult,
-    MessageInMemory,
 )
 from cogs.chatbot.use_cases.long_term_memory import (
     LongTermMemoryUseCases,
     MemoryDocumentValidationError,
 )
-from cogs.chatbot.use_cases.memory_search import MemorySearchUseCases
 
 EXPECTED_PERSON_TARGET_CHARACTERS = 1000
 ONE_HOUR_SECONDS = 3600
@@ -24,112 +22,6 @@ ONE_HOUR_SECONDS = 3600
 def person_document(character_count: int) -> str:
     headings = "# 人物の記憶\n\n## 基本情報\n\n## 嗜好・関心\n\n## 関係・継続事項\n\n"
     return headings + ("記" * (character_count - len(headings)))
-
-
-class MemoryResponseContextTest(unittest.IsolatedAsyncioTestCase):
-    async def test_selects_authors_mentions_replies_and_resolved_aliases(self) -> None:
-        channel_id = 50
-        prompt_messages = [
-            MessageInMemory(
-                message_id=1,
-                author_id=10,
-                author_name="発言者",
-                content="別の人についての発言",
-                reply_to_message_id=99,
-                mentioned_user_ids=[20],
-                timestamp=datetime(2026, 7, 26, tzinfo=UTC),
-            )
-        ]
-        short_term_memory = SimpleNamespace(
-            memory=prompt_messages,
-            get_prompt_messages=Mock(return_value=prompt_messages),
-        )
-        document_repository = SimpleNamespace(
-            get_for_users=AsyncMock(
-                return_value=[
-                    SimpleNamespace(document_key="bot", content="Bot文書"),
-                    SimpleNamespace(document_key="shared", content="共有文書"),
-                ]
-            )
-        )
-        message_repository = SimpleNamespace(get_by_ids=AsyncMock(return_value=[SimpleNamespace(author_id=30)]))
-        use_cases = MemorySearchUseCases(
-            cast("Any", SimpleNamespace(user=SimpleNamespace(id=999))),
-            cast("Any", {channel_id: SimpleNamespace(short_term_memory=short_term_memory)}),
-            cast("Any", document_repository),
-            cast("Any", SimpleNamespace()),
-            cast("Any", message_repository),
-        )
-
-        context = await use_cases.build_response_context(channel_id, {"別名": 40})
-
-        document_repository.get_for_users.assert_awaited_once_with({10, 20, 30, 40})
-        if "## bot\nBot文書" not in context or "## shared\n共有文書" not in context:
-            self.fail("Bot文書と共有文書を回答文脈へ整形できていません")
-
-    async def test_builds_pending_index_without_exposing_content_until_tool_use(self) -> None:
-        channel_id = 50
-        prompt_messages = [
-            MessageInMemory(
-                message_id=1,
-                author_id=10,
-                author_name="発言者",
-                content="現在の会話",
-                reply_to_message_id=None,
-                mentioned_user_ids=[],
-                timestamp=datetime(2026, 7, 27, tzinfo=UTC),
-            )
-        ]
-        pending_message = SimpleNamespace(
-            message_id=2,
-            channel_id=60,
-            author_id=20,
-            author_name="別の発言者",
-            content="未反映の重要情報",
-            reply_to_message_id=None,
-            mentioned_user_ids=[],
-            created_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
-            is_bot=False,
-            is_self=False,
-            is_forwarded=False,
-            is_long_term_memory_excluded=False,
-        )
-        repository = SimpleNamespace(
-            get_response_snapshot=AsyncMock(
-                return_value=(
-                    [SimpleNamespace(document_key="shared", content="共有文書")],
-                    [pending_message],
-                )
-            )
-        )
-        bot = SimpleNamespace(
-            user=SimpleNamespace(id=999),
-            get_channel=Mock(return_value=SimpleNamespace(name="別チャンネル")),
-        )
-        use_cases = MemorySearchUseCases(
-            cast("Any", bot),
-            cast(
-                "Any",
-                {
-                    channel_id: SimpleNamespace(
-                        short_term_memory=SimpleNamespace(
-                            get_prompt_messages=Mock(return_value=prompt_messages),
-                        )
-                    )
-                },
-            ),
-            cast("Any", repository),
-            cast("Any", SimpleNamespace()),
-            cast("Any", SimpleNamespace(get_by_ids=AsyncMock(return_value=[]))),
-        )
-
-        context = await use_cases.build_response_memory(channel_id)
-
-        if "未反映の重要情報" in context.pending_index or "別チャンネル" not in context.pending_index:
-            self.fail("判断用索引へ本文を露出しているか、チャンネル情報が不足しています")
-        if "未反映の重要情報" not in context.pending_context:
-            self.fail("Function tool用の未反映本文を構築できていません")
-        repository.get_response_snapshot.assert_awaited_once_with({10}, exclude_channel_id=channel_id)
 
 
 class MemorySourceExclusionTest(unittest.IsolatedAsyncioTestCase):

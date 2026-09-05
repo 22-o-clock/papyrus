@@ -5,7 +5,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.runtime_environment import get_runtime_environment
 
-from .channel_roles import ChannelRole
 from .use_cases.alias_excel_management import AliasExcelManagementUseCases
 from .use_cases.conversation import ConversationUseCases
 
@@ -18,7 +17,6 @@ class ChatBot(commands.Cog):
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.runtime_environment = get_runtime_environment()
         self.conversation_use_cases = ConversationUseCases(bot, session_factory)
-        self.settings_use_cases = self.conversation_use_cases.settings_use_cases
         self.custom_profile_use_cases = self.conversation_use_cases.custom_profile_use_cases
         self.excel_management_use_cases = AliasExcelManagementUseCases(session_factory)
 
@@ -57,19 +55,6 @@ class ChatBot(commands.Cog):
     @commands.Cog.listener()
     async def on_raw_reaction_clear_emoji(self, payload: discord.RawReactionClearEmojiEvent) -> None:
         await self.conversation_use_cases.on_raw_reaction_change(payload.message_id, payload.channel_id)
-
-    @chatbot.command(name="role_show", description="このチャンネルでのChatbotの役割を表示します")
-    async def show_chatbot_role(self, interaction: discord.Interaction) -> None:
-        await self.settings_use_cases.show_role(interaction)
-
-    @chatbot.command(name="role_set", description="このチャンネルでのChatbotの役割を変更します")
-    @app_commands.describe(role="assistant または chat を選択します")
-    async def set_chatbot_role(self, interaction: discord.Interaction, role: ChannelRole) -> None:
-        await self.settings_use_cases.set_role(interaction, role)
-
-    @chatbot.command(name="role_reset", description="このチャンネル固有のChatbot役割を解除します")
-    async def reset_chatbot_role(self, interaction: discord.Interaction) -> None:
-        await self.settings_use_cases.reset_role(interaction)
 
     @chatbot.command(name="profile_save", description="Chatbotのカスタムプロファイルを保存します")
     @app_commands.describe(

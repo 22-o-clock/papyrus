@@ -2,27 +2,10 @@ import asyncio
 import datetime
 from dataclasses import dataclass, field
 
-from discord import Message
-
-from .custom_profile import CustomProfile
-
 
 @dataclass
 class ChannelProcessingState:
-    """チャンネルごとの生成状態と生成中に受信したメッセージを保持します。"""
+    """チャンネル履歴の更新ロックと最後の人間投稿時刻を保持します。"""
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    generating: bool = False
-    pending_messages: list[Message] = field(default_factory=list)
-    queued_response_message: Message | None = None
-    queued_response_is_explicit_call: bool = False
-    debounce_task: asyncio.Task[None] | None = None
-    debounced_response_message: Message | None = None
-    debounced_response_is_explicit_call: bool = False
-    generation_revision: int = 0
     last_human_message_timestamp: datetime.datetime | None = None
-    queued_custom_profile: CustomProfile | None = None
-    debounced_custom_profile: CustomProfile | None = None
-    active_response_message: Message | None = None
-    active_response_is_explicit_call: bool = False
-    active_custom_profile: CustomProfile | None = None

@@ -98,9 +98,9 @@ jobs:
           AUDIT_IMMUNITY: ${{ secrets.AUDIT_IMMUNITY }}
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           LASTFM_IDS: ${{ secrets.LASTFM_IDS }}
-          BOT_ENVIRONMENT: production
-          ENABLED_COGS: all
-          LOG_LEVEL: INFO
+          BOT_ENVIRONMENT: ${{ secrets.BOT_ENVIRONMENT }}
+          ENABLED_COGS: ${{ secrets.ENABLED_COGS }}
+          LOG_LEVEL: ${{ secrets.LOG_LEVEL }}
         run: |
           container_env_file="$(mktemp "${RUNNER_TEMP}/papyrus-container-env.XXXXXX")"
           trap 'rm -f "$container_env_file"' EXIT
