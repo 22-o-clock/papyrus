@@ -5,6 +5,7 @@ import hashlib
 import io
 
 import discord
+from discord.utils import escape_markdown
 
 from cogs.cynicism.constants import RANKING_DISPLAY_LIMIT
 from cogs.cynicism.models import CynicismRanking, RankingEntry
@@ -38,6 +39,7 @@ def ranking_digest(ranking: CynicismRanking) -> str:
         ranking.period.period_type.value,
         ranking.period.start_date.isoformat(),
         str(ranking.qualification_threshold),
+        str(ranking.excluded_channel_count),
     ]
     for section in (ranking.total_entries, ranking.rate_entries):
         parts.extend(
@@ -48,6 +50,7 @@ def ranking_digest(ranking: CynicismRanking) -> str:
     parts.extend(
         f"{top.jump_url}:{top.member_id}:{top.display_name}:{format_points(top.points)}" for top in ranking.top_messages
     )
+    parts.extend(f"reactor:{entry.member_id}:{entry.display_name}:{entry.points}" for entry in ranking.reactor_contributions)
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
@@ -131,12 +134,34 @@ def _format_rate_lines(entries: tuple[RankingEntry, ...]) -> str:
 
 
 def _format_summary(ranking: CynicismRanking) -> str:
-    """全体の集計値と、冷笑率の読み方の注意を返す。"""
-    return (
-        f"総ポイント {format_points(ranking.total_points)} pt\n"
-        f"対象 {ranking.member_count}名 / 資格ライン到達 {ranking.qualified_member_count}名\n"
-        "※冷笑率はポイントを発言数で割った値のため、100%を超えることがあります。"
+    """総ポイントと付与者別内訳、集計対象人数を返す。長い内訳は添付へ案内する。"""
+    total = f"総ポイント {format_points(ranking.total_points)} pt"
+    members = (
+        f"対象 {ranking.member_count}名 / 資格ライン到達 {ranking.qualified_member_count}名"
+        f" / 除外対象 {ranking.excluded_channel_count}件 (チャンネル・スレッド)"
     )
+    breakdown = _format_reactor_contributions(ranking)
+    if breakdown:
+        if len(f"{total} ({breakdown})\n{members}") <= EMBED_FIELD_VALUE_LIMIT:
+            total += f" ({breakdown})"
+        else:
+            total += " (付与者別の全内訳は添付ファイルをご覧ください)"
+    return f"{total}\n{members}"
+
+
+def _format_reactor_contributions(ranking: CynicismRanking) -> str:
+    """付与ポイント順の内訳を、メンションせず読点で区切る。"""
+    return "、".join(f"{escape_markdown(entry.display_name)} {entry.points}pt" for entry in ranking.reactor_contributions)
+
+
+def build_report_files(ranking: CynicismRanking) -> list[discord.File]:
+    """最多発言と付与者別内訳のうち、Embedに収まらない全件を添付する。"""
+    files = build_top_messages_files(ranking)
+    breakdown = _format_reactor_contributions(ranking)
+    if breakdown and breakdown not in _format_summary(ranking):
+        text = "\n".join(f"{entry.display_name}: {entry.points}pt" for entry in ranking.reactor_contributions)
+        files.append(discord.File(io.BytesIO(text.encode("utf-8")), filename="cynicism_reactor_points.txt"))
+    return files
 
 
 def _format_top_messages(ranking: CynicismRanking) -> str:

@@ -20,6 +20,7 @@ from cogs.cynicism.models import (
     CynicismSettings,
     MemberReactionCounts,
     RankedMemberIdentity,
+    ReactorContribution,
     TopCynicismMessage,
 )
 from cogs.cynicism.periods import (
@@ -47,6 +48,7 @@ from cogs.cynicism.services.reaction_filter import is_cynicism_emoji
 from cogs.cynicism.services.report_builder import (
     build_empty_notice,
     build_ranking_embed,
+    build_report_files,
     build_top_messages_files,
     ranking_digest,
     report_marker,
@@ -393,18 +395,45 @@ class ReportBuilderTest(unittest.TestCase):
         for message_counts, qualified_count in (({1: 10, 2: 1}, 1), ({1: 1, 2: 1}, 0), ({1: 10, 2: 10}, 2)):
             with self.subTest(qualified_count=qualified_count):
                 ranking = build_ranking(sample.period, counts, message_counts, identities)
+                ranking = replace(
+                    ranking,
+                    reactor_contributions=(ReactorContribution(3, "付与者A", 8), ReactorContribution(4, "付与者B", 4)),
+                    excluded_channel_count=2,
+                )
                 embed = build_ranking_embed(ranking, updated_at=ranking.period.end_at)
                 summary = next(field for field in embed.fields if field.name == "サマリ")
 
                 ensure(
                     summary.value
                     == (
-                        "総ポイント 12 pt\n"
-                        f"対象 2名 / 資格ライン到達 {qualified_count}名\n"
-                        "※冷笑率はポイントを発言数で割った値のため、100%を超えることがあります。"
+                        "総ポイント 12 pt (付与者A 8pt、付与者B 4pt)\n"
+                        f"対象 2名 / 資格ライン到達 {qualified_count}名 / 除外対象 2件 (チャンネル・スレッド)"
                     ),
                     f"サマリの出力が想定と異なります: {summary.value!r}",
                 )
+
+    def test_long_reactor_breakdown_is_attached_without_losing_entries(self) -> None:
+        ranking = replace(
+            build_sample_ranking(),
+            reactor_contributions=tuple(ReactorContribution(index, "付与者" * 20 + str(index), 1) for index in range(50)),
+        )
+        embed = build_ranking_embed(ranking, updated_at=ranking.period.end_at)
+        summary = next(field for field in embed.fields if field.name == "サマリ")
+        ensure(len(summary.value or "") <= 1024)  # noqa: PLR2004 - Discordのフィールド上限。
+        files = build_report_files(ranking)
+        ensure(len(files) == 1)
+        content = files[0].fp.read().decode("utf-8")
+        ensure(len(content.splitlines()) == len(ranking.reactor_contributions))
+        for entry in ranking.reactor_contributions:
+            ensure(f"{entry.display_name}: {entry.points}pt" in content)
+
+    def test_reactor_breakdown_and_exclusion_count_change_digest(self) -> None:
+        ranking = build_sample_ranking()
+        ensure(ranking_digest(ranking) != ranking_digest(replace(ranking, excluded_channel_count=1)))
+        ensure(
+            ranking_digest(ranking)
+            != ranking_digest(replace(ranking, reactor_contributions=(ReactorContribution(3, "付与者", 12),)))
+        )
 
     def test_marker_identifies_the_period_type_and_start(self) -> None:
         period = period_from_start_date(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))

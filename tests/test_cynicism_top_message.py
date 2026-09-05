@@ -102,6 +102,20 @@ class TopMessageQueryTest(unittest.IsolatedAsyncioTestCase):
         self.database.connection.execute("DELETE FROM talkdata.cynicism_excluded_channels WHERE channel_id = 10")
         ensure(await self.top(debug=True) == expected)
 
+    async def test_reactor_breakdown_uses_same_exclusions_and_deduplicates(self) -> None:
+        self.database.add_message(1, post_time="2026-07-25 00:00:00.000000")
+        self.database.add_message(2, channel_id=11, post_time="2026-07-25 00:00:00.000000")
+        self.database.add_message(3, member_id=100, post_time="2026-07-25 00:00:00.000000")
+        self.database.add_reactions(1, [1, 100, 3, 3, 4])
+        self.database.add_reactions(1, [5], source="reply")
+        self.database.add_reactions(2, [3])
+        self.database.add_reactions(3, [3])
+        scope = ChannelScope(None, frozenset())
+        kwargs: dict[str, Any] = {"member_ids": [1], "scope": scope, "papyrus_user_id": PAPYRUS_USER_ID}
+        ensure(await self.repository.aggregate_reactor_points(self.period, **kwargs) == {3: 2, 4: 1})
+        self.database.connection.execute("INSERT INTO talkdata.cynicism_excluded_channels VALUES (10)")
+        ensure(await self.repository.aggregate_reactor_points(self.period, **kwargs) == {3: 1})
+
     async def test_period_scope_and_eligible_authors_are_applied(self) -> None:
         rows = (
             (1, 1, 10, "2026-07-24 22:00:00.000000"),
@@ -149,6 +163,8 @@ class TopMessageRankingTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         reactions = SimpleNamespace(
+            count_excluded_channels=AsyncMock(return_value=2),
+            aggregate_reactor_points=AsyncMock(return_value={3: 4, 4: 2}),
             aggregate_counts=AsyncMock(return_value=[MemberReactionCounts(i, 3, 1) for i in (1, 2, 100)]),
             aggregate_message_counts=AsyncMock(return_value={1: 10, 2: 1, 100: 20}),
             get_display_names=AsyncMock(return_value={}),
@@ -164,4 +180,7 @@ class TopMessageRankingTest(unittest.IsolatedAsyncioTestCase):
         ensure(ranking.top_messages and ranking.top_messages[0].points == 3)  # noqa: PLR2004
         ensure([top.message_id for top in ranking.top_messages] == [20, 21])
         ensure(reactions.most_reacted_messages.await_args.kwargs["member_ids"] == [1, 2])
+        ensure(reactions.aggregate_reactor_points.await_args.kwargs["member_ids"] == [1, 2])
+        ensure(ranking.excluded_channel_count == 2)  # noqa: PLR2004 - 登録済みの除外設定。
+        ensure(sum(entry.points for entry in ranking.reactor_contributions) == ranking.total_points)
         ensure(ranking.top_messages and ranking.top_messages[0].jump_url == "https://discord.com/channels/500/10/20")

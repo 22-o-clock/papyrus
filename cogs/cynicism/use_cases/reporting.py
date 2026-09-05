@@ -11,7 +11,7 @@ from discord import Interaction, Member
 from discord.ext import commands
 
 from cogs.cynicism.constants import JST
-from cogs.cynicism.models import CynicismRanking, TopCynicismMessage
+from cogs.cynicism.models import CynicismRanking, ReactorContribution, TopCynicismMessage
 from cogs.cynicism.periods import (
     CynicismPeriod,
     CynicismPeriodType,
@@ -30,7 +30,7 @@ from cogs.cynicism.services.ranking import build_ranking
 from cogs.cynicism.services.report_builder import (
     build_empty_notice,
     build_ranking_embed,
-    build_top_messages_files,
+    build_report_files,
     ranking_digest,
 )
 from cogs.cynicism.services.schedule import publishable_periods, refreshable_periods
@@ -94,7 +94,7 @@ class CynicismReportUseCases:
             await interaction.followup.send(build_empty_notice(period))
             return
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime.now(JST))
-        message = await interaction.followup.send(embed=embed, files=build_top_messages_files(ranking), wait=True)
+        message = await interaction.followup.send(embed=embed, files=build_report_files(ranking), wait=True)
         # 表示のたびにChatbotが読み込んでトークンを消費しないよう、長期記憶の根拠から外す。
         self._bot.dispatch("exclude_from_long_term_memory", message)
 
@@ -226,6 +226,7 @@ class CynicismReportUseCases:
 
         """
         scope = channel_scope(self._runtime_environment)
+        excluded_channel_count = await self._reactions.count_excluded_channels(self._server_id)
         papyrus_user_id = self._bot.user.id if self._bot.user is not None else 0
         counts = await self._reactions.aggregate_counts(
             period,
@@ -233,7 +234,7 @@ class CynicismReportUseCases:
             scope=scope,
         )
         if not counts:
-            return build_ranking(period, [], {}, {})
+            return replace(build_ranking(period, [], {}, {}), excluded_channel_count=excluded_channel_count)
         message_counts = await self._reactions.aggregate_message_counts(period, scope=scope)
         member_ids = [entry.member_id for entry in counts]
         stored_names = await self._reactions.get_display_names(member_ids)
@@ -250,8 +251,27 @@ class CynicismReportUseCases:
             scope=scope,
             papyrus_user_id=papyrus_user_id,
         )
+        reactor_points = await self._reactions.aggregate_reactor_points(
+            period,
+            member_ids=[entry.member_id for entry in ranking.total_entries],
+            scope=scope,
+            papyrus_user_id=papyrus_user_id,
+        )
+        reactor_ids = list(reactor_points)
+        reactor_names = await self._reactions.get_display_names(reactor_ids)
+        reactors = resolve_identities(self._bot, guild or self._bot.get_guild(self._server_id), reactor_ids, reactor_names)
         return replace(
             ranking,
+            excluded_channel_count=excluded_channel_count,
+            reactor_contributions=tuple(
+                sorted(
+                    (
+                        ReactorContribution(member_id, reactors[member_id].display_name, points)
+                        for member_id, points in reactor_points.items()
+                    ),
+                    key=lambda entry: (-entry.points, entry.display_name.casefold(), entry.member_id),
+                )
+            ),
             top_messages=tuple(
                 TopCynicismMessage(
                     message_id=top.message_id,
@@ -282,7 +302,7 @@ class CynicismReportUseCases:
                 return None
         digest = ranking_digest(ranking)
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime.now(JST))
-        result = await self._delivery.upsert(period, embed, digest, files=build_top_messages_files(ranking))
+        result = await self._delivery.upsert(period, embed, digest, files=build_report_files(ranking))
         if result.changed:
             await self._reports.save_posted(
                 period,

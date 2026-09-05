@@ -100,6 +100,15 @@ class RankingEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class ReactorContribution:
+    """対象となる発言へリアクターが付けたポイントの合計。"""
+
+    member_id: int
+    display_name: str
+    points: int
+
+
+@dataclass(frozen=True, slots=True)
 class CynicismRanking:
     """冷笑率ランキングと参考の合計順位、最多ポイントの発言。
 
@@ -112,6 +121,8 @@ class CynicismRanking:
     rate_entries: tuple[RankingEntry, ...]
     qualification_threshold: int
     top_messages: "tuple[TopCynicismMessage, ...]" = ()
+    reactor_contributions: tuple[ReactorContribution, ...] = ()
+    excluded_channel_count: int = 0
 
     @property
     def total_points(self) -> int:

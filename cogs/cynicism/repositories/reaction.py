@@ -249,6 +249,43 @@ class CynicismReactionRepository:
             rows = (await session.execute(statement)).all()
             return [MessageReactionCounts(*row) for row in rows]
 
+    async def count_excluded_channels(self, guild_id: int) -> int:
+        """サーバーで明示的に登録されている除外設定の件数を返す。"""
+        async with self._database.session() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(CynicismExcludedChannel)
+                    .where(CynicismExcludedChannel.guild_id == guild_id)
+                )
+                or 0
+            )
+
+    async def aggregate_reactor_points(
+        self,
+        period: CynicismPeriod,
+        *,
+        member_ids: Sequence[int],
+        scope: ChannelScope,
+        papyrus_user_id: int,
+    ) -> dict[int, int]:
+        """集計対象の発言者へ誰が何ポイント付けたかを返す。
+
+        メンバー順位と同じ期間・除外条件を使い、同じ発言への通常・スーパーリアクションを重複除去する。
+        member_idsにはBotを除外済みの発言者IDを渡し、内訳の合計をランキングの総ポイントと揃える。
+        """
+        if not member_ids:
+            return {}
+        statement = (
+            select(CynicismReaction.reactor_id, func.count(distinct(CynicismReaction.message_id)))
+            .select_from(CynicismReaction)
+            .join(*_talkdata_join())
+            .where(DiscordMessage.member_id.in_(member_ids), *_reaction_conditions(period, scope, papyrus_user_id))
+            .group_by(CynicismReaction.reactor_id)
+        )
+        async with self._database.session() as session:
+            return {row[0]: row[1] for row in (await session.execute(statement)).all()}
+
     async def get_display_names(self, member_ids: Sequence[int]) -> dict[int, str]:
         """TalkDataに記録された表示名を返す。退出済みメンバーの表示に使う。"""
         if not member_ids:
