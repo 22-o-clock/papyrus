@@ -59,6 +59,17 @@ class CynicismConfiguration(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(TIMESTAMP(timezone=True))
 
 
+class CynicismExcludedChannel(Base):
+    """サーバーのメンバーが設定した集計対象外のチャンネル・スレッド。"""
+
+    __tablename__ = "cynicism_excluded_channels"
+    __table_args__ = ({"schema": TALKDATA_SCHEMA},)
+
+    channel_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    name: Mapped[str] = mapped_column(Text)
+
+
 class CynicismReportDelivery(Base):
     """期間種別ごとの、ランキング発表の処理記録。
 
@@ -122,6 +133,7 @@ class CynicismDatabase:
                         cast("Table", DiscordMessage.__table__),
                         cast("Table", CynicismReaction.__table__),
                         cast("Table", CynicismConfiguration.__table__),
+                        cast("Table", CynicismExcludedChannel.__table__),
                         cast("Table", CynicismReportDelivery.__table__),
                     ],
                 )

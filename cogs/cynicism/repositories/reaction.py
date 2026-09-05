@@ -10,7 +10,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
 from cogs.cynicism.constants import JST, REACTION_SOURCE
-from cogs.cynicism.database import CynicismDatabase, CynicismReaction
+from cogs.cynicism.database import CynicismDatabase, CynicismExcludedChannel, CynicismReaction
 from cogs.cynicism.models import ChannelScope, CynicismMessageRecord, MemberReactionCounts, MessageReactionCounts
 from cogs.cynicism.periods import CynicismPeriod
 from cogs.talkdata.database import DiscordMember, DiscordMessage
@@ -291,9 +291,10 @@ def _scope_conditions(
     channel_id_column: InstrumentedAttribute[int],
     scope: ChannelScope,
 ) -> list[ColumnElement[bool]]:
-    """集計対象のチャンネル範囲を絞り込み条件へ変換する。"""
+    """環境の担当範囲と永続化した除外設定を、分子・分母共通の条件にする。"""
+    conditions = [channel_id_column.notin_(select(CynicismExcludedChannel.channel_id))]
     if scope.included_channel_ids is not None:
-        return [channel_id_column.in_(scope.included_channel_ids)]
-    if scope.excluded_channel_ids:
-        return [channel_id_column.notin_(scope.excluded_channel_ids)]
-    return []
+        conditions.append(channel_id_column.in_(scope.included_channel_ids))
+    elif scope.excluded_channel_ids:
+        conditions.append(channel_id_column.notin_(scope.excluded_channel_ids))
+    return conditions

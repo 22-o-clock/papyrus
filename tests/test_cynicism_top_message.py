@@ -36,6 +36,7 @@ class QueryDatabase:
             "CREATE TABLE talkdata.message (id INTEGER, channel_id INTEGER, member_id INTEGER, "
             "post_time TEXT, edit_count INTEGER);"
             "CREATE TABLE talkdata.cynicism_reaction (message_id INTEGER, reactor_id INTEGER, source TEXT);"
+            "CREATE TABLE talkdata.cynicism_excluded_channels (channel_id INTEGER PRIMARY KEY);"
         )
 
     @asynccontextmanager
@@ -89,6 +90,17 @@ class TopMessageQueryTest(unittest.IsolatedAsyncioTestCase):
         ensure(await self.top() == [MessageReactionCounts(2, 10, 1, 2)])
         self.database.connection.execute("DELETE FROM talkdata.cynicism_reaction WHERE message_id = 2")
         ensure(await self.top() == [MessageReactionCounts(1, 10, 1, 1)])
+
+    async def test_persisted_exclusion_applies_in_debug_and_is_reversible(self) -> None:
+        self.database.add_message(1, post_time="2026-07-25 00:00:00.000000")
+        self.database.add_reactions(1, [3, 4])
+        expected = [MessageReactionCounts(1, 10, 1, 2)]
+        ensure(await self.top(debug=True) == expected)
+        self.database.connection.execute("INSERT INTO talkdata.cynicism_excluded_channels VALUES (10)")
+        ensure(await self.top(debug=True) == [])
+        ensure(await self.top() == [])
+        self.database.connection.execute("DELETE FROM talkdata.cynicism_excluded_channels WHERE channel_id = 10")
+        ensure(await self.top(debug=True) == expected)
 
     async def test_period_scope_and_eligible_authors_are_applied(self) -> None:
         rows = (

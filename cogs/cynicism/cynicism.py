@@ -13,8 +13,10 @@ from .constants import REPORT_CHECK_INTERVAL_MINUTES
 from .database import CynicismDatabase
 from .periods import CynicismPeriodType
 from .repositories.configuration import CynicismConfigurationRepository
+from .repositories.exclusions import CynicismExclusionRepository
 from .repositories.reaction import CynicismReactionRepository
 from .repositories.report import CynicismReportRepository
+from .use_cases.exclusions import CynicismExclusionUseCases
 from .use_cases.reporting import CynicismReportUseCases
 from .use_cases.tracking import CynicismTrackingUseCases
 
@@ -40,6 +42,7 @@ class Cynicism(commands.Cog):
         reaction_repository = CynicismReactionRepository(self._database)
         configuration_repository = CynicismConfigurationRepository(self._database)
         report_repository = CynicismReportRepository(self._database)
+        self._exclusion_use_cases = CynicismExclusionUseCases(CynicismExclusionRepository(self._database))
         self._tracking_use_cases = CynicismTrackingUseCases(
             bot,
             self._runtime_environment,
@@ -132,6 +135,35 @@ class Cynicism(commands.Cog):
     ) -> None:
         """指定メンバーの発言明細を、実行者だけにEmbedで紹介する。"""
         await self._report_use_cases.show_messages(interaction, member, period, start)
+
+    @cynicism.command(name="exclude", description="指定チャンネル/スレッドだけを冷笑ランキングから除外します。")
+    @app_commands.guild_only()
+    @app_commands.describe(channel="除外対象(省略時は実行場所、配下のスレッドは含みません)")
+    async def exclude(
+        self,
+        interaction: Interaction,
+        channel: discord.TextChannel | discord.ForumChannel | discord.Thread | None = None,
+    ) -> None:
+        """全メンバーに、指定した場所の集計除外を許可する。"""
+        await self._exclusion_use_cases.exclude(interaction, channel)
+
+    @cynicism.command(name="include", description="チャンネル/スレッドの冷笑ランキング除外を解除します。")
+    @app_commands.guild_only()
+    @app_commands.describe(channel_id="除外一覧から選択、またはIDを指定(省略時は実行場所)")
+    async def include(self, interaction: Interaction, channel_id: str | None = None) -> None:
+        """全メンバーに、保存された除外設定の解除を許可する。"""
+        await self._exclusion_use_cases.include(interaction, channel_id)
+
+    @include.autocomplete("channel_id")
+    async def include_autocomplete(self, interaction: Interaction, current: str) -> list[app_commands.Choice[str]]:
+        """解除する設定の候補を返す。"""
+        return await self._exclusion_use_cases.autocomplete(interaction, current)
+
+    @cynicism.command(name="exclusions", description="冷笑ランキングから除外しているチャンネル/スレッドを一覧表示します。")
+    @app_commands.guild_only()
+    async def exclusions(self, interaction: Interaction) -> None:
+        """全メンバーに、保存された除外設定の一覧を表示する。"""
+        await self._exclusion_use_cases.list_excluded(interaction)
 
     @cynicism.command(name="status", description="冷笑ポイントの集計状態と発表状態を表示します。")
     async def status(self, interaction: Interaction) -> None:

@@ -274,10 +274,12 @@ class CynicismReportUseCases:
         """集計結果を作り、既存投稿の編集または新規投稿を行う。"""
         ranking = await self.build_ranking_for(period)
         if ranking.is_empty:
-            # 対象が無い期間は投稿しない。定期処理では処理済みとして記録し、再集計を繰り返さない。
-            if record_empty:
-                await self._reports.save_empty(period, self._target_id, processed_at=datetime.datetime.now(JST))
-            return None
+            existing = await self._reports.get_delivery(period, self._target_id)
+            if existing is None or not existing.is_posted:
+                # 新規の空期間は投稿しない。既存の発表は除外で0件になっても更新して古い順位を残さない。
+                if record_empty:
+                    await self._reports.save_empty(period, self._target_id, processed_at=datetime.datetime.now(JST))
+                return None
         digest = ranking_digest(ranking)
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime.now(JST))
         result = await self._delivery.upsert(period, embed, digest, files=build_top_messages_files(ranking))
