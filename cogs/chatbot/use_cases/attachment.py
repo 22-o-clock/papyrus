@@ -8,7 +8,7 @@ from cogs.chatbot.constants import ATTACHMENT_CONTEXT_MAX_CHARACTERS
 from cogs.chatbot.models import AttachmentAnalysis
 from cogs.chatbot.observability import observe_chatbot_api_call
 from cogs.chatbot.repositories.short_term_message import ChatbotShortTermMessageRepository
-from cogs.chatbot.responses_api import AttachmentInMemory, ResponsePipeline
+from cogs.chatbot.responses_api import AttachmentInMemory, ShortTermMemory
 
 logger = getLogger(__name__)
 
@@ -19,11 +19,11 @@ class AttachmentUseCases:
     def __init__(
         self,
         message_repository: ChatbotShortTermMessageRepository,
-        response_pipelines: dict[int, ResponsePipeline],
+        short_term_memories: dict[int, ShortTermMemory],
         background_tasks: set[asyncio.Task[None]],
     ) -> None:
         self._message_repository = message_repository
-        self._response_pipelines = response_pipelines
+        self._short_term_memories = short_term_memories
         self._background_tasks = background_tasks
 
     def get_kind(self, content_type: str | None) -> str | None:
@@ -135,5 +135,5 @@ class AttachmentUseCases:
 
     def update_context(self, message_id: int, attachment: AttachmentInMemory) -> None:
         """解析結果を稼働中の全短期記憶へ反映する。"""
-        for response_pipeline in self._response_pipelines.values():
-            response_pipeline.short_term_memory.set_attachment_analysis(message_id, attachment)
+        for memory in self._short_term_memories.values():
+            memory.set_attachment_analysis(message_id, attachment)

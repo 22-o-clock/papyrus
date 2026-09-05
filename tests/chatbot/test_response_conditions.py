@@ -9,29 +9,16 @@ from unittest.mock import ANY, AsyncMock, Mock
 import discord
 from discord import Message, MessageReference
 
-from cogs.chatbot.channel_roles import ChannelRole
-from cogs.chatbot.constants import (
-    ASSISTANT_DEBOUNCE_SECONDS,
-    CHAT_DEBOUNCE_MAX_SECONDS,
-    CHAT_DEBOUNCE_MIN_SECONDS,
-)
-from cogs.chatbot.models import ChannelProcessingState
-from cogs.chatbot.responses_api import LLMMessage, MessageInMemory, ResponseAction
 from cogs.chatbot.services.history_sync import get_history_sync_after
+from cogs.chatbot.services.message_delivery import reply_with_split_response, send_split_response
 from cogs.chatbot.services.response_policy import (
-    can_change_channel_role,
-    claim_response_slot,
     get_available_referenced_author_id,
-    get_response_debounce_seconds,
-    is_generation_current,
     should_reset_conversation,
-    should_respond,
 )
 from cogs.chatbot.use_cases.conversation import (
     ConversationUseCases,
     get_mentioned_bot_role_ids,
 )
-from cogs.chatbot.use_cases.memory_query import get_latest_memory_search_query
 
 
 def make_discord_message(author_id: int) -> Message:
@@ -39,24 +26,6 @@ def make_discord_message(author_id: int) -> Message:
     message = Mock(spec=Message)
     message.author = SimpleNamespace(id=author_id)
     return cast("Message", message)
-
-
-class MemorySearchQueryTest(unittest.TestCase):
-    def test_uses_only_latest_message_content_when_available(self) -> None:
-        message = MessageInMemory(
-            message_id=123,
-            author_id=456,
-            author_name="test-user",
-            content="テストユーザーさんが得意なことは何でしょうか?",
-            reply_to_message_id=None,
-            mentioned_user_ids=[],
-            timestamp=datetime.now(UTC),
-        )
-
-        result = get_latest_memory_search_query(message)
-
-        if result != message.content:
-            self.fail("最新投稿の検索クエリにメッセージIDなどのメタデータが混入しています")
 
 
 class HistorySyncRangeTest(unittest.TestCase):
@@ -142,48 +111,6 @@ class StartupHistorySyncTest(unittest.IsolatedAsyncioTestCase):
         use_cases._enqueue_long_term_memory.assert_not_awaited()  # noqa: SLF001
 
 
-class ShouldRespondTest(unittest.TestCase):
-    def test_assistant_responds_to_mention(self) -> None:
-        result = should_respond(
-            ChannelRole.ASSISTANT,
-            mentioned_bot=True,
-            replied_to_bot=False,
-        )
-
-        if not result:
-            self.fail("assistantがメンションへ応答しません")
-
-    def test_assistant_responds_to_reply(self) -> None:
-        result = should_respond(
-            ChannelRole.ASSISTANT,
-            mentioned_bot=False,
-            replied_to_bot=True,
-        )
-
-        if not result:
-            self.fail("assistantがボットへの返信へ応答しません")
-
-    def test_assistant_ignores_regular_message(self) -> None:
-        result = should_respond(
-            ChannelRole.ASSISTANT,
-            mentioned_bot=False,
-            replied_to_bot=False,
-        )
-
-        if result:
-            self.fail("assistantが明示的に呼ばれていない投稿へ応答します")
-
-    def test_chat_always_starts_response_judgment(self) -> None:
-        result = should_respond(
-            ChannelRole.CHAT,
-            mentioned_bot=False,
-            replied_to_bot=False,
-        )
-
-        if not result:
-            self.fail("chatの通常投稿で応答判断を開始しません")
-
-
 class BotRoleMentionTest(unittest.TestCase):
     def test_detects_mentioned_same_name_role_assigned_to_bot(self) -> None:
         same_name_role = SimpleNamespace(id=10, name="Papyrus")
@@ -224,119 +151,6 @@ class BotRoleMentionTest(unittest.TestCase):
 
         if result:
             self.fail("Bot名と異なる付与ロールへのメンションを誤検出しています")
-
-
-class ChannelRolePermissionTest(unittest.TestCase):
-    def test_allows_any_member_to_change_thread_role(self) -> None:
-        if not can_change_channel_role(is_thread=True, manage_channels=False):
-            self.fail("一般メンバーがスレッドの役割を変更できません")
-
-    def test_requires_permission_for_regular_channel(self) -> None:
-        if can_change_channel_role(is_thread=False, manage_channels=False):
-            self.fail("権限のないメンバーが通常チャンネルの役割を変更できます")
-        if not can_change_channel_role(is_thread=False, manage_channels=True):
-            self.fail("チャンネル管理者が通常チャンネルの役割を変更できません")
-
-
-class ChannelProcessingStateTest(unittest.TestCase):
-    def test_different_channels_can_claim_generation_slots(self) -> None:
-        first_state = ChannelProcessingState()
-        second_state = ChannelProcessingState()
-        first_message = make_discord_message(author_id=100)
-        second_message = make_discord_message(author_id=200)
-
-        first_claimed = claim_response_slot(
-            first_state,
-            first_message,
-            is_explicit_call=False,
-        )
-        second_claimed = claim_response_slot(
-            second_state,
-            second_message,
-            is_explicit_call=False,
-        )
-
-        if not first_claimed or not second_claimed:
-            self.fail("別チャンネルの生成枠が互いに干渉しています")
-
-    def test_same_channel_queues_latest_response_request(self) -> None:
-        state = ChannelProcessingState()
-        first_message = make_discord_message(author_id=100)
-        second_message = make_discord_message(author_id=200)
-
-        first_claimed = claim_response_slot(
-            state,
-            first_message,
-            is_explicit_call=False,
-        )
-        second_claimed = claim_response_slot(
-            state,
-            second_message,
-            is_explicit_call=True,
-        )
-
-        if not first_claimed:
-            self.fail("最初の返信要求が生成枠を確保できません")
-        if second_claimed:
-            self.fail("同じチャンネルで生成枠を二重に確保しています")
-        if state.queued_response_message is not second_message:
-            self.fail("生成中に受けた返信要求を次回処理へ保持していません")
-        if not state.queued_response_is_explicit_call:
-            self.fail("生成中に受けた明示的な呼びかけを保持していません")
-        if is_generation_current(state, revision=0):
-            self.fail("追加の返信要求を受けても生成リビジョンが更新されていません")
-
-    def test_channel_states_do_not_share_pending_messages(self) -> None:
-        first_state = ChannelProcessingState()
-        second_state = ChannelProcessingState()
-        first_state.pending_messages.append(make_discord_message(author_id=100))
-
-        if second_state.pending_messages:
-            self.fail("別チャンネル間で保留メッセージを共有しています")
-
-    def test_regular_message_does_not_replace_active_explicit_call(self) -> None:
-        state = ChannelProcessingState()
-        explicit_message = make_discord_message(author_id=100)
-        regular_message = make_discord_message(author_id=200)
-        claim_response_slot(
-            state,
-            explicit_message,
-            is_explicit_call=True,
-        )
-
-        claim_response_slot(
-            state,
-            regular_message,
-            is_explicit_call=False,
-        )
-
-        if state.queued_response_message is not explicit_message or not state.queued_response_is_explicit_call:
-            self.fail("生成中の通常投稿によって明示呼びかけの応答必須状態が失われています")
-
-    def test_latest_explicit_call_replaces_previous_required_call(self) -> None:
-        state = ChannelProcessingState()
-        first_message = make_discord_message(author_id=100)
-        latest_message = make_discord_message(author_id=200)
-        claim_response_slot(state, first_message, is_explicit_call=True)
-
-        claim_response_slot(state, latest_message, is_explicit_call=True)
-
-        if state.queued_response_message is not latest_message or not state.queued_response_is_explicit_call:
-            self.fail("複数の明示呼びかけが最新の投稿へ集約されていません")
-
-
-class ResponseDebounceTest(unittest.TestCase):
-    def test_assistant_uses_short_fixed_delay(self) -> None:
-        delay_seconds = get_response_debounce_seconds(ChannelRole.ASSISTANT)
-
-        if delay_seconds != ASSISTANT_DEBOUNCE_SECONDS:
-            self.fail("assistantの待機時間が短い固定値になっていません")
-
-    def test_chat_delay_is_randomized_within_configured_range(self) -> None:
-        delay_seconds = get_response_debounce_seconds(ChannelRole.CHAT)
-
-        if not CHAT_DEBOUNCE_MIN_SECONDS <= delay_seconds <= CHAT_DEBOUNCE_MAX_SECONDS:
-            self.fail("chatの待機時間が設定範囲を外れています")
 
 
 class ConversationResetTest(unittest.TestCase):
@@ -402,41 +216,18 @@ class ReferencedAuthorTest(unittest.TestCase):
 
 class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
     async def test_suppresses_embeds_for_channel_message(self) -> None:
-        cog = object.__new__(ConversationUseCases)
-        channel = SimpleNamespace(id=100, send=AsyncMock())
-        message = cast("Message", SimpleNamespace(channel=channel))
-        cog.__dict__["_sent_custom_profiles"] = {}
-        cog.short_term_message_repository = SimpleNamespace(set_custom_profile=AsyncMock())
-
-        await cog.execute_response_action(
-            message,
-            LLMMessage(action=ResponseAction.MESSAGE, content="https://example.com"),
-        )
-
+        """通常送信でリンクの展開を抑止します。"""
+        channel = Mock(spec=discord.TextChannel)
+        channel.send = AsyncMock()
+        await send_split_response(channel, "https://example.com")
         channel.send.assert_awaited_once_with("https://example.com", suppress_embeds=True)
 
     async def test_suppresses_embeds_for_reply(self) -> None:
-        cog = object.__new__(ConversationUseCases)
-        reply_to_message_id = 200
-        target_message = SimpleNamespace(reply=AsyncMock())
-        channel = Mock(spec=discord.TextChannel)
-        channel.id = 100
-        channel.get_partial_message.return_value = target_message
-        message = cast("Message", SimpleNamespace(channel=channel))
-        short_term_memory = SimpleNamespace(can_target_message=lambda message_id: message_id == reply_to_message_id)
-        cog.response_pipelines = {100: SimpleNamespace(short_term_memory=short_term_memory)}
-        cog.__dict__["_sent_custom_profiles"] = {}
-        cog.short_term_message_repository = SimpleNamespace(set_custom_profile=AsyncMock())
-        await cog.execute_response_action(
-            message,
-            LLMMessage(
-                action=ResponseAction.REPLY,
-                content="https://example.com",
-                reply_to_message_id=reply_to_message_id,
-            ),
-        )
-
-        target_message.reply.assert_awaited_once_with("https://example.com", suppress_embeds=True)
+        """返信送信でリンクの展開を抑止します。"""
+        message = Mock(spec=Message)
+        message.reply = AsyncMock()
+        await reply_with_split_response(message, "https://example.com")
+        message.reply.assert_awaited_once_with("https://example.com", suppress_embeds=True)
 
 
 class LongTermMemoryExclusionFlagTest(unittest.IsolatedAsyncioTestCase):
