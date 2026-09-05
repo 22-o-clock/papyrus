@@ -27,25 +27,6 @@ async def collect_message_reactions(message: Message) -> list[ReactionInMemory]:
     return collected
 
 
-def resolve_reaction_emoji(guild: discord.Guild | None, raw_emoji: str) -> str | discord.Emoji | discord.PartialEmoji:
-    """LLMが生成した絵文字表記を、Discordへリアクション可能な形式へ解決します。
-
-    `<a:name:id>` 形式やベア名 (`name`, `:name:`) をサーバーのカスタム絵文字と突き合わせ、
-    一致すればそのEmoji/PartialEmojiを、一致しなければ入力をUnicode絵文字とみなしそのまま返します。
-    """
-    candidate = discord.PartialEmoji.from_str(raw_emoji.strip())
-    if guild is None:
-        return candidate if candidate.id is not None else raw_emoji
-
-    if candidate.id is not None:
-        resolved = discord.utils.get(guild.emojis, id=candidate.id)
-        return resolved if resolved is not None else candidate
-
-    bare_name = candidate.name.strip(":")
-    resolved = discord.utils.get(guild.emojis, name=bare_name)
-    return resolved if resolved is not None else raw_emoji
-
-
 def preserve_known_reactors(
     reactions: list[ReactionInMemory],
     previous_reactions: list[ReactionInMemory],
