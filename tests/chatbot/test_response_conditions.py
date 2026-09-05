@@ -84,7 +84,8 @@ class StartupHistorySyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_initializes_long_term_memory_before_releasing_message_events(self) -> None:
         events: list[str] = []
         use_cases = object.__new__(ConversationUseCases)
-        use_cases.settings_use_cases = SimpleNamespace(initialize=AsyncMock())
+        use_cases.bot = SimpleNamespace(user=SimpleNamespace(id=123))
+        use_cases.reply_conversations = SimpleNamespace(repository=SimpleNamespace(namespace=""))
         use_cases.runtime_environment = SimpleNamespace(is_debug=False)
         use_cases.__dict__["_history_sync_complete"] = asyncio.Event()
         use_cases.__dict__["_history_sync_lock"] = asyncio.Lock()

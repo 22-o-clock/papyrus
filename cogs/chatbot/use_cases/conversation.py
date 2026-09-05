@@ -17,6 +17,7 @@ from cogs.chatbot.repositories.custom_profile import CustomProfileRepository
 from cogs.chatbot.repositories.environment import DatabaseEnvironmentRepository
 from cogs.chatbot.repositories.member_alias import ChatbotMemberAliasRepository, find_member_aliases
 from cogs.chatbot.repositories.memory_document import ChatbotMemoryDocumentRepository
+from cogs.chatbot.repositories.reply_conversation import ReplyConversationRepository
 from cogs.chatbot.repositories.short_term_message import (
     ChatbotShortTermMessageRepository,
     StoredAttachmentInput,
@@ -32,6 +33,7 @@ from cogs.chatbot.responses_api import (
     ResponseGenerationOptions,
     ResponsePipeline,
 )
+from cogs.chatbot.services.conversation_tools import ConversationTools
 from cogs.chatbot.services.history_sync import get_history_sync_after
 from cogs.chatbot.services.message_delivery import reply_with_split_response, send_split_response
 from cogs.chatbot.services.reaction_context import (
@@ -46,7 +48,6 @@ from cogs.chatbot.services.response_policy import (
     get_response_debounce_seconds,
     is_generation_current,
     should_reset_conversation,
-    should_respond,
 )
 from core.runtime_environment import RuntimeEnvironment, get_runtime_environment
 
@@ -58,6 +59,7 @@ from .custom_profile import (
 )
 from .long_term_memory import LongTermMemoryUseCases
 from .memory_search import MemorySearchUseCases
+from .reply_conversation import ReplyConversationUseCases
 from .settings import SettingsUseCases
 
 logger = getLogger(__name__)
@@ -110,6 +112,10 @@ class ConversationUseCases:
         self.runtime_environment: RuntimeEnvironment = get_runtime_environment()
         self.response_pipelines: dict[int, ResponsePipeline] = {}
         self.environment_repository = DatabaseEnvironmentRepository(session_factory)
+        self.reply_conversations = ReplyConversationUseCases(
+            AsyncOpenAI(),
+            ReplyConversationRepository(session_factory, "uninitialized"),
+        )
         self.channel_role_manager = ChannelRoleManager(self.environment_repository)
         self.settings_use_cases = SettingsUseCases(
             self.channel_role_manager,
@@ -221,7 +227,8 @@ class ConversationUseCases:
 
     async def on_ready(self) -> None:
         """保存済み設定を読み込み、会話履歴を初期化します。"""
-        await self.settings_use_cases.initialize()
+        if self.bot.user:
+            self.reply_conversations.repository.namespace = str(self.bot.user.id)
         self._history_sync_complete.clear()
         if self.runtime_environment.is_debug:
             logger.info("Skipped chatbot Discord history sync in debug environment")
@@ -333,6 +340,10 @@ class ConversationUseCases:
         if self.runtime_environment.is_production:
             await self._enqueue_long_term_memory(message)
 
+        await self._respond_to_explicit_call(message)
+
+    async def _respond_to_explicit_call(self, message: Message) -> None:
+        """Botへのメンションまたは返信に回答し、使用したプロファイルを記録します。"""
         # 3. 回答を行うかの判定
         # 3.1 ボットのメッセージについては返信しない
         if message.author.bot:
@@ -342,7 +353,6 @@ class ConversationUseCases:
         if bot_user is None:
             return
 
-        role = await self.channel_role_manager.get_role(message.channel.id)
         directly_mentioned_bot = any(user.id == bot_user.id for user in message.mentions)
         mentioned_bot_role_ids = get_mentioned_bot_role_ids(message, bot_user)
         mentioned_bot = directly_mentioned_bot or bool(mentioned_bot_role_ids)
@@ -373,20 +383,21 @@ class ConversationUseCases:
                 await message.reply("カスタムプロファイルを一時的に利用できません。しばらくしてから再度お試しください。")
                 return
 
-        response_required = should_respond(
-            role,
-            mentioned_bot=mentioned_bot,
-            replied_to_bot=replied_to_bot,
+        if not is_explicit_call or message.guild is None:
+            return
+        tools = ConversationTools(
+            message.guild,
+            self.short_term_message_repository,
+            self.long_term_memory_repository,
+            bot_user.id,
+            self.member_alias_repository,
         )
-        await self._update_response_schedule(
-            message if response_required else None,
-            state,
-            role,
-            options=ResponseRequestOptions(
-                is_explicit_call=is_explicit_call,
-                custom_profile=custom_profile,
-            ),
-        )
+        try:
+            sent, profile_name = await self.reply_conversations.respond(message, tools, custom_profile)
+            await self._record_sent_profiles(sent, profile_name)
+        except Exception as exc:
+            logger.exception("Failed to generate reply conversation (message_id=%s)", message.id)
+            await message.reply(get_generation_failure_message(exc))
 
     @staticmethod
     def _custom_profile_directive_error_message(error: InvalidCustomProfileDirectiveError) -> str:
