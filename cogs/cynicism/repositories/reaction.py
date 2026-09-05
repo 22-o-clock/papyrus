@@ -23,19 +23,18 @@ ORIGINAL_EDIT_COUNT = 0
 
 @dataclass(frozen=True, slots=True)
 class CynicismReactionEvent:
-    """記録する🥶1件の内容。"""
+    """リアクション記録に必要なメッセージID、リアクターID、スーパーリアクションの種別。"""
 
     message_id: int
     reactor_id: int
     is_burst: bool
-    source: str
-    evidence_message_id: int | None
 
 
 class CynicismReactionRepository:
     """🥶の付与記録を保存し、期間ごとの冷笑ポイントを集計する。"""
 
     def __init__(self, database: CynicismDatabase) -> None:
+        """リアクションの保存・集計に使う環境別DB接続を保持する。"""
         self._database = database
 
     async def record(self, event: CynicismReactionEvent) -> None:
@@ -47,8 +46,8 @@ class CynicismReactionRepository:
                     message_id=event.message_id,
                     reactor_id=event.reactor_id,
                     is_burst=event.is_burst,
-                    source=event.source,
-                    evidence_message_id=event.evidence_message_id,
+                    source=REACTION_SOURCE,
+                    evidence_message_id=None,
                 )
                 .on_conflict_do_nothing(
                     index_elements=[
@@ -91,7 +90,19 @@ class CynicismReactionRepository:
         papyrus_user_id: int,
         scope: ChannelScope,
     ) -> list[MemberReactionCounts]:
-        """期間内の発言に向けられた🥶を、発言者ごとの件数へ集計する。"""
+        """期間内の発言に付いた対象リアクションを、発言者ごとに集計する。
+
+        Args:
+            period: 発言の投稿日時で絞る期間。開始を含み終了を含まない。
+            papyrus_user_id: 過去に記録されたBot判定を除外するためのID。
+            scope: 発言数の集計にも使うチャンネル範囲。
+
+        Returns:
+            自己リアクション・旧返信記録・Bot判定を除いた件数。
+            同じ発言者の発言とリアクターの組は、通常・スーパーリアクション間で重複除去する。
+            発言者自身がBotかどうかはランキング生成時に判定する。
+
+        """
         # 通常リアクションとスーパーリアクションを重複して数えない。
         reactor_pairs = distinct(tuple_(CynicismReaction.message_id, CynicismReaction.reactor_id))
         statement = (
@@ -191,7 +202,18 @@ class CynicismReactionRepository:
         scope: ChannelScope,
         papyrus_user_id: int,
     ) -> list[MessageReactionCounts]:
-        """最多リアクションの発言を同点も含めて全件、投稿日時・ID順で返す。"""
+        """最多リアクションの発言を同点も含めて全件、投稿日時・ID順で返す。
+
+        Args:
+            period: 発言の投稿日時で絞る集計期間。
+            member_ids: ランキング生成時にBotを除外した発言者のID。資格ライン未満も含む。
+            scope: メンバー順位と同じチャンネル範囲。
+            papyrus_user_id: 過去のBot判定を除外するためのID。
+
+        Returns:
+            リアクターを重複除去した件数が最大の発言一覧。対象がなければ空のリスト。
+
+        """
         if not member_ids:
             return []
         reaction_count = func.count(distinct(CynicismReaction.reactor_id))

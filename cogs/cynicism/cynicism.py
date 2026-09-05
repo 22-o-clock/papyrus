@@ -1,3 +1,5 @@
+"""冷笑ランキングのDiscordイベント・コマンドの受付とライフサイクル管理。"""
+
 from logging import getLogger
 
 import discord
@@ -31,6 +33,7 @@ class Cynicism(commands.Cog):
     cynicism = app_commands.Group(name="cynicism", description="冷笑ポイントと冷笑王ランキングを扱います。")
 
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        """Botの接続とDBセッションを受け取り、記録・発表のユースケースを構成する。"""
         self._bot = bot
         self._runtime_environment = get_runtime_environment()
         self._database = CynicismDatabase(session_factory, self._runtime_environment.environment)
@@ -83,22 +86,26 @@ class Cynicism(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        """リアクション追加イベントを、対象判定と記録処理へ渡す。"""
         await self._tracking_use_cases.on_reaction_add(payload)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        """リアクション削除イベントを、記録の取り消し処理へ渡す。"""
         await self._tracking_use_cases.on_reaction_remove(payload)
 
     @commands.Cog.listener()
     async def on_raw_reaction_clear(self, payload: discord.RawReactionClearEvent) -> None:
+        """全リアクションの削除を、対象メッセージの記録へ反映する。"""
         await self._tracking_use_cases.on_reaction_clear(payload)
 
     @commands.Cog.listener()
     async def on_raw_reaction_clear_emoji(self, payload: discord.RawReactionClearEmojiEvent) -> None:
+        """特定絵文字の一括削除を、対象リアクションの記録へ反映する。"""
         await self._tracking_use_cases.on_reaction_clear_emoji(payload)
 
     @cynicism.command(name="ranking", description="指定期間の冷笑王ランキングを表示します。")
-    @app_commands.describe(period="集計期間の種別", start="期間内の任意の日 (YYYY-MM-DD、省略時は直近の完了期間)")
+    @app_commands.describe(period="集計期間の種別", start="期間内の任意の日 (YYYY-MM-DD、省略時は進行中の期間)")
     @app_commands.choices(period=PERIOD_CHOICES)
     async def ranking(
         self,
@@ -106,6 +113,7 @@ class Cynicism(commands.Cog):
         period: str = CynicismPeriodType.WEEKLY.value,
         start: str | None = None,
     ) -> None:
+        """指定期間の順位を表示する。日付を省略した場合は進行中の期間を使う。"""
         await self._report_use_cases.ranking(interaction, period, start)
 
     @cynicism.command(name="messages", description="指定メンバーが冷笑ポイントを獲得した発言をCSVで出力します。")
@@ -122,10 +130,12 @@ class Cynicism(commands.Cog):
         period: str = CynicismPeriodType.WEEKLY.value,
         start: str | None = None,
     ) -> None:
+        """指定メンバーの発言明細をCSVで出力する。"""
         await self._report_use_cases.export_messages(interaction, member, period, start)
 
     @cynicism.command(name="status", description="冷笑ポイントの集計状態と発表状態を表示します。")
     async def status(self, interaction: Interaction) -> None:
+        """集計の停止状態と、発表先・最終発表を表示する。"""
         await self._report_use_cases.status(interaction)
 
     @cynicism.command(name="publish", description="指定期間のランキングを発表チャンネルへ投稿または更新します。")
@@ -137,14 +147,17 @@ class Cynicism(commands.Cog):
         period: str = CynicismPeriodType.WEEKLY.value,
         start: str | None = None,
     ) -> None:
+        """管理者の操作で、指定期間の発表を投稿または更新する。"""
         await self._report_use_cases.publish(interaction, period, start)
 
     @cynicism.command(name="pause", description="冷笑ポイントの記録と自動発表を一時停止します。")
     async def pause(self, interaction: Interaction) -> None:
+        """管理者の操作で、新規記録と自動発表を一時停止する。"""
         await self._report_use_cases.pause(interaction)
 
     @cynicism.command(name="resume", description="冷笑ポイントの記録と自動発表を再開します。")
     async def resume(self, interaction: Interaction) -> None:
+        """管理者の操作で、新規記録と自動発表を再開する。"""
         await self._report_use_cases.resume(interaction)
 
 

@@ -31,7 +31,14 @@ class ChannelScope:
 
 @dataclass(frozen=True, slots=True)
 class MemberReactionCounts:
-    """発言者ごとの🥶件数。"""
+    """自己リアクションなどを除外した、発言者ごとの集計値。
+
+    Attributes:
+        member_id: リアクションを受けた発言者のID。
+        human_count: 発言とリアクターの組を重複除去した件数。1件を1ポイントとする。
+        cynical_message_count: 対象リアクションが1件以上付いた発言数。
+
+    """
 
     member_id: int
     human_count: int
@@ -70,13 +77,23 @@ class RankedMemberIdentity:
 
 @dataclass(frozen=True, slots=True)
 class RankingEntry:
-    """ランキング1行分の集計値。"""
+    """ランキング1行分の集計値。
+
+    Attributes:
+        rank: 同点を同順位とする順位。順位付け前は0。
+        member_id: 発言者のID。
+        display_name: Discordまたは保存済み情報から取得した表示名。
+        points: 対象リアクションの合計件数。
+        cynical_message_count: 対象リアクションが付いた発言数。
+        message_count: 集計期間・チャンネル内の発言数。
+        rate: 発言1件あたりのポイント。表示時に100倍して百分率とする。
+
+    """
 
     rank: int
     member_id: int
     display_name: str
     points: int
-    human_count: int
     cynical_message_count: int
     message_count: int
     rate: float
@@ -84,16 +101,27 @@ class RankingEntry:
 
 @dataclass(frozen=True, slots=True)
 class CynicismRanking:
-    """1つの期間に対する、合計部門と冷笑率部門の集計結果。"""
+    """冷笑率ランキングと参考の合計順位、最多ポイントの発言。
+
+    合計と対象人数は参考順位から算出し、順位表との不整合を防ぐ。
+    冷笑率の資格ラインはメンバーの順位にだけ適用し、最多ポイントの発言には適用しない。
+    """
 
     period: CynicismPeriod
     total_entries: tuple[RankingEntry, ...]
     rate_entries: tuple[RankingEntry, ...]
     qualification_threshold: int
-    total_points: int
-    human_reaction_count: int
-    member_count: int
     top_messages: "tuple[TopCynicismMessage, ...]" = ()
+
+    @property
+    def total_points(self) -> int:
+        """ランキング対象者の合計ポイントを返す。"""
+        return sum(entry.points for entry in self.total_entries)
+
+    @property
+    def member_count(self) -> int:
+        """ポイントを獲得したランキング対象者の人数を返す。"""
+        return len(self.total_entries)
 
     @property
     def is_empty(self) -> bool:
@@ -107,7 +135,7 @@ class CynicismRanking:
 
     @property
     def rate_champion(self) -> RankingEntry | None:
-        """冷笑率部門の1位を返す。資格ライン到達者がいなければNone。"""
+        """冷笑率による冷笑王を返す。同点なら表示順の先頭、資格到達者がいなければNone。"""
         return self.rate_entries[0] if self.rate_entries else None
 
     @property

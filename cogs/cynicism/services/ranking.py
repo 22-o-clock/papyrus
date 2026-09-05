@@ -25,7 +25,19 @@ def build_ranking(
     message_counts: Mapping[int, int],
     identities: Mapping[int, RankedMemberIdentity],
 ) -> CynicismRanking:
-    """合計部門と、資格ラインを適用した冷笑率部門を組み立てる。"""
+    """冷笑率の順位と参考の合計順位を組み立てる。
+
+    Args:
+        period: 集計期間。冷笑率の資格ラインの決定に使う。
+        counts: 対象リアクションを発言者ごとに集計した値。
+        message_counts: 同じ期間・チャンネル範囲の発言数。
+        identities: 発言者の表示名とBot判定。取得できない場合はIDを表示する。
+
+    Returns:
+        Botとポイントがない発言者を除外した順位表。同点は同順位とし、
+        表示名・ID順で並べる。冷笑率の順位には資格ラインを適用する。
+
+    """
     threshold = qualification_threshold(period)
     rows: list[RankingEntry] = []
     for member_counts in counts:
@@ -44,7 +56,6 @@ def build_ranking(
                 member_id=member_counts.member_id,
                 display_name=display_name,
                 points=points,
-                human_count=member_counts.human_count,
                 cynical_message_count=member_counts.cynical_message_count,
                 message_count=message_count,
                 rate=cynicism_rate(points, message_count),
@@ -59,9 +70,6 @@ def build_ranking(
         total_entries=total_entries,
         rate_entries=rate_entries,
         qualification_threshold=threshold,
-        total_points=sum(entry.points for entry in rows),
-        human_reaction_count=sum(entry.human_count for entry in rows),
-        member_count=len(rows),
     )
 
 

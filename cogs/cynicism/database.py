@@ -89,6 +89,7 @@ class CynicismDatabase:
         session_factory: async_sessionmaker[AsyncSession],
         environment: BotEnvironment,
     ) -> None:
+        """セッションファクトリと実行環境から、利用するDBスキーマを決定する。"""
         self._session_factory = session_factory
         self._database_schema = get_talkdata_schema(environment)
 

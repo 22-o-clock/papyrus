@@ -34,6 +34,7 @@ class CynicismReportRepository:
     """ランキング発表の処理履歴を管理する。"""
 
     def __init__(self, database: CynicismDatabase) -> None:
+        """発表履歴の読み書きに使う環境別DB接続を保持する。"""
         self._database = database
 
     async def get_delivery(self, period: CynicismPeriod, target_id: int) -> ReportDelivery | None:

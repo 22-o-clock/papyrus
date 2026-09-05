@@ -56,6 +56,7 @@ class CynicismReportUseCases:
         configuration_repository: CynicismConfigurationRepository,
         report_repository: CynicismReportRepository,
     ) -> None:
+        """集計・設定・発表履歴を接続し、投稿の重複実行を防ぐロックを用意する。"""
         self._bot = bot
         self._runtime_environment = runtime_environment
         self._reactions = reaction_repository
@@ -210,23 +211,23 @@ class CynicismReportUseCases:
 
     async def pause(self, interaction: Interaction) -> None:
         """管理者が🥶の記録と自動発表を停止する。"""
-        self._require_admin(interaction)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        await self._configuration.set_paused(paused=True, now=datetime.datetime.now(JST))
-        await interaction.followup.send(
-            "冷笑ポイントの記録と自動発表を停止しました。`/cynicism ranking` での閲覧は引き続き利用できます。",
-            ephemeral=True,
-        )
+        await self._set_paused(interaction, paused=True)
 
     async def resume(self, interaction: Interaction) -> None:
         """管理者が🥶の記録と自動発表を再開する。"""
+        await self._set_paused(interaction, paused=False)
+
+    async def _set_paused(self, interaction: Interaction, *, paused: bool) -> None:
+        """管理者を確認し、応答を保留してから停止状態を保存・通知する。"""
         self._require_admin(interaction)
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await self._configuration.set_paused(paused=False, now=datetime.datetime.now(JST))
-        await interaction.followup.send(
-            "冷笑ポイントの記録と自動発表を再開しました。停止中に付いた🥶は記録されていません。",
-            ephemeral=True,
+        await self._configuration.set_paused(paused=paused, now=datetime.datetime.now(JST))
+        notice = (
+            "冷笑ポイントの記録と自動発表を停止しました。`/cynicism ranking` での閲覧は引き続き利用できます。"
+            if paused
+            else "冷笑ポイントの記録と自動発表を再開しました。停止中に付いた🥶は記録されていません。"
         )
+        await interaction.followup.send(notice, ephemeral=True)
 
     async def build_ranking_for(
         self,
@@ -234,7 +235,17 @@ class CynicismReportUseCases:
         *,
         guild: discord.Guild | None = None,
     ) -> CynicismRanking:
-        """期間内の🥶と発言数から、2部門のランキングを組み立てる。"""
+        """同じ期間・チャンネル範囲から順位表と同率1位の発言を組み立てる。
+
+        Args:
+            period: 投稿日時を基準にした集計期間。
+            guild: 表示名とBot判定に使うサーバー。省略時は設定済みサーバーを使う。
+
+        Returns:
+            冷笑率順位、参考の合計順位、最多ポイントの全発言を含む集計結果。
+            記録がない場合は空の順位表を返す。
+
+        """
         scope = channel_scope(self._runtime_environment)
         papyrus_user_id = self._bot.user.id if self._bot.user is not None else 0
         counts = await self._reactions.aggregate_counts(

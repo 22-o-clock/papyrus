@@ -1,17 +1,12 @@
 """🥶が向けられた事実の記録と取り消し。"""
 
-from logging import getLogger
-
 import discord
 from discord.ext import commands
 
-from cogs.cynicism.constants import REACTION_SOURCE
 from cogs.cynicism.repositories.configuration import CynicismConfigurationRepository
 from cogs.cynicism.repositories.reaction import CynicismReactionEvent, CynicismReactionRepository
 from cogs.cynicism.services.reaction_filter import is_cynicism_emoji
 from core.runtime_environment import RuntimeEnvironment
-
-logger = getLogger(__name__)
 
 
 class CynicismTrackingUseCases:
@@ -27,6 +22,7 @@ class CynicismTrackingUseCases:
         reaction_repository: CynicismReactionRepository,
         configuration_repository: CynicismConfigurationRepository,
     ) -> None:
+        """Botと処理範囲、リアクション・設定リポジトリを受け取る。"""
         self._bot = bot
         self._runtime_environment = runtime_environment
         self._reactions = reaction_repository
@@ -50,8 +46,6 @@ class CynicismTrackingUseCases:
                 message_id=payload.message_id,
                 reactor_id=payload.user_id,
                 is_burst=payload.burst,
-                source=REACTION_SOURCE,
-                evidence_message_id=None,
             )
         )
 

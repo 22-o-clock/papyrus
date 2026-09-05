@@ -32,6 +32,7 @@ from cogs.cynicism.periods import (
     qualification_threshold,
 )
 from cogs.cynicism.repositories.configuration import CynicismConfigurationRepository
+from cogs.cynicism.repositories.reaction import CynicismReactionEvent, CynicismReactionRepository
 from cogs.cynicism.services.message_delivery import (
     CynicismReportMessageDelivery,
     ReportMessageOwnershipError,
@@ -347,15 +348,18 @@ class RankingTest(unittest.TestCase):
         ensure([entry.member_id for entry in ranking.rate_entries] == [1])
         ensure(ranking.qualified_member_count == 1)
 
-    def test_summary_counts_human_reactions(self) -> None:
+    def test_summary_is_derived_from_ranking_entries(self) -> None:
         counts = [MemberReactionCounts(member_id=1, human_count=9, cynical_message_count=4)]
         identities = {1: RankedMemberIdentity(1, "A", is_bot=False)}
         period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
         ranking = build_ranking(period, counts, {1: 20}, identities)
 
-        ensure(ranking.human_reaction_count == 9)  # noqa: PLR2004 - テストデータの件数。
+        ensure(ranking.member_count == 1)
         ensure(ranking.total_points == Decimal("9.00"))
+        empty = replace(ranking, total_entries=(), rate_entries=())
+        ensure(empty.total_points == 0)
+        ensure(empty.member_count == 0)
 
 
 def build_sample_ranking() -> "CynicismRanking":
@@ -661,10 +665,8 @@ class TrackingTest(unittest.IsolatedAsyncioTestCase):
 
         reactions.record.assert_awaited_once()
         event = reactions.record.await_args.args[0]
-        ensure(event.source == REACTION_SOURCE)
         ensure(event.message_id == TARGET_MESSAGE_ID)
         ensure(event.reactor_id == HUMAN_USER_ID)
-        ensure(event.evidence_message_id is None)
 
     async def test_other_emoji_is_ignored(self) -> None:
         use_cases, _, reactions = make_tracking_use_cases()
@@ -851,6 +853,23 @@ class ConfigurationRepositoryTest(unittest.IsolatedAsyncioTestCase):
         await repository.set_paused(paused=True, now=datetime.datetime.now(JST))
 
         ensure("commit" not in session.calls, "設定の更新は1つのトランザクション内で完結する必要があります")
+
+
+class ReactionRepositoryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_record_supplies_legacy_storage_fields(self) -> None:
+        """呼び出し側が旧返信用の情報を渡さなくても、互換列へ正しい値を保存する。"""
+        session = SimpleNamespace(execute=AsyncMock())
+        repository = CynicismReactionRepository(cast("Any", RecordingDatabase(cast("Any", session))))
+
+        await repository.record(CynicismReactionEvent(TARGET_MESSAGE_ID, HUMAN_USER_ID, is_burst=True))
+
+        statement = session.execute.await_args.args[0]
+        parameters = statement.compile().params
+        ensure(parameters["message_id"] == TARGET_MESSAGE_ID)
+        ensure(parameters["reactor_id"] == HUMAN_USER_ID)
+        ensure(parameters["is_burst"] is True)
+        ensure(parameters["source"] == REACTION_SOURCE)
+        ensure(parameters["evidence_message_id"] is None)
 
 
 class InProgressPeriodTest(unittest.TestCase):

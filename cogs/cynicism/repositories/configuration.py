@@ -14,6 +14,7 @@ class CynicismConfigurationRepository:
     """単一行の運用設定を読み書きする。"""
 
     def __init__(self, database: CynicismDatabase) -> None:
+        """運用設定の読み書きに使う環境別DB接続を保持する。"""
         self._database = database
 
     async def get(self) -> CynicismSettings:
