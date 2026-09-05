@@ -33,12 +33,30 @@ class CynicismReportMessageDelivery:
     """Discord上のランキング発表を再発見し、投稿または更新する。"""
 
     def __init__(self, bot: commands.Bot, repository: CynicismReportRepository, target_id: int) -> None:
+        """Bot、発表履歴リポジトリ、投稿先IDを保持する。"""
         self._bot = bot
         self._repository = repository
         self.target_id = target_id
 
-    async def upsert(self, period: CynicismPeriod, embed: discord.Embed, digest: str) -> DeliveryResult:
-        """配送記録またはフッターから既存投稿を見つけ、なければ新規投稿する。"""
+    async def upsert(
+        self, period: CynicismPeriod, embed: discord.Embed, digest: str, *, files: list[discord.File] | None = None
+    ) -> DeliveryResult:
+        """配送記録またはフッターから既存投稿を見つけ、なければ新規投稿する。
+
+        Args:
+            period: 発表の識別に使う集計期間。
+            embed: 表示する順位表。
+            digest: 内容が変わったかどうかを判定する指紋。
+            files: 更新後に残す添付ファイルの全件。省略または空なら旧添付を削除する。
+
+        Returns:
+            投稿と更新時刻、変更の有無。同じ指紋なら編集せず、保存済みの更新時刻を返す。
+
+        Raises:
+            ReportMessageOwnershipError: 更新対象が別Botの投稿だった場合。
+            TypeError: 投稿先がテキストチャンネルでもスレッドでもない場合。
+
+        """
         target = await self._get_target()
         delivery = await self._repository.get_delivery(period, self.target_id)
         message = await self._fetch_delivery_message(target, delivery)
@@ -47,7 +65,7 @@ class CynicismReportMessageDelivery:
         now = datetime.datetime.now(JST)
 
         if message is None:
-            posted = await target.send(embed=embed)
+            posted = await target.send(embed=embed, files=files or [])
             self._exclude_from_long_term_memory(posted)
             return DeliveryResult(posted, now, changed=True)
 
@@ -56,7 +74,7 @@ class CynicismReportMessageDelivery:
             # 再集計しても内容が変わらない場合は、毎分の更新でDiscordを叩かない。
             return DeliveryResult(message, delivery.last_processed_at, changed=False)
 
-        await message.edit(embed=embed)
+        await message.edit(embed=embed, attachments=files or [])
         self._exclude_from_long_term_memory(message)
         return DeliveryResult(message, now, changed=True)
 

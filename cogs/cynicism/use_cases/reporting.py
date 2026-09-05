@@ -1,19 +1,17 @@
 """冷笑王ランキングの集計、発表、運用設定。"""
 
 import asyncio
-import csv
 import datetime
-import io
 import os
-from decimal import Decimal
+from dataclasses import replace
 from logging import getLogger
 
 import discord
 from discord import Interaction, Member
 from discord.ext import commands
 
-from cogs.cynicism.constants import JST, MAXIMUM_WEIGHT, MINIMUM_WEIGHT
-from cogs.cynicism.models import CynicismRanking, CynicismSettings
+from cogs.cynicism.constants import JST
+from cogs.cynicism.models import CynicismRanking, ReactorContribution, TopCynicismMessage
 from cogs.cynicism.periods import (
     CynicismPeriod,
     CynicismPeriodType,
@@ -27,12 +25,12 @@ from cogs.cynicism.repositories.reaction import CynicismReactionRepository
 from cogs.cynicism.repositories.report import CynicismReportRepository
 from cogs.cynicism.services.member_resolution import resolve_identities
 from cogs.cynicism.services.message_delivery import CynicismReportMessageDelivery, ReportMessageOwnershipError
+from cogs.cynicism.services.message_list import build_message_embeds
 from cogs.cynicism.services.ranking import build_ranking
 from cogs.cynicism.services.report_builder import (
     build_empty_notice,
     build_ranking_embed,
-    format_points,
-    format_weight,
+    build_report_files,
     ranking_digest,
 )
 from cogs.cynicism.services.schedule import publishable_periods, refreshable_periods
@@ -41,8 +39,6 @@ from core.exception import ArgumentError, MissingRequiredRoleError
 from core.runtime_environment import RuntimeEnvironment
 
 logger = getLogger(__name__)
-
-MESSAGES_CSV_HEADER = ("発言者", "タイムスタンプ", "本文テキスト", "冷笑ポイント", "冷笑絵文字をつけたアカウント", "発言のURL")
 
 
 class CynicismReportUseCases:
@@ -56,6 +52,7 @@ class CynicismReportUseCases:
         configuration_repository: CynicismConfigurationRepository,
         report_repository: CynicismReportRepository,
     ) -> None:
+        """集計・設定・発表履歴を接続し、投稿の重複実行を防ぐロックを用意する。"""
         self._bot = bot
         self._runtime_environment = runtime_environment
         self._reactions = reaction_repository
@@ -80,82 +77,63 @@ class CynicismReportUseCases:
             for period in publishable_periods(current_time, earliest_recorded):
                 # 対象が無く投稿しなかった期間も処理済みとして記録するため、毎分の再集計にはならない。
                 if not await self._reports.has_delivery(period, self._target_id):
-                    await self._post_or_update(period, settings, record_empty=True)
+                    await self._post_or_update(period, record_empty=True)
             for period in refreshable_periods(current_time):
-                # 遅れて付いた🥶や重み変更を反映するため、投稿済みの内容だけを更新する。
+                # 遅れて付いた🥶を反映するため、投稿済みの内容だけを更新する。
                 delivery = await self._reports.get_delivery(period, self._target_id)
                 if delivery is not None and delivery.is_posted:
-                    await self._post_or_update(period, settings, record_empty=False)
+                    await self._post_or_update(period, record_empty=False)
 
     async def ranking(self, interaction: Interaction, period_type: str, start: str | None) -> None:
         """指定期間のランキングをその場で集計して表示する。"""
         # 閲覧では今の順位を知りたいはずなので、既定を進行中の期間にする。
         period = self._resolve_period(period_type, start, default_to_completed=False)
         await interaction.response.defer(thinking=True)
-        settings = await self._configuration.get()
-        ranking = await self.build_ranking_for(period, settings, guild=interaction.guild)
+        ranking = await self.build_ranking_for(period, guild=interaction.guild)
         if ranking.is_empty:
             await interaction.followup.send(build_empty_notice(period))
             return
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime.now(JST))
-        message = await interaction.followup.send(embed=embed, wait=True)
+        message = await interaction.followup.send(embed=embed, files=build_report_files(ranking), wait=True)
         # 表示のたびにChatbotが読み込んでトークンを消費しないよう、長期記憶の根拠から外す。
         self._bot.dispatch("exclude_from_long_term_memory", message)
 
-    async def export_messages(
+    async def show_messages(
         self,
         interaction: Interaction,
         member: discord.Member,
         period_type: str,
         start: str | None,
     ) -> None:
-        """指定メンバーが期間内に冷笑ポイントを獲得した発言をCSVとして出力する。"""
+        """指定メンバーの冷笑ポイント対象発言を、実行者だけにEmbedで紹介する。"""
         period = self._resolve_period(period_type, start, default_to_completed=False)
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         scope = channel_scope(self._runtime_environment)
-        records = await self._reactions.list_member_reactions(period, member_id=member.id, scope=scope)
+        papyrus_user_id = self._bot.user.id if self._bot.user is not None else 0
+        records = await self._reactions.list_member_reactions(
+            period, member_id=member.id, scope=scope, papyrus_user_id=papyrus_user_id
+        )
         if not records:
             await interaction.followup.send(
                 f"{member.display_name} の{period.label}冷笑ポイント ({format_period(period)}) は見つかりませんでした。",
+                allowed_mentions=discord.AllowedMentions.none(),
+                ephemeral=True,
             )
             return
 
-        settings = await self._configuration.get()
-        papyrus_user_id = self._bot.user.id if self._bot.user is not None else 0
         reactor_ids = sorted({reactor_id for record in records for reactor_id in record.reactor_ids})
         stored_names = await self._reactions.get_display_names(reactor_ids)
         identities = resolve_identities(self._bot, interaction.guild, reactor_ids, stored_names)
 
-        # ExcelでもUTF-8として開けるようBOM付きにする (utf-8-sig)。
-        buffer = io.StringIO()
-        writer = csv.writer(buffer)
-        writer.writerow(MESSAGES_CSV_HEADER)
-        for record in records:
-            papyrus_count = sum(1 for reactor_id in record.reactor_ids if reactor_id == papyrus_user_id)
-            human_count = len(record.reactor_ids) - papyrus_count
-            points = papyrus_count * settings.weights.papyrus + human_count * settings.weights.human
-            reactor_names = ", ".join(
-                identities[reactor_id].display_name if reactor_id in identities else str(reactor_id)
-                for reactor_id in record.reactor_ids
-            )
-            writer.writerow(
-                [
-                    member.display_name,
-                    record.post_time.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S"),
-                    record.content,
-                    format_points(points),
-                    reactor_names,
-                    f"https://discord.com/channels/{self._server_id}/{record.channel_id}/{record.message_id}",
-                ]
-            )
-
-        attachment = discord.File(
-            io.BytesIO(buffer.getvalue().encode("utf-8-sig")),
-            filename=f"cynicism_messages_{member.id}_{period.period_type.value}_{period.start_date.isoformat()}.csv",
+        embeds = build_message_embeds(
+            records,
+            period=period,
+            display_name=member.display_name,
+            identities=identities,
+            guild_id=self._server_id,
         )
-        message = await interaction.followup.send(file=attachment, wait=True)
-        # 表示のたびにChatbotが読み込んでトークンを消費しないよう、長期記憶の根拠から外す。
-        self._bot.dispatch("exclude_from_long_term_memory", message)
+        for embed in embeds:
+            await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none(), ephemeral=True)
 
     async def publish(self, interaction: Interaction, period_type: str, start: str | None) -> None:
         """管理者操作で指定期間のランキングを発表チャンネルへ投稿・更新する。"""
@@ -163,11 +141,10 @@ class CynicismReportUseCases:
         # 発表は確定した順位を出すものなので、既定を直近の完了済み期間にする。
         period = self._resolve_period(period_type, start, default_to_completed=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
-        settings = await self._configuration.get()
         try:
             async with self._report_lock:
                 # 手動確認で進行中の期間を空と確定させないよう、ここでは処理済みにしない。
-                posted = await self._post_or_update(period, settings, record_empty=False)
+                posted = await self._post_or_update(period, record_empty=False)
         except ReportMessageOwnershipError:
             logger.exception("Refused to overwrite another Bot's cynicism report")
             await interaction.followup.send(
@@ -184,7 +161,7 @@ class CynicismReportUseCases:
         )
 
     async def status(self, interaction: Interaction) -> None:
-        """重み、一時停止状態、投稿先、最終発表を表示する。"""
+        """一時停止状態、投稿先、最終発表を表示する。"""
         # DBへの問い合わせが3秒の応答期限を超えることがあるため、先に応答を保留する。
         await interaction.response.defer(ephemeral=True, thinking=True)
         now = datetime.datetime.now(JST)
@@ -205,61 +182,51 @@ class CynicismReportUseCases:
         await interaction.followup.send(
             f"現在: {now:%Y-%m-%d %H:%M JST}\n"
             f"集計状態: {paused_text}\n"
-            f"重み: Papyrus {format_weight(settings.weights.papyrus)} / "
-            f"人間 {format_weight(settings.weights.human)}\n"
             f"投稿先: <#{self._target_id}>\n"
             f"最終発表: {last_text}\n"
             f"実行環境: {environment_note}",
             ephemeral=True,
         )
 
-    async def set_weights(self, interaction: Interaction, papyrus: float | None, human: float | None) -> None:
-        """管理者が🥶の重みを変更する。省略した側は据え置く。"""
-        self._require_admin(interaction)
-        if papyrus is None and human is None:
-            message = "papyrus と human の少なくとも一方を指定してください。"
-            raise ArgumentError(message)
-        # 検証は入力だけで完結するため、応答を保留する前に済ませる。
-        validated_papyrus = self._validate_weight(papyrus)
-        validated_human = self._validate_weight(human)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        updated = await self._configuration.set_weights(papyrus=validated_papyrus, human=validated_human)
-        await interaction.followup.send(
-            f"重みを Papyrus {format_weight(updated.weights.papyrus)} / "
-            f"人間 {format_weight(updated.weights.human)} に変更しました。\n"
-            "※過去の期間の集計値も新しい重みで再計算されます。",
-            ephemeral=True,
-        )
-
     async def pause(self, interaction: Interaction) -> None:
         """管理者が🥶の記録と自動発表を停止する。"""
-        self._require_admin(interaction)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        await self._configuration.set_paused(paused=True, now=datetime.datetime.now(JST))
-        await interaction.followup.send(
-            "冷笑ポイントの記録と自動発表を停止しました。`/cynicism ranking` での閲覧は引き続き利用できます。",
-            ephemeral=True,
-        )
+        await self._set_paused(interaction, paused=True)
 
     async def resume(self, interaction: Interaction) -> None:
         """管理者が🥶の記録と自動発表を再開する。"""
+        await self._set_paused(interaction, paused=False)
+
+    async def _set_paused(self, interaction: Interaction, *, paused: bool) -> None:
+        """管理者を確認し、応答を保留してから停止状態を保存・通知する。"""
         self._require_admin(interaction)
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await self._configuration.set_paused(paused=False, now=datetime.datetime.now(JST))
-        await interaction.followup.send(
-            "冷笑ポイントの記録と自動発表を再開しました。停止中に付いた🥶は記録されていません。",
-            ephemeral=True,
+        await self._configuration.set_paused(paused=paused, now=datetime.datetime.now(JST))
+        notice = (
+            "冷笑ポイントの記録と自動発表を停止しました。`/cynicism ranking` での閲覧は引き続き利用できます。"
+            if paused
+            else "冷笑ポイントの記録と自動発表を再開しました。停止中に付いた🥶は記録されていません。"
         )
+        await interaction.followup.send(notice, ephemeral=True)
 
     async def build_ranking_for(
         self,
         period: CynicismPeriod,
-        settings: CynicismSettings,
         *,
         guild: discord.Guild | None = None,
     ) -> CynicismRanking:
-        """期間内の🥶と発言数から、2部門のランキングを組み立てる。"""
+        """同じ期間・チャンネル範囲から順位表と同率1位の発言を組み立てる。
+
+        Args:
+            period: 投稿日時を基準にした集計期間。
+            guild: 表示名とBot判定に使うサーバー。省略時は設定済みサーバーを使う。
+
+        Returns:
+            冷笑率順位、参考の合計順位、最多ポイントの全発言を含む集計結果。
+            記録がない場合は空の順位表を返す。
+
+        """
         scope = channel_scope(self._runtime_environment)
+        excluded_channel_count = await self._reactions.count_excluded_channels(self._server_id)
         papyrus_user_id = self._bot.user.id if self._bot.user is not None else 0
         counts = await self._reactions.aggregate_counts(
             period,
@@ -267,7 +234,7 @@ class CynicismReportUseCases:
             scope=scope,
         )
         if not counts:
-            return build_ranking(period, [], {}, {}, settings.weights)
+            return replace(build_ranking(period, [], {}, {}), excluded_channel_count=excluded_channel_count)
         message_counts = await self._reactions.aggregate_message_counts(period, scope=scope)
         member_ids = [entry.member_id for entry in counts]
         stored_names = await self._reactions.get_display_names(member_ids)
@@ -277,25 +244,65 @@ class CynicismReportUseCases:
             member_ids,
             stored_names,
         )
-        return build_ranking(period, counts, message_counts, identities, settings.weights)
+        ranking = build_ranking(period, counts, message_counts, identities)
+        top_messages = await self._reactions.most_reacted_messages(
+            period,
+            member_ids=[entry.member_id for entry in ranking.total_entries],
+            scope=scope,
+            papyrus_user_id=papyrus_user_id,
+        )
+        reactor_points = await self._reactions.aggregate_reactor_points(
+            period,
+            member_ids=[entry.member_id for entry in ranking.total_entries],
+            scope=scope,
+            papyrus_user_id=papyrus_user_id,
+        )
+        reactor_ids = list(reactor_points)
+        reactor_names = await self._reactions.get_display_names(reactor_ids)
+        reactors = resolve_identities(self._bot, guild or self._bot.get_guild(self._server_id), reactor_ids, reactor_names)
+        return replace(
+            ranking,
+            excluded_channel_count=excluded_channel_count,
+            reactor_contributions=tuple(
+                sorted(
+                    (
+                        ReactorContribution(member_id, reactors[member_id].display_name, points)
+                        for member_id, points in reactor_points.items()
+                    ),
+                    key=lambda entry: (-entry.points, entry.display_name.casefold(), entry.member_id),
+                )
+            ),
+            top_messages=tuple(
+                TopCynicismMessage(
+                    message_id=top.message_id,
+                    channel_id=top.channel_id,
+                    member_id=top.member_id,
+                    display_name=identities[top.member_id].display_name,
+                    points=top.reaction_count,
+                    guild_id=guild.id if guild is not None else self._server_id,
+                )
+                for top in top_messages
+            ),
+        )
 
     async def _post_or_update(
         self,
         period: CynicismPeriod,
-        settings: CynicismSettings,
         *,
         record_empty: bool,
     ) -> discord.Message | None:
         """集計結果を作り、既存投稿の編集または新規投稿を行う。"""
-        ranking = await self.build_ranking_for(period, settings)
+        ranking = await self.build_ranking_for(period)
         if ranking.is_empty:
-            # 対象が無い期間は投稿しない。定期処理では処理済みとして記録し、再集計を繰り返さない。
-            if record_empty:
-                await self._reports.save_empty(period, self._target_id, processed_at=datetime.datetime.now(JST))
-            return None
+            existing = await self._reports.get_delivery(period, self._target_id)
+            if existing is None or not existing.is_posted:
+                # 新規の空期間は投稿しない。既存の発表は除外で0件になっても更新して古い順位を残さない。
+                if record_empty:
+                    await self._reports.save_empty(period, self._target_id, processed_at=datetime.datetime.now(JST))
+                return None
         digest = ranking_digest(ranking)
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime.now(JST))
-        result = await self._delivery.upsert(period, embed, digest)
+        result = await self._delivery.upsert(period, embed, digest, files=build_report_files(ranking))
         if result.changed:
             await self._reports.save_posted(
                 period,
@@ -322,16 +329,6 @@ class CynicismReportUseCases:
             message = "開始日は YYYY-MM-DD 形式で指定してください。"
             raise ArgumentError(message) from error
         return period_from_start_date(resolved_type, start_date)
-
-    def _validate_weight(self, weight: float | None) -> Decimal | None:
-        """重みが許容範囲に収まっているかを検証する。"""
-        if weight is None:
-            return None
-        value = Decimal(str(weight))
-        if not MINIMUM_WEIGHT <= value <= MAXIMUM_WEIGHT:
-            message = f"重みは {MINIMUM_WEIGHT} 以上 {MAXIMUM_WEIGHT} 以下で指定してください。"
-            raise ArgumentError(message)
-        return value
 
     def _require_admin(self, interaction: Interaction) -> None:
         """Bot管理者ロールを持つ利用者だけに操作を許可する。"""

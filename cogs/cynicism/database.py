@@ -21,7 +21,7 @@ from cogs.talkdata.database import (
 from core.db import Base
 from core.runtime_environment import BotEnvironment
 
-from .constants import DEFAULT_HUMAN_WEIGHT, DEFAULT_PAPYRUS_WEIGHT, REACTION_SOURCE
+from .constants import REACTION_SOURCE
 
 
 class CynicismReaction(Base):
@@ -36,26 +36,38 @@ class CynicismReaction(Base):
     message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     reactor_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     is_burst: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False)
-    # 同じ相手へリアクションと返信の両方で🥶を向けた場合に、片方を取り消しても他方が残るよう主キーへ含める。
+    # 既存DBの主キーを維持する。過去の返信記録は集計対象から除外する。
     source: Mapped[str] = mapped_column(Text, primary_key=True, default=REACTION_SOURCE)
-    # 返信由来の場合の返信メッセージ自身のID。リアクション由来ではNULL。
+    # 過去の返信記録との互換性のため残す。新規記録では常にNULL。
     evidence_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
 
     __table_args__ = ({"schema": TALKDATA_SCHEMA},)
 
 
 class CynicismConfiguration(Base):
-    """冷笑ポイントの重みと一時停止状態を保持する単一行の設定。"""
+    """一時停止状態と、既存DBとの互換性のための旧設定を保持する。"""
 
     __tablename__ = "cynicism_configuration"
     __table_args__ = ({"schema": TALKDATA_SCHEMA},)
 
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=False)
-    papyrus_weight: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=DEFAULT_PAPYRUS_WEIGHT)
-    human_weight: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=DEFAULT_HUMAN_WEIGHT)
+    # 以下の重み2列は既存DBのNOT NULL列との互換性のため残す。集計や設定では使用しない。
+    papyrus_weight: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal(0))
+    human_weight: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal(1))
     is_paused: Mapped[bool] = mapped_column(Boolean, default=False)
     paused_at: Mapped[datetime.datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     updated_at: Mapped[datetime.datetime] = mapped_column(TIMESTAMP(timezone=True))
+
+
+class CynicismExcludedChannel(Base):
+    """サーバーのメンバーが設定した集計対象外のチャンネル・スレッド。"""
+
+    __tablename__ = "cynicism_excluded_channels"
+    __table_args__ = ({"schema": TALKDATA_SCHEMA},)
+
+    channel_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    name: Mapped[str] = mapped_column(Text)
 
 
 class CynicismReportDelivery(Base):
@@ -88,6 +100,7 @@ class CynicismDatabase:
         session_factory: async_sessionmaker[AsyncSession],
         environment: BotEnvironment,
     ) -> None:
+        """セッションファクトリと実行環境から、利用するDBスキーマを決定する。"""
         self._session_factory = session_factory
         self._database_schema = get_talkdata_schema(environment)
 
@@ -120,6 +133,7 @@ class CynicismDatabase:
                         cast("Table", DiscordMessage.__table__),
                         cast("Table", CynicismReaction.__table__),
                         cast("Table", CynicismConfiguration.__table__),
+                        cast("Table", CynicismExcludedChannel.__table__),
                         cast("Table", CynicismReportDelivery.__table__),
                     ],
                 )
