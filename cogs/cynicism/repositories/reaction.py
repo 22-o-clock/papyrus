@@ -77,10 +77,6 @@ class CynicismReactionRepository:
             CynicismReaction.source == REACTION_SOURCE,
         )
 
-    async def remove_reply_evidence(self, evidence_message_id: int) -> None:
-        """根拠となった🥶だけの返信が削除された場合の記録を削除する。"""
-        await self._delete(CynicismReaction.evidence_message_id == evidence_message_id)
-
     async def earliest_recorded_date(self) -> datetime.date | None:
         """記録済みの🥶が向けられた、最も古い発言の日付(JST)を返す。"""
         statement = select(func.min(DiscordMessage.post_time)).select_from(CynicismReaction).join(*_talkdata_join())
@@ -96,24 +92,18 @@ class CynicismReactionRepository:
         scope: ChannelScope,
     ) -> list[MemberReactionCounts]:
         """期間内の発言に向けられた🥶を、発言者ごとの件数へ集計する。"""
-        # 同一リアクターがリアクションと返信の両方で🥶を向けても1件として数える。
+        # 通常リアクションとスーパーリアクションを重複して数えない。
         reactor_pairs = distinct(tuple_(CynicismReaction.message_id, CynicismReaction.reactor_id))
         statement = (
             select(
                 DiscordMessage.member_id,
-                func.count(reactor_pairs).filter(CynicismReaction.reactor_id == papyrus_user_id),
-                func.count(reactor_pairs).filter(CynicismReaction.reactor_id != papyrus_user_id),
+                func.count(reactor_pairs),
                 func.count(distinct(CynicismReaction.message_id)),
             )
             .select_from(CynicismReaction)
             .join(*_talkdata_join())
             .where(
-                DiscordMessage.post_time >= period.start_at,
-                DiscordMessage.post_time < period.end_at,
-                # 自分の発言へ自分で🥶を付けてポイントを稼げないようにする。
-                CynicismReaction.reactor_id != DiscordMessage.member_id,
-                DiscordMessage.member_id != TALKDATA_DUMMY_ID,
-                *_scope_conditions(DiscordMessage.channel_id, scope),
+                *_reaction_conditions(period, scope, papyrus_user_id),
             )
             .group_by(DiscordMessage.member_id)
         )
@@ -123,11 +113,10 @@ class CynicismReactionRepository:
             return [
                 MemberReactionCounts(
                     member_id=member_id,
-                    papyrus_count=papyrus_count,
                     human_count=human_count,
                     cynical_message_count=cynical_message_count,
                 )
-                for member_id, papyrus_count, human_count, cynical_message_count in result.all()
+                for member_id, human_count, cynical_message_count in result.all()
             ]
 
     async def aggregate_message_counts(
@@ -160,6 +149,7 @@ class CynicismReactionRepository:
         *,
         member_id: int,
         scope: ChannelScope,
+        papyrus_user_id: int,
     ) -> list[CynicismMessageRecord]:
         """期間内に対象メンバーの発言へ向けられた🥶を、発言ごとの明細として返す。"""
         statement = (
@@ -174,10 +164,7 @@ class CynicismReactionRepository:
             .join(*_talkdata_join())
             .where(
                 DiscordMessage.member_id == member_id,
-                DiscordMessage.post_time >= period.start_at,
-                DiscordMessage.post_time < period.end_at,
-                CynicismReaction.reactor_id != DiscordMessage.member_id,
-                *_scope_conditions(DiscordMessage.channel_id, scope),
+                *_reaction_conditions(period, scope, papyrus_user_id),
             )
             .group_by(DiscordMessage.id, DiscordMessage.channel_id, DiscordMessage.post_time, DiscordMessage.content)
             .order_by(DiscordMessage.post_time)
@@ -218,6 +205,20 @@ def _talkdata_join() -> tuple[type[DiscordMessage], ColumnElement[bool]]:
         DiscordMessage,
         (DiscordMessage.id == CynicismReaction.message_id) & (DiscordMessage.edit_count == ORIGINAL_EDIT_COUNT),
     )
+
+
+def _reaction_conditions(period: CynicismPeriod, scope: ChannelScope, papyrus_user_id: int) -> list[ColumnElement[bool]]:
+    """期間・チャンネルを絞り、過去のPapyrus判定と自己リアクションを除外する。"""
+    return [
+        DiscordMessage.post_time >= period.start_at,
+        DiscordMessage.post_time < period.end_at,
+        CynicismReaction.source == REACTION_SOURCE,
+        CynicismReaction.reactor_id != papyrus_user_id,
+        CynicismReaction.reactor_id != DiscordMessage.member_id,
+        DiscordMessage.member_id != TALKDATA_DUMMY_ID,
+        DiscordMessage.id != TALKDATA_DUMMY_ID,
+        *_scope_conditions(DiscordMessage.channel_id, scope),
+    ]
 
 
 def _scope_conditions(

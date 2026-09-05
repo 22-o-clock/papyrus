@@ -2,24 +2,14 @@
 
 import datetime
 from dataclasses import dataclass
-from decimal import Decimal
 
 from .periods import CynicismPeriod
 
 
 @dataclass(frozen=True, slots=True)
-class CynicismWeights:
-    """冷笑ポイントの重み。"""
-
-    papyrus: Decimal
-    human: Decimal
-
-
-@dataclass(frozen=True, slots=True)
 class CynicismSettings:
-    """重みと一時停止状態をまとめた運用設定。"""
+    """一時停止状態を保持する運用設定。"""
 
-    weights: CynicismWeights
     is_paused: bool
     paused_at: datetime.datetime | None
 
@@ -41,10 +31,9 @@ class ChannelScope:
 
 @dataclass(frozen=True, slots=True)
 class MemberReactionCounts:
-    """発言者ごとの、重みを掛ける前の🥶件数。"""
+    """発言者ごとの🥶件数。"""
 
     member_id: int
-    papyrus_count: int
     human_count: int
     cynical_message_count: int
 
@@ -76,8 +65,7 @@ class RankingEntry:
     rank: int
     member_id: int
     display_name: str
-    points: Decimal
-    papyrus_count: int
+    points: int
     human_count: int
     cynical_message_count: int
     message_count: int
@@ -89,12 +77,10 @@ class CynicismRanking:
     """1つの期間に対する、合計部門と冷笑率部門の集計結果。"""
 
     period: CynicismPeriod
-    weights: CynicismWeights
     total_entries: tuple[RankingEntry, ...]
     rate_entries: tuple[RankingEntry, ...]
     qualification_threshold: int
-    total_points: Decimal
-    papyrus_reaction_count: int
+    total_points: int
     human_reaction_count: int
     member_count: int
 

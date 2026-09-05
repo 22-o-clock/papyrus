@@ -1,7 +1,7 @@
 from logging import getLogger
 
 import discord
-from discord import Interaction, Message, app_commands
+from discord import Interaction, app_commands
 from discord.ext import commands, tasks
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -82,10 +82,6 @@ class Cynicism(commands.Cog):
         await self._bot.wait_until_ready()
 
     @commands.Cog.listener()
-    async def on_message(self, message: Message) -> None:
-        await self._tracking_use_cases.on_message(message)
-
-    @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
         await self._tracking_use_cases.on_reaction_add(payload)
 
@@ -100,10 +96,6 @@ class Cynicism(commands.Cog):
     @commands.Cog.listener()
     async def on_raw_reaction_clear_emoji(self, payload: discord.RawReactionClearEmojiEvent) -> None:
         await self._tracking_use_cases.on_reaction_clear_emoji(payload)
-
-    @commands.Cog.listener()
-    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
-        await self._tracking_use_cases.on_raw_message_delete(payload)
 
     @cynicism.command(name="ranking", description="指定期間の冷笑王ランキングを表示します。")
     @app_commands.describe(period="集計期間の種別", start="期間内の任意の日 (YYYY-MM-DD、省略時は直近の完了期間)")
@@ -132,7 +124,7 @@ class Cynicism(commands.Cog):
     ) -> None:
         await self._report_use_cases.export_messages(interaction, member, period, start)
 
-    @cynicism.command(name="status", description="冷笑ポイントの重みと発表状態を表示します。")
+    @cynicism.command(name="status", description="冷笑ポイントの集計状態と発表状態を表示します。")
     async def status(self, interaction: Interaction) -> None:
         await self._report_use_cases.status(interaction)
 
@@ -146,16 +138,6 @@ class Cynicism(commands.Cog):
         start: str | None = None,
     ) -> None:
         await self._report_use_cases.publish(interaction, period, start)
-
-    @cynicism.command(name="weight", description="Papyrusと人間の🥶の重みを変更します。")
-    @app_commands.describe(papyrus="Papyrusの🥶1件あたりの点数", human="人間の🥶1件あたりの点数")
-    async def weight(
-        self,
-        interaction: Interaction,
-        papyrus: float | None = None,
-        human: float | None = None,
-    ) -> None:
-        await self._report_use_cases.set_weights(interaction, papyrus, human)
 
     @cynicism.command(name="pause", description="冷笑ポイントの記録と自動発表を一時停止します。")
     async def pause(self, interaction: Interaction) -> None:

@@ -2,7 +2,6 @@
 
 import datetime
 import hashlib
-from decimal import Decimal
 
 import discord
 
@@ -20,9 +19,9 @@ def report_marker(period: CynicismPeriod) -> str:
     return f"{REPORT_MARKER_PREFIX}{period.period_type.value}:{period.start_date.isoformat()}"
 
 
-def format_points(points: Decimal) -> str:
-    """冷笑ポイントを小数第1位まで揃えて表示する。"""
-    return f"{points:.1f}"
+def format_points(points: int) -> str:
+    """冷笑ポイントを整数で表示する。"""
+    return str(points)
 
 
 def format_rate(rate: float) -> str:
@@ -30,18 +29,12 @@ def format_rate(rate: float) -> str:
     return f"{rate * PERCENT_SCALE:.1f}%"
 
 
-def format_weight(weight: Decimal) -> str:
-    """重みを小数第1位まで揃えて表示する。"""
-    return f"{weight:.1f}"
-
-
 def ranking_digest(ranking: CynicismRanking) -> str:
     """内容が変化したかを判定するための指紋を返す。"""
     parts = [
+        "fixed-points-v1",
         ranking.period.period_type.value,
         ranking.period.start_date.isoformat(),
-        format_weight(ranking.weights.papyrus),
-        format_weight(ranking.weights.human),
         str(ranking.qualification_threshold),
     ]
     for section in (ranking.total_entries, ranking.rate_entries):
@@ -59,7 +52,7 @@ def build_empty_notice(period: CynicismPeriod) -> str:
 
 
 def build_ranking_embed(ranking: CynicismRanking, *, updated_at: datetime.datetime) -> discord.Embed:
-    """2部門の王とランキング表を1つのEmbedへまとめる。"""
+    """合計と冷笑率の王とランキング表をまとめる。"""
     # 期間が終わる前に見た場合は順位が確定していないため、途中経過であることを明示する。
     is_in_progress = updated_at < ranking.period.end_at
     title = f"{ranking.period.label}冷笑王 (集計中)" if is_in_progress else f"{ranking.period.label}冷笑王"
@@ -97,12 +90,7 @@ def build_ranking_embed(ranking: CynicismRanking, *, updated_at: datetime.dateti
 
     embed.add_field(name="サマリ", value=_format_summary(ranking), inline=False)
     embed.set_footer(
-        text=(
-            f"{report_marker(ranking.period)} | "
-            f"重み Papyrus {format_weight(ranking.weights.papyrus)} / 人間 {format_weight(ranking.weights.human)} | "
-            "集計基準=発言の投稿日時 (JST) | "
-            f"最終更新 {updated_at:%Y-%m-%d %H:%M}"
-        )
+        text=(f"{report_marker(ranking.period)} | 集計基準=発言の投稿日時 (JST) | 最終更新 {updated_at:%Y-%m-%d %H:%M}")
     )
     return embed
 
@@ -111,18 +99,15 @@ def _format_champion(entry: RankingEntry) -> str:
     """王として表示する1名分の内訳を返す。"""
     return (
         f"**{entry.display_name}** — {format_points(entry.points)} pt\n"
-        f"冷笑認定された発言 {entry.cynical_message_count}件 / 発言 {entry.message_count}件 / "
-        f"冷笑率 {format_rate(entry.rate)}\n"
-        f"内訳: Papyrus {entry.papyrus_count}件 / 人間 {entry.human_count}件"
+        f"冷笑率 {format_rate(entry.rate)} / 発言 {entry.message_count}件\n"
+        f"冷笑認定された発言 {entry.cynical_message_count}件"
     )
 
 
 def _format_total_lines(entries: tuple[RankingEntry, ...]) -> str:
     """合計部門の上位を1行ずつ整形する。"""
     return "\n".join(
-        f"{entry.rank}. {entry.display_name} — {format_points(entry.points)} pt "
-        f"(Papyrus {entry.papyrus_count} / 人間 {entry.human_count})"
-        for entry in entries[:RANKING_DISPLAY_LIMIT]
+        f"{entry.rank}. {entry.display_name} — {format_points(entry.points)} pt" for entry in entries[:RANKING_DISPLAY_LIMIT]
     )
 
 
@@ -138,9 +123,7 @@ def _format_rate_lines(entries: tuple[RankingEntry, ...]) -> str:
 def _format_summary(ranking: CynicismRanking) -> str:
     """全体の集計値と、冷笑率の読み方の注意を返す。"""
     return (
-        f"総ポイント {format_points(ranking.total_points)} pt "
-        f"(Papyrus判定 {ranking.papyrus_reaction_count}件 / 人間 {ranking.human_reaction_count}件)\n"
+        f"総ポイント {format_points(ranking.total_points)} pt\n"
         f"対象 {ranking.member_count}名 / 資格ライン到達 {ranking.qualified_member_count}名\n"
-        "※冷笑率は重み付きポイントを発言数で割った値のため、100%を超えることがあります。"
-        "重みを変更すると過去の集計値も変わります。"
+        "※冷笑率はポイントを発言数で割った値のため、100%を超えることがあります。"
     )

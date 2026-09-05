@@ -12,12 +12,11 @@ from unittest.mock import AsyncMock, Mock
 
 import discord
 
-from cogs.cynicism.constants import CUSTOM_CYNICISM_EMOJI_NAME, CYNICISM_EMOJI, JST, REACTION_SOURCE, REPLY_SOURCE
+from cogs.cynicism.constants import CUSTOM_CYNICISM_EMOJI_NAME, CYNICISM_EMOJI, JST, REACTION_SOURCE
 from cogs.cynicism.models import (
     ChannelScope,
     CynicismMessageRecord,
     CynicismSettings,
-    CynicismWeights,
     MemberReactionCounts,
     RankedMemberIdentity,
 )
@@ -35,8 +34,8 @@ from cogs.cynicism.services.message_delivery import (
     CynicismReportMessageDelivery,
     ReportMessageOwnershipError,
 )
-from cogs.cynicism.services.ranking import build_ranking, cynicism_rate, weighted_points
-from cogs.cynicism.services.reaction_filter import is_cynicism_emoji, is_cynicism_only_content
+from cogs.cynicism.services.ranking import build_ranking, cynicism_rate
+from cogs.cynicism.services.reaction_filter import is_cynicism_emoji
 from cogs.cynicism.services.report_builder import (
     build_empty_notice,
     build_ranking_embed,
@@ -52,7 +51,6 @@ from core.exception import ArgumentError
 if TYPE_CHECKING:
     from cogs.cynicism.models import CynicismRanking
 
-DEFAULT_WEIGHTS = CynicismWeights(papyrus=Decimal("3.00"), human=Decimal("1.00"))
 PAPYRUS_USER_ID = 100
 HUMAN_USER_ID = 200
 AUTHOR_USER_ID = 300
@@ -68,7 +66,6 @@ EXPECTED_PUBLISHABLE_PERIOD_COUNT = 3
 HEAVY_POSTER_ID = 2
 LIGHT_POSTER_ID = 1
 TARGET_MESSAGE_ID = 12345
-REPLY_MESSAGE_ID = 777
 
 
 def ensure(condition: object, message: str = "") -> None:
@@ -77,10 +74,9 @@ def ensure(condition: object, message: str = "") -> None:
         raise AssertionError(message)
 
 
-def make_settings(*, papyrus: str = "3.00", human: str = "1.00", is_paused: bool = False) -> CynicismSettings:
+def make_settings(*, is_paused: bool = False) -> CynicismSettings:
     """テスト用の運用設定を組み立てます。"""
     return CynicismSettings(
-        weights=CynicismWeights(papyrus=Decimal(papyrus), human=Decimal(human)),
         is_paused=is_paused,
         paused_at=None,
     )
@@ -258,24 +254,6 @@ class ReactionFilterTest(unittest.TestCase):
 
         ensure(not is_cynicism_emoji(emoji))
 
-    def test_cynicism_only_content_ignores_whitespace_and_variation_selector(self) -> None:
-        for content in (CYNICISM_EMOJI, f"{CYNICISM_EMOJI}{CYNICISM_EMOJI}", f" {CYNICISM_EMOJI} ", f"{CYNICISM_EMOJI}️"):
-            with self.subTest(content=content):
-                ensure(is_cynicism_only_content(content))
-
-    def test_cynicism_only_content_accepts_the_target_custom_emoji_tag(self) -> None:
-        tag = f"<:{CUSTOM_CYNICISM_EMOJI_NAME}:123456789012345678>"
-        for content in (tag, f"{tag}{tag}", f" {tag} ", f"{tag}{CYNICISM_EMOJI}"):
-            with self.subTest(content=content):
-                ensure(is_cynicism_only_content(content))
-
-    def test_content_with_other_characters_is_rejected(self) -> None:
-        tag = f"<:{CUSTOM_CYNICISM_EMOJI_NAME}:123456789012345678>"
-        other_custom_emoji_tag = "<:other_emoji:123456789012345678>"
-        for content in (f"{CYNICISM_EMOJI}ですね", "", "   ", "冷笑", f"{tag}ですね", other_custom_emoji_tag):
-            with self.subTest(content=content):
-                ensure(not is_cynicism_only_content(content))
-
 
 class ChannelScopeTest(unittest.TestCase):
     def test_production_excludes_the_chatbot_test_channel(self) -> None:
@@ -302,56 +280,37 @@ class ChannelScopeTest(unittest.TestCase):
 
 
 class RankingTest(unittest.TestCase):
-    def test_papyrus_reactions_weigh_more_than_human_reactions(self) -> None:
-        counts = MemberReactionCounts(member_id=1, papyrus_count=3, human_count=2, cynical_message_count=4)
-
-        ensure(weighted_points(counts, DEFAULT_WEIGHTS) == Decimal("11.00"))
-
     def test_rate_is_zero_when_the_member_has_no_messages(self) -> None:
-        ensure(cynicism_rate(Decimal(5), 0) == 0.0)
+        ensure(cynicism_rate(5, 0) == 0.0)
 
-    def test_changing_the_weight_changes_the_total_champion(self) -> None:
+    def test_rate_champion_can_differ_from_the_total_champion(self) -> None:
         counts = [
-            MemberReactionCounts(member_id=1, papyrus_count=1, human_count=0, cynical_message_count=1),
-            MemberReactionCounts(member_id=2, papyrus_count=0, human_count=5, cynical_message_count=5),
+            MemberReactionCounts(member_id=1, human_count=4, cynical_message_count=2),
+            MemberReactionCounts(member_id=2, human_count=10, cynical_message_count=5),
         ]
-        message_counts = {1: 50, 2: 50}
         identities = {
             1: RankedMemberIdentity(1, "少数精鋭", is_bot=False),
             2: RankedMemberIdentity(2, "数打ち", is_bot=False),
         }
-        period = period_from_start_date(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
-
-        with_default = build_ranking(period, counts, message_counts, identities, DEFAULT_WEIGHTS)
-        with_heavier = build_ranking(
-            period,
-            counts,
-            message_counts,
-            identities,
-            CynicismWeights(papyrus=Decimal("6.00"), human=Decimal("1.00")),
-        )
-
-        default_champion = with_default.total_champion
-        heavier_champion = with_heavier.total_champion
-        if default_champion is None or heavier_champion is None:
-            self.fail("両方の重みで冷笑王が決まるはずです")
-        ensure(default_champion.member_id == HEAVY_POSTER_ID, "既定の重みでは合計5.0ptの数打ちが1位になります")
-        ensure(heavier_champion.member_id == LIGHT_POSTER_ID, "Papyrusの重みを6.0にすると合計6.0ptの少数精鋭が1位になります")
+        period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
+        ranking = build_ranking(period, counts, {1: 10, 2: 100}, identities)
+        ensure(ranking.rate_champion is not None and ranking.rate_champion.member_id == LIGHT_POSTER_ID)
+        ensure(ranking.total_champion is not None and ranking.total_champion.member_id == HEAVY_POSTER_ID)
 
     def test_bot_authors_are_excluded_from_the_ranking(self) -> None:
-        counts = [MemberReactionCounts(member_id=1, papyrus_count=1, human_count=0, cynical_message_count=1)]
+        counts = [MemberReactionCounts(member_id=1, human_count=3, cynical_message_count=1)]
         identities = {1: RankedMemberIdentity(1, "Bot", is_bot=True)}
         period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
-        ranking = build_ranking(period, counts, {1: 100}, identities, DEFAULT_WEIGHTS)
+        ranking = build_ranking(period, counts, {1: 100}, identities)
 
         ensure(ranking.is_empty)
 
     def test_tied_totals_share_the_same_rank(self) -> None:
         counts = [
-            MemberReactionCounts(member_id=1, papyrus_count=1, human_count=0, cynical_message_count=1),
-            MemberReactionCounts(member_id=2, papyrus_count=1, human_count=0, cynical_message_count=1),
-            MemberReactionCounts(member_id=3, papyrus_count=0, human_count=1, cynical_message_count=1),
+            MemberReactionCounts(member_id=1, human_count=3, cynical_message_count=1),
+            MemberReactionCounts(member_id=2, human_count=3, cynical_message_count=1),
+            MemberReactionCounts(member_id=3, human_count=1, cynical_message_count=1),
         ]
         identities = {
             1: RankedMemberIdentity(1, "A", is_bot=False),
@@ -360,14 +319,14 @@ class RankingTest(unittest.TestCase):
         }
         period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
-        ranking = build_ranking(period, counts, {1: 20, 2: 20, 3: 20}, identities, DEFAULT_WEIGHTS)
+        ranking = build_ranking(period, counts, {1: 20, 2: 20, 3: 20}, identities)
 
         ensure([entry.rank for entry in ranking.total_entries] == [1, 1, 3])
 
     def test_members_below_the_threshold_stay_in_the_total_ranking_only(self) -> None:
         counts = [
-            MemberReactionCounts(member_id=1, papyrus_count=1, human_count=0, cynical_message_count=1),
-            MemberReactionCounts(member_id=2, papyrus_count=1, human_count=0, cynical_message_count=1),
+            MemberReactionCounts(member_id=1, human_count=3, cynical_message_count=1),
+            MemberReactionCounts(member_id=2, human_count=3, cynical_message_count=1),
         ]
         identities = {
             1: RankedMemberIdentity(1, "常連", is_bot=False),
@@ -375,46 +334,68 @@ class RankingTest(unittest.TestCase):
         }
         period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
-        ranking = build_ranking(period, counts, {1: 40, 2: 1}, identities, DEFAULT_WEIGHTS)
+        ranking = build_ranking(period, counts, {1: 40, 2: 1}, identities)
 
         ensure({entry.member_id for entry in ranking.total_entries} == {1, 2})
         ensure([entry.member_id for entry in ranking.rate_entries] == [1])
         ensure(ranking.qualified_member_count == 1)
 
-    def test_summary_counts_reactions_by_source(self) -> None:
-        counts = [MemberReactionCounts(member_id=1, papyrus_count=2, human_count=3, cynical_message_count=4)]
+    def test_summary_counts_human_reactions(self) -> None:
+        counts = [MemberReactionCounts(member_id=1, human_count=9, cynical_message_count=4)]
         identities = {1: RankedMemberIdentity(1, "A", is_bot=False)}
         period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
-        ranking = build_ranking(period, counts, {1: 20}, identities, DEFAULT_WEIGHTS)
+        ranking = build_ranking(period, counts, {1: 20}, identities)
 
-        ensure(ranking.papyrus_reaction_count == 2)  # noqa: PLR2004 - テストデータの件数。
-        ensure(ranking.human_reaction_count == 3)  # noqa: PLR2004 - テストデータの件数。
+        ensure(ranking.human_reaction_count == 9)  # noqa: PLR2004 - テストデータの件数。
         ensure(ranking.total_points == Decimal("9.00"))
 
 
-def build_sample_ranking(*, papyrus_weight: str = "3.00") -> "CynicismRanking":
+def build_sample_ranking() -> "CynicismRanking":
     """Embed・digestのテストで使う代表的なランキングを返します。"""
     counts = [
-        MemberReactionCounts(member_id=1, papyrus_count=3, human_count=1, cynical_message_count=3),
-        MemberReactionCounts(member_id=2, papyrus_count=0, human_count=2, cynical_message_count=2),
+        MemberReactionCounts(member_id=1, human_count=10, cynical_message_count=3),
+        MemberReactionCounts(member_id=2, human_count=2, cynical_message_count=2),
     ]
     identities = {
         1: RankedMemberIdentity(1, "冷笑家", is_bot=False),
         2: RankedMemberIdentity(2, "ときどき", is_bot=False),
     }
     period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
-    weights = CynicismWeights(papyrus=Decimal(papyrus_weight), human=Decimal("1.00"))
-    return build_ranking(period, counts, {1: 40, 2: 30}, identities, weights)
+    return build_ranking(period, counts, {1: 40, 2: 30}, identities)
 
 
 class ReportBuilderTest(unittest.TestCase):
+    def test_summary_shows_points_and_qualification_counts_without_reaction_count(self) -> None:
+        """サマリの文面・改行と資格人数を検証し、重複するリアクション件数の再表示を防ぐ。"""
+        sample = build_sample_ranking()
+        counts = [MemberReactionCounts(1, 10, 3), MemberReactionCounts(2, 2, 2)]
+        identities = {
+            entry.member_id: RankedMemberIdentity(entry.member_id, entry.display_name, is_bot=False)
+            for entry in sample.total_entries
+        }
+        for message_counts, qualified_count in (({1: 10, 2: 1}, 1), ({1: 1, 2: 1}, 0), ({1: 10, 2: 10}, 2)):
+            with self.subTest(qualified_count=qualified_count):
+                ranking = build_ranking(sample.period, counts, message_counts, identities)
+                embed = build_ranking_embed(ranking, updated_at=ranking.period.end_at)
+                summary = next(field for field in embed.fields if field.name == "サマリ")
+
+                ensure(
+                    summary.value
+                    == (
+                        "総ポイント 12 pt\n"
+                        f"対象 2名 / 資格ライン到達 {qualified_count}名\n"
+                        "※冷笑率はポイントを発言数で割った値のため、100%を超えることがあります。"
+                    ),
+                    f"サマリの出力が想定と異なります: {summary.value!r}",
+                )
+
     def test_marker_identifies_the_period_type_and_start(self) -> None:
         period = period_from_start_date(CynicismPeriodType.MONTHLY, datetime.date(2026, 7, 15))
 
         ensure(report_marker(period) == "cynicism-report:monthly:2026-07-01")
 
-    def test_embed_shows_both_champions_and_the_threshold(self) -> None:
+    def test_embed_shows_both_champions(self) -> None:
         ranking = build_sample_ranking()
 
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime(2026, 7, 31, 22, 0, tzinfo=JST))
@@ -426,23 +407,20 @@ class ReportBuilderTest(unittest.TestCase):
         ensure(any(name is not None and "冷笑率王 (平均)" in name for name in field_names))
         footer_text = embed.footer.text
         if footer_text is None:
-            self.fail("フッターに識別子と重みが必要です")
+            self.fail("フッターに識別子が必要です")
         ensure(report_marker(ranking.period) in footer_text)
-        ensure("重み Papyrus 3.0 / 人間 1.0" in footer_text)
+        ensure("重み" not in footer_text)
 
     def test_rate_champion_is_absent_when_nobody_qualifies(self) -> None:
-        counts = [MemberReactionCounts(member_id=1, papyrus_count=1, human_count=0, cynical_message_count=1)]
+        counts = [MemberReactionCounts(member_id=1, human_count=3, cynical_message_count=1)]
         identities = {1: RankedMemberIdentity(1, "一言だけ", is_bot=False)}
         period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
-        ranking = build_ranking(period, counts, {1: 1}, identities, DEFAULT_WEIGHTS)
+        ranking = build_ranking(period, counts, {1: 1}, identities)
 
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime(2026, 7, 31, 22, 0, tzinfo=JST))
 
         rate_field = next(field for field in embed.fields if field.name is not None and "冷笑率王" in field.name)
         ensure(rate_field.value is not None and "該当なし" in rate_field.value)
-
-    def test_digest_changes_when_the_weight_changes(self) -> None:
-        ensure(ranking_digest(build_sample_ranking()) != ranking_digest(build_sample_ranking(papyrus_weight="5.00")))
 
     def test_digest_is_stable_for_the_same_ranking(self) -> None:
         ensure(ranking_digest(build_sample_ranking()) == ranking_digest(build_sample_ranking()))
@@ -586,7 +564,6 @@ def make_tracking_use_cases(
             remove_reaction=AsyncMock(),
             remove_message_reactions=AsyncMock(),
             remove_emoji_reactions=AsyncMock(),
-            remove_reply_evidence=AsyncMock(),
         ),
     )
     configuration = cast("Any", SimpleNamespace(get=AsyncMock(return_value=make_settings(is_paused=is_paused))))
@@ -611,26 +588,6 @@ def make_reaction_payload(
             message_author_id=AUTHOR_USER_ID,
             member=SimpleNamespace(bot=reactor_is_bot),
             burst=False,
-        ),
-    )
-
-
-def make_reply_message(
-    *,
-    author_id: int = PAPYRUS_USER_ID,
-    content: str = CYNICISM_EMOJI,
-    reference: bool = True,
-) -> discord.Message:
-    """🥶だけの返信メッセージの代役を返します。"""
-    return cast(
-        "discord.Message",
-        SimpleNamespace(
-            id=REPLY_MESSAGE_ID,
-            author=SimpleNamespace(id=author_id),
-            content=content,
-            reference=SimpleNamespace(message_id=TARGET_MESSAGE_ID, resolved=None) if reference else None,
-            guild=SimpleNamespace(id=GUILD_ID),
-            channel=SimpleNamespace(id=CHANNEL_ID),
         ),
     )
 
@@ -699,45 +656,13 @@ class TrackingTest(unittest.IsolatedAsyncioTestCase):
 
         reactions.remove_reaction.assert_awaited_once()
 
-    async def test_papyrus_reply_with_only_the_emoji_is_recorded(self) -> None:
+    async def test_papyrus_reaction_is_ignored_even_without_member_information(self) -> None:
         use_cases, _, reactions = make_tracking_use_cases()
-
-        await use_cases.on_message(make_reply_message())
-
-        reactions.record.assert_awaited_once()
-        event = reactions.record.await_args.args[0]
-        ensure(event.source == REPLY_SOURCE)
-        ensure(event.evidence_message_id == REPLY_MESSAGE_ID)
-        ensure(event.reactor_id == PAPYRUS_USER_ID)
-        ensure(event.message_id == TARGET_MESSAGE_ID)
-
-    async def test_reply_with_extra_text_is_ignored(self) -> None:
-        use_cases, _, reactions = make_tracking_use_cases()
-
-        await use_cases.on_message(make_reply_message(content=f"{CYNICISM_EMOJI} ですね"))
-
+        payload = make_reaction_payload()
+        payload.user_id = PAPYRUS_USER_ID
+        payload.member = None
+        await use_cases.on_reaction_add(payload)
         reactions.record.assert_not_awaited()
-
-    async def test_standalone_emoji_post_is_ignored(self) -> None:
-        use_cases, _, reactions = make_tracking_use_cases()
-
-        await use_cases.on_message(make_reply_message(reference=False))
-
-        reactions.record.assert_not_awaited()
-
-    async def test_reply_from_someone_else_is_ignored(self) -> None:
-        use_cases, _, reactions = make_tracking_use_cases()
-
-        await use_cases.on_message(make_reply_message(author_id=HUMAN_USER_ID))
-
-        reactions.record.assert_not_awaited()
-
-    async def test_deleting_the_reply_removes_its_point(self) -> None:
-        use_cases, _, reactions = make_tracking_use_cases()
-
-        await use_cases.on_raw_message_delete(cast("Any", SimpleNamespace(message_id=REPLY_MESSAGE_ID)))
-
-        reactions.remove_reply_evidence.assert_awaited_once_with(REPLY_MESSAGE_ID)
 
 
 class ReportUseCasesTest(unittest.IsolatedAsyncioTestCase):
@@ -796,23 +721,6 @@ class ReportUseCasesTest(unittest.IsolatedAsyncioTestCase):
         # 2026-07-23は木曜なので、直前の切り替えである2026-07-17 (金) 22:00の週になる。
         ensure(period.start_at == datetime.datetime(2026, 7, 17, 22, 0, tzinfo=JST))
 
-    def test_weight_outside_the_allowed_range_is_rejected(self) -> None:
-        use_cases = self.build_use_cases()
-
-        for weight in (-1.0, 1000.0):
-            with self.subTest(weight=weight):
-                try:
-                    use_cases._validate_weight(weight)  # noqa: SLF001
-                except ArgumentError:
-                    continue
-                self.fail("許容範囲外の重みは利用者向けエラーにする必要があります")
-
-    def test_weight_inside_the_allowed_range_is_accepted(self) -> None:
-        use_cases = self.build_use_cases()
-
-        ensure(use_cases._validate_weight(2.5) == Decimal("2.5"))  # noqa: SLF001
-        ensure(use_cases._validate_weight(None) is None)  # noqa: SLF001
-
 
 class ChannelScopeModelTest(unittest.TestCase):
     def test_included_ids_take_precedence(self) -> None:
@@ -852,7 +760,7 @@ def make_configuration_row() -> SimpleNamespace:
     """設定テーブルの1行分の代役を返します。"""
     return SimpleNamespace(
         papyrus_weight=Decimal("3.00"),
-        human_weight=Decimal("1.00"),
+        human_weight=Decimal("9.00"),
         is_paused=False,
         paused_at=None,
     )
@@ -872,7 +780,7 @@ class ConfigurationRepositoryTest(unittest.IsolatedAsyncioTestCase):
         settings = await repository.get()
 
         ensure("commit" not in session.calls, "設定の読み取りは1つのトランザクション内で完結する必要があります")
-        ensure(settings.weights.papyrus == Decimal("3.00"))
+        ensure(settings == CynicismSettings(is_paused=False, paused_at=None))
         ensure(not settings.is_paused)
 
     async def test_updating_settings_does_not_commit_midway(self) -> None:
@@ -974,7 +882,6 @@ class InteractionDeadlineTest(unittest.IsolatedAsyncioTestCase):
             "Any",
             SimpleNamespace(
                 get=interaction.record_database_access,
-                set_weights=interaction.record_database_access,
                 set_paused=interaction.record_database_access,
             ),
         )
@@ -994,15 +901,6 @@ class InteractionDeadlineTest(unittest.IsolatedAsyncioTestCase):
         ensure("response.send_message" not in interaction.calls)
         ensure(interaction.calls[-1] == "followup.send")
 
-    async def test_weight_defers_before_touching_the_database(self) -> None:
-        interaction = InteractionRecorder(user=make_admin_member(self.ADMIN_ROLE_ID))
-        use_cases = self.build_use_cases(interaction)
-
-        await use_cases.set_weights(cast("Any", interaction), 5.0, None)
-
-        ensure(interaction.calls[0] == "defer", "DBアクセスより先に応答を保留する必要があります")
-        ensure(interaction.calls[-1] == "followup.send")
-
     async def test_pause_and_resume_defer_before_touching_the_database(self) -> None:
         for action in ("pause", "resume"):
             with self.subTest(action=action):
@@ -1013,17 +911,6 @@ class InteractionDeadlineTest(unittest.IsolatedAsyncioTestCase):
 
                 ensure(interaction.calls[0] == "defer", "DBアクセスより先に応答を保留する必要があります")
                 ensure(interaction.calls[-1] == "followup.send")
-
-    async def test_invalid_weight_is_rejected_before_deferring(self) -> None:
-        interaction = InteractionRecorder(user=make_admin_member(self.ADMIN_ROLE_ID))
-        use_cases = self.build_use_cases(interaction)
-
-        try:
-            await use_cases.set_weights(cast("Any", interaction), 1000.0, None)
-        except ArgumentError:
-            ensure(interaction.calls == [], "入力の検証だけで弾ける場合は応答を保留しません")
-            return
-        self.fail("許容範囲外の重みは利用者向けエラーにする必要があります")
 
 
 class ExportMessagesTest(unittest.IsolatedAsyncioTestCase):
@@ -1092,7 +979,7 @@ class ExportMessagesTest(unittest.IsolatedAsyncioTestCase):
                 channel_id=CHANNEL_ID,
                 post_time=post_time,
                 content="そんなの意味なくない?",
-                reactor_ids=(PAPYRUS_USER_ID, HUMAN_USER_ID),
+                reactor_ids=(HUMAN_USER_ID,),
             )
         ]
         use_cases = self.build_use_cases(records=records, display_names={HUMAN_USER_ID: "人間さん"})
@@ -1108,8 +995,8 @@ class ExportMessagesTest(unittest.IsolatedAsyncioTestCase):
         ensure(rows[1][0] == "発言者さん", "発言者列は対象メンバーの表示名にする必要があります")
         ensure(rows[1][1] == "2026-07-28 21:00:00", "タイムスタンプはJSTで表示する必要があります")
         ensure(rows[1][2] == "そんなの意味なくない?")
-        ensure(rows[1][3] == "4.0", "Papyrus 3.0 + 人間 1.0 の重みが適用される必要があります")
-        ensure(rows[1][4] == "Papyrus, 人間さん", "🥶を向けたアカウントを向けた順に列挙する必要があります")
+        ensure(rows[1][3] == "1", "リアクション1件を1ポイントとして数える必要があります")
+        ensure(rows[1][4] == "人間さん", "🥶を向けたアカウントを向けた順に列挙する必要があります")
         ensure(rows[1][5] == f"https://discord.com/channels/{GUILD_ID}/{CHANNEL_ID}/{TARGET_MESSAGE_ID}")
 
 
@@ -1139,7 +1026,7 @@ class ScheduledReportTest(unittest.IsolatedAsyncioTestCase):
         async def save_posted(period: CynicismPeriod, _target_id: int, _message_id: int, **_: object) -> None:
             recorded.posted_periods.append(period)
 
-        async def build_ranking_for(period: CynicismPeriod, _settings: object, **_: object) -> object:
+        async def build_ranking_for(period: CynicismPeriod, **_: object) -> object:
             recorded.aggregated.append(period)
             return SimpleNamespace(is_empty=ranking_is_empty)
 

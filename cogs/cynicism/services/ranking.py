@@ -1,12 +1,10 @@
-"""冷笑ポイントの重み付けと、合計・冷笑率2部門のランキング組み立て。"""
+"""冷笑ポイントと、合計・冷笑率2部門のランキング組み立て。"""
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from decimal import Decimal
 
 from cogs.cynicism.models import (
     CynicismRanking,
-    CynicismWeights,
     MemberReactionCounts,
     RankedMemberIdentity,
     RankingEntry,
@@ -14,12 +12,7 @@ from cogs.cynicism.models import (
 from cogs.cynicism.periods import CynicismPeriod, qualification_threshold
 
 
-def weighted_points(counts: MemberReactionCounts, weights: CynicismWeights) -> Decimal:
-    """Papyrusと人間の🥶件数へ、それぞれの重みを掛けた冷笑ポイントを返す。"""
-    return counts.papyrus_count * weights.papyrus + counts.human_count * weights.human
-
-
-def cynicism_rate(points: Decimal, message_count: int) -> float:
+def cynicism_rate(points: int, message_count: int) -> float:
     """発言1件あたりの冷笑ポイントを返す。発言が無い場合は0とする。"""
     if message_count <= 0:
         return 0.0
@@ -31,7 +24,6 @@ def build_ranking(
     counts: Sequence[MemberReactionCounts],
     message_counts: Mapping[int, int],
     identities: Mapping[int, RankedMemberIdentity],
-    weights: CynicismWeights,
 ) -> CynicismRanking:
     """合計部門と、資格ラインを適用した冷笑率部門を組み立てる。"""
     threshold = qualification_threshold(period)
@@ -41,7 +33,7 @@ def build_ranking(
         # Botの発言は競争の対象にしない。talkdata側にBot判定が無いためここで落とす。
         if identity is not None and identity.is_bot:
             continue
-        points = weighted_points(member_counts, weights)
+        points = member_counts.human_count
         if points <= 0:
             continue
         message_count = message_counts.get(member_counts.member_id, 0)
@@ -52,7 +44,6 @@ def build_ranking(
                 member_id=member_counts.member_id,
                 display_name=display_name,
                 points=points,
-                papyrus_count=member_counts.papyrus_count,
                 human_count=member_counts.human_count,
                 cynical_message_count=member_counts.cynical_message_count,
                 message_count=message_count,
@@ -65,12 +56,10 @@ def build_ranking(
     rate_entries = _ranked(qualified, lambda entry: entry.rate)
     return CynicismRanking(
         period=period,
-        weights=weights,
         total_entries=total_entries,
         rate_entries=rate_entries,
         qualification_threshold=threshold,
-        total_points=sum((entry.points for entry in rows), Decimal(0)),
-        papyrus_reaction_count=sum(entry.papyrus_count for entry in rows),
+        total_points=sum(entry.points for entry in rows),
         human_reaction_count=sum(entry.human_count for entry in rows),
         member_count=len(rows),
     )

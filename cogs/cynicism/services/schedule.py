@@ -19,7 +19,7 @@ MAXIMUM_BACKFILL_PERIODS = {
     CynicismPeriodType.YEARLY: 1,
 }
 
-# 遅れて付いた🥶や重み変更を反映するため、発表済みでも再集計する期間数。
+# 遅れて付いた🥶を反映するため、発表済みでも再集計する期間数。
 REFRESH_PERIOD_COUNTS = {
     CynicismPeriodType.WEEKLY: 4,
     CynicismPeriodType.MONTHLY: 2,
