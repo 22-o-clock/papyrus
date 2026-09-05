@@ -11,7 +11,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from cogs.cynicism.constants import JST, REACTION_SOURCE
 from cogs.cynicism.database import CynicismDatabase, CynicismReaction
-from cogs.cynicism.models import ChannelScope, CynicismMessageRecord, MemberReactionCounts
+from cogs.cynicism.models import ChannelScope, CynicismMessageRecord, MemberReactionCounts, MessageReactionCounts
 from cogs.cynicism.periods import CynicismPeriod
 from cogs.talkdata.database import DiscordMember, DiscordMessage
 
@@ -182,6 +182,50 @@ class CynicismReactionRepository:
                 )
                 for message_id, channel_id, post_time, content, reactor_ids in result.all()
             ]
+
+    async def most_reacted_messages(
+        self,
+        period: CynicismPeriod,
+        *,
+        member_ids: Sequence[int],
+        scope: ChannelScope,
+        papyrus_user_id: int,
+    ) -> list[MessageReactionCounts]:
+        """最多リアクションの発言を同点も含めて全件、投稿日時・ID順で返す。"""
+        if not member_ids:
+            return []
+        reaction_count = func.count(distinct(CynicismReaction.reactor_id))
+        ranked_messages = (
+            select(
+                DiscordMessage.id,
+                DiscordMessage.channel_id,
+                DiscordMessage.member_id,
+                reaction_count.label("reaction_count"),
+                DiscordMessage.post_time,
+                func.rank().over(order_by=reaction_count.desc()).label("rank"),
+            )
+            .select_from(CynicismReaction)
+            .join(*_talkdata_join())
+            .where(
+                DiscordMessage.member_id.in_(member_ids),
+                *_reaction_conditions(period, scope, papyrus_user_id),
+            )
+            .group_by(DiscordMessage.id, DiscordMessage.channel_id, DiscordMessage.member_id, DiscordMessage.post_time)
+            .subquery()
+        )
+        statement = (
+            select(
+                ranked_messages.c.id,
+                ranked_messages.c.channel_id,
+                ranked_messages.c.member_id,
+                ranked_messages.c.reaction_count,
+            )
+            .where(ranked_messages.c.rank == 1)
+            .order_by(ranked_messages.c.post_time, ranked_messages.c.id)
+        )
+        async with self._database.session() as session:
+            rows = (await session.execute(statement)).all()
+            return [MessageReactionCounts(*row) for row in rows]
 
     async def get_display_names(self, member_ids: Sequence[int]) -> dict[int, str]:
         """TalkDataに記録された表示名を返す。退出済みメンバーの表示に使う。"""

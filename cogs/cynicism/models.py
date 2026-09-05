@@ -50,6 +50,16 @@ class CynicismMessageRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class MessageReactionCounts:
+    """発言1件に付いたリアクションの集計値。"""
+
+    message_id: int
+    channel_id: int
+    member_id: int
+    reaction_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class RankedMemberIdentity:
     """ランキング表示に必要なメンバー情報。"""
 
@@ -83,6 +93,7 @@ class CynicismRanking:
     total_points: int
     human_reaction_count: int
     member_count: int
+    top_messages: "tuple[TopCynicismMessage, ...]" = ()
 
     @property
     def is_empty(self) -> bool:
@@ -103,3 +114,20 @@ class CynicismRanking:
     def qualified_member_count(self) -> int:
         """冷笑率部門の資格ラインに到達したメンバー数を返す。"""
         return len(self.rate_entries)
+
+
+@dataclass(frozen=True, slots=True)
+class TopCynicismMessage:
+    """対象期間で最もポイントを集めた発言。"""
+
+    message_id: int
+    channel_id: int
+    member_id: int
+    display_name: str
+    points: int
+    guild_id: int
+
+    @property
+    def jump_url(self) -> str:
+        """元の発言へのリンクを返す。"""
+        return f"https://discord.com/channels/{self.guild_id}/{self.channel_id}/{self.message_id}"

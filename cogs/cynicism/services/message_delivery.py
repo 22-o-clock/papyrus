@@ -37,7 +37,9 @@ class CynicismReportMessageDelivery:
         self._repository = repository
         self.target_id = target_id
 
-    async def upsert(self, period: CynicismPeriod, embed: discord.Embed, digest: str) -> DeliveryResult:
+    async def upsert(
+        self, period: CynicismPeriod, embed: discord.Embed, digest: str, *, files: list[discord.File] | None = None
+    ) -> DeliveryResult:
         """配送記録またはフッターから既存投稿を見つけ、なければ新規投稿する。"""
         target = await self._get_target()
         delivery = await self._repository.get_delivery(period, self.target_id)
@@ -47,7 +49,7 @@ class CynicismReportMessageDelivery:
         now = datetime.datetime.now(JST)
 
         if message is None:
-            posted = await target.send(embed=embed)
+            posted = await target.send(embed=embed, files=files or [])
             self._exclude_from_long_term_memory(posted)
             return DeliveryResult(posted, now, changed=True)
 
@@ -56,7 +58,7 @@ class CynicismReportMessageDelivery:
             # 再集計しても内容が変わらない場合は、毎分の更新でDiscordを叩かない。
             return DeliveryResult(message, delivery.last_processed_at, changed=False)
 
-        await message.edit(embed=embed)
+        await message.edit(embed=embed, attachments=files or [])
         self._exclude_from_long_term_memory(message)
         return DeliveryResult(message, now, changed=True)
 

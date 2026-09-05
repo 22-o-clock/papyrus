@@ -5,6 +5,7 @@ import io
 import unittest
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -19,6 +20,7 @@ from cogs.cynicism.models import (
     CynicismSettings,
     MemberReactionCounts,
     RankedMemberIdentity,
+    TopCynicismMessage,
 )
 from cogs.cynicism.periods import (
     CynicismPeriod,
@@ -39,6 +41,7 @@ from cogs.cynicism.services.reaction_filter import is_cynicism_emoji
 from cogs.cynicism.services.report_builder import (
     build_empty_notice,
     build_ranking_embed,
+    build_top_messages_files,
     ranking_digest,
     report_marker,
 )
@@ -429,6 +432,51 @@ class ReportBuilderTest(unittest.TestCase):
     def test_digest_is_stable_for_the_same_ranking(self) -> None:
         ensure(ranking_digest(build_sample_ranking()) == ranking_digest(build_sample_ranking()))
 
+    def test_top_message_is_linked_and_changes_the_digest(self) -> None:
+        ranking = build_sample_ranking()
+        top = TopCynicismMessage(
+            message_id=TARGET_MESSAGE_ID,
+            channel_id=CHANNEL_ID,
+            member_id=AUTHOR_USER_ID,
+            display_name="発言者",
+            points=4,
+            guild_id=GUILD_ID,
+        )
+        other = replace(top, message_id=TARGET_MESSAGE_ID + 1, display_name="別の発言者")
+        ranking = replace(ranking, top_messages=(top, other))
+        embed = build_ranking_embed(ranking, updated_at=ranking.period.end_at)
+        field = next(field for field in embed.fields if field.name == "🥶 最多ポイントの発言")
+        ensure(field.value is not None and "4 pt" in field.value and top.jump_url in field.value)
+        ensure(field.value is not None and other.jump_url in field.value and other.display_name in field.value)
+        ensure(build_top_messages_files(ranking) == [])
+        for changed in (replace(other, message_id=1), replace(other, points=5), replace(other, display_name="新しい名前")):
+            ensure(ranking_digest(ranking) != ranking_digest(replace(ranking, top_messages=(top, changed))))
+        ensure(ranking_digest(ranking) != ranking_digest(replace(ranking, top_messages=(top,))))
+        ensure(ranking_digest(ranking) != ranking_digest(replace(ranking, top_messages=())))
+
+    def test_many_tied_messages_are_all_included_in_the_attachment(self) -> None:
+        ranking = build_sample_ranking()
+        top_messages = tuple(TopCynicismMessage(i, CHANNEL_ID, AUTHOR_USER_ID, f"発言者{i}", 1, GUILD_ID) for i in range(100))
+        ranking = replace(ranking, top_messages=top_messages)
+        embed = build_ranking_embed(ranking, updated_at=ranking.period.end_at)
+        field = next(field for field in embed.fields if field.name == "🥶 最多ポイントの発言")
+        ensure(field.value is not None and "添付ファイル" in field.value)
+        ensure(len(embed) <= 6000)  # noqa: PLR2004 - DiscordのEmbed文字数上限。
+        ensure(all(len(field.value or "") <= 1024 for field in embed.fields))  # noqa: PLR2004 - フィールド値の上限。
+        files = build_top_messages_files(ranking)
+        ensure(len(files) == 1)
+        try:
+            text = files[0].fp.read().decode("utf-8")
+            ensure(len(text.splitlines()) == len(top_messages))
+            ensure(all(top.jump_url in text and top.display_name in text for top in top_messages))
+        finally:
+            files[0].close()
+
+    def test_top_message_section_is_absent_without_a_message(self) -> None:
+        ranking = build_sample_ranking()
+        embed = build_ranking_embed(ranking, updated_at=ranking.period.end_at)
+        ensure(all(field.name != "🥶 最多ポイントの発言" for field in embed.fields))
+
     def test_empty_notice_names_the_period(self) -> None:
         period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
@@ -460,10 +508,13 @@ class MessageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         delivery = CynicismReportMessageDelivery(bot, repository, target_id=7)
         period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
-        result = await delivery.upsert(period, discord.Embed(), "digest")
+        attachment = discord.File(io.BytesIO(b"all tied messages"), filename="cynicism_top_messages.txt")
+        self.addCleanup(attachment.close)
+        result = await delivery.upsert(period, discord.Embed(), "digest", files=[attachment])
 
         ensure(result.changed)
         target.send.assert_awaited_once()
+        ensure(target.send.await_args.kwargs["files"] == [attachment])
         bot.dispatch.assert_called_once()
         ensure(bot.dispatch.call_args.args[0] == "exclude_from_long_term_memory")
 
@@ -505,11 +556,17 @@ class MessageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         delivery = CynicismReportMessageDelivery(bot, repository, target_id=7)
         period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
 
-        result = await delivery.upsert(period, discord.Embed(), "new")
+        attachment = discord.File(io.BytesIO(b"updated tied messages"), filename="cynicism_top_messages.txt")
+        self.addCleanup(attachment.close)
+        result = await delivery.upsert(period, discord.Embed(), "new", files=[attachment])
 
         ensure(result.changed)
         message.edit.assert_awaited_once()
+        ensure(message.edit.await_args.kwargs["attachments"] == [attachment])
         bot.dispatch.assert_called_once()
+
+        await delivery.upsert(period, discord.Embed(), "fewer-ties")
+        ensure(message.edit.await_args.kwargs["attachments"] == [])
 
     async def test_another_bots_message_is_never_overwritten(self) -> None:
         message = SimpleNamespace(id=55, author=SimpleNamespace(id=2), edit=AsyncMock(), embeds=[])

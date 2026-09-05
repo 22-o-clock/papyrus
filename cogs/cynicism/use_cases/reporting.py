@@ -5,6 +5,7 @@ import csv
 import datetime
 import io
 import os
+from dataclasses import replace
 from logging import getLogger
 
 import discord
@@ -12,7 +13,7 @@ from discord import Interaction, Member
 from discord.ext import commands
 
 from cogs.cynicism.constants import JST
-from cogs.cynicism.models import CynicismRanking
+from cogs.cynicism.models import CynicismRanking, TopCynicismMessage
 from cogs.cynicism.periods import (
     CynicismPeriod,
     CynicismPeriodType,
@@ -30,6 +31,7 @@ from cogs.cynicism.services.ranking import build_ranking
 from cogs.cynicism.services.report_builder import (
     build_empty_notice,
     build_ranking_embed,
+    build_top_messages_files,
     format_points,
     ranking_digest,
 )
@@ -95,7 +97,7 @@ class CynicismReportUseCases:
             await interaction.followup.send(build_empty_notice(period))
             return
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime.now(JST))
-        message = await interaction.followup.send(embed=embed, wait=True)
+        message = await interaction.followup.send(embed=embed, files=build_top_messages_files(ranking), wait=True)
         # 表示のたびにChatbotが読み込んでトークンを消費しないよう、長期記憶の根拠から外す。
         self._bot.dispatch("exclude_from_long_term_memory", message)
 
@@ -251,7 +253,27 @@ class CynicismReportUseCases:
             member_ids,
             stored_names,
         )
-        return build_ranking(period, counts, message_counts, identities)
+        ranking = build_ranking(period, counts, message_counts, identities)
+        top_messages = await self._reactions.most_reacted_messages(
+            period,
+            member_ids=[entry.member_id for entry in ranking.total_entries],
+            scope=scope,
+            papyrus_user_id=papyrus_user_id,
+        )
+        return replace(
+            ranking,
+            top_messages=tuple(
+                TopCynicismMessage(
+                    message_id=top.message_id,
+                    channel_id=top.channel_id,
+                    member_id=top.member_id,
+                    display_name=identities[top.member_id].display_name,
+                    points=top.reaction_count,
+                    guild_id=guild.id if guild is not None else self._server_id,
+                )
+                for top in top_messages
+            ),
+        )
 
     async def _post_or_update(
         self,
@@ -268,7 +290,7 @@ class CynicismReportUseCases:
             return None
         digest = ranking_digest(ranking)
         embed = build_ranking_embed(ranking, updated_at=datetime.datetime.now(JST))
-        result = await self._delivery.upsert(period, embed, digest)
+        result = await self._delivery.upsert(period, embed, digest, files=build_top_messages_files(ranking))
         if result.changed:
             await self._reports.save_posted(
                 period,

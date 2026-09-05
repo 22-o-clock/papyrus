@@ -2,6 +2,7 @@
 
 import datetime
 import hashlib
+import io
 
 import discord
 
@@ -12,6 +13,7 @@ from cogs.cynicism.periods import CynicismPeriod, format_period
 REPORT_MARKER_PREFIX = "cynicism-report:"
 EMBED_COLOR = discord.Color.blue()
 PERCENT_SCALE = 100
+EMBED_FIELD_VALUE_LIMIT = 1024
 
 
 def report_marker(period: CynicismPeriod) -> str:
@@ -32,7 +34,7 @@ def format_rate(rate: float) -> str:
 def ranking_digest(ranking: CynicismRanking) -> str:
     """内容が変化したかを判定するための指紋を返す。"""
     parts = [
-        "rate-primary-v3",
+        "rate-primary-v4",
         ranking.period.period_type.value,
         ranking.period.start_date.isoformat(),
         str(ranking.qualification_threshold),
@@ -43,6 +45,9 @@ def ranking_digest(ranking: CynicismRanking) -> str:
             f":{entry.message_count}:{entry.rate:.6f}"
             for entry in section
         )
+    parts.extend(
+        f"{top.jump_url}:{top.member_id}:{top.display_name}:{format_points(top.points)}" for top in ranking.top_messages
+    )
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
@@ -52,7 +57,7 @@ def build_empty_notice(period: CynicismPeriod) -> str:
 
 
 def build_ranking_embed(ranking: CynicismRanking, *, updated_at: datetime.datetime) -> discord.Embed:
-    """冷笑率による王と参考ポイントをまとめる。"""
+    """冷笑率による王と参考ポイント、最多ポイントの発言をまとめる。"""
     # 期間が終わる前に見た場合は順位が確定していないため、途中経過であることを明示する。
     is_in_progress = updated_at < ranking.period.end_at
     title = f"{ranking.period.label}冷笑王 (集計中)" if is_in_progress else f"{ranking.period.label}冷笑王"
@@ -84,6 +89,15 @@ def build_ranking_embed(ranking: CynicismRanking, *, updated_at: datetime.dateti
             value=_format_total_lines(ranking.total_entries),
             inline=False,
         )
+    if ranking.top_messages:
+        top_text = _format_top_messages(ranking)
+        if len(top_text) > EMBED_FIELD_VALUE_LIMIT:
+            top_text = (
+                f"同率1位 {len(ranking.top_messages)}件 — 各{ranking.top_messages[0].points} pt\n"
+                "発言者とリンクの全件一覧は添付ファイルをご覧ください。"
+            )
+        embed.add_field(name="🥶 最多ポイントの発言", value=top_text, inline=False)
+
     embed.add_field(name="サマリ", value=_format_summary(ranking), inline=False)
     embed.set_footer(
         text=(f"{report_marker(ranking.period)} | 集計基準=発言の投稿日時 (JST) | 最終更新 {updated_at:%Y-%m-%d %H:%M}")
@@ -123,3 +137,18 @@ def _format_summary(ranking: CynicismRanking) -> str:
         f"対象 {ranking.member_count}名 / 資格ライン到達 {ranking.qualified_member_count}名\n"
         "※冷笑率はポイントを発言数で割った値のため、100%を超えることがあります。"
     )
+
+
+def _format_top_messages(ranking: CynicismRanking) -> str:
+    """同率1位の発言を省略せず整形する。"""
+    return "\n".join(
+        f"**{top.display_name}** — {format_points(top.points)} pt [発言を見る]({top.jump_url})" for top in ranking.top_messages
+    )
+
+
+def build_top_messages_files(ranking: CynicismRanking) -> list[discord.File]:
+    """Embedに収まらない場合に、同率1位の全件一覧を添付する。"""
+    text = _format_top_messages(ranking)
+    if len(text) <= EMBED_FIELD_VALUE_LIMIT:
+        return []
+    return [discord.File(io.BytesIO(text.encode("utf-8")), filename="cynicism_top_messages.txt")]
