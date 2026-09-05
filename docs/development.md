@@ -25,6 +25,9 @@ Cogを読み込まず、カンマ区切りのCog名では指定したCogだけ�
 
 全Cogをロードしてデバッグする場合は、`BOT_ENVIRONMENT=debug`と`ENABLED_COGS=all`を組み合わせる。
 
+本番デプロイでは、GitHub ActionsのSecretsに`BOT_ENVIRONMENT=production`、`ENABLED_COGS=all`、
+`LOG_LEVEL=INFO`を登録する。デプロイ時はこれらのSecretsから設定を渡す。
+
 起動時には各Cogの必須環境変数をまとめて検証し、不足や形式不正がある場合はDiscordやDBへ接続する前に終了する。
 
 ### 現在の具体的な挙動
