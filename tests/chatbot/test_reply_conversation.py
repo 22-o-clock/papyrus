@@ -5,7 +5,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import discord
-import httpx
+import httpx2
 from agents import FunctionTool
 from openai import NotFoundError
 from openai.types.responses import Response, ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText
@@ -333,7 +333,7 @@ class ReplyConversationTest(unittest.IsolatedAsyncioTestCase):
         )
         error = NotFoundError(
             "Response not found",
-            response=httpx.Response(404, request=httpx.Request("POST", "https://api.openai.com/v1/responses")),
+            response=httpx2.Response(404, request=httpx2.Request("POST", "https://api.openai.com/v1/responses")),
             body={"param": "previous_response_id"},
         )
         self.responses.create.side_effect = [error, answer()]
