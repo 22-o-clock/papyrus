@@ -45,14 +45,14 @@ class CynicismExclusionUseCases:
             message = "除外一覧から選ぶか、チャンネル/スレッドのIDを指定してください。"
             raise ArgumentError(message)
         target_id = int(value)
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         removed = await self._repository.include(guild_id, target_id)
         notice = (
             f"<#{target_id}> の除外を解除しました。記録済みの過去分も次の集計から対象に戻ります。"
             if removed
             else f"<#{target_id}> は除外設定に登録されていません。"
         )
-        await interaction.followup.send(notice, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.followup.send(notice, allowed_mentions=discord.AllowedMentions.none())
 
     async def list_excluded(self, interaction: discord.Interaction) -> None:
         """全メンバーに、明示的に除外された対象の全件を確認可能にする。"""

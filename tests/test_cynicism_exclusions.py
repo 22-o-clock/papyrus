@@ -118,7 +118,8 @@ class ExclusionCommandsTest(unittest.IsolatedAsyncioTestCase):
         ensure(not self.interaction.followup.send.await_args.kwargs.get("ephemeral"))
         await self.use_cases.include(cast("Any", self.interaction), "20")
         self.repository.include.assert_awaited_once_with(1, 20)
-        ensure(self.interaction.followup.send.await_args.kwargs["ephemeral"])
+        self.interaction.response.defer.assert_awaited_with(thinking=True)
+        ensure(not self.interaction.followup.send.await_args.kwargs.get("ephemeral"))
 
     async def test_rejects_dm_foreign_guild_and_invalid_id_before_writes(self) -> None:
         self.interaction.guild_id = None
