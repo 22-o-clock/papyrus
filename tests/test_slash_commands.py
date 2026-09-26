@@ -7,6 +7,7 @@ from cogs.chatbot.chatbot import ChatBot
 from cogs.cynicism.cynicism import Cynicism
 from cogs.monitor.monitor import Monitor
 from cogs.moving.moving import Moving
+from cogs.poll.poll import Poll
 from cogs.remind.remind import Notify
 from cogs.speak.speak import Speak
 from cogs.talkdata.talkdata import TalkData
@@ -35,6 +36,7 @@ EXPECTED_GROUP_COMMANDS = {
         "reaction_remove_bot",
         "reaction_unban",
     },
+    "poll": {"create", "electorate"},
     "reminder": {"list", "remove"},
     "talkdata": {
         "channel_upsert",
@@ -53,13 +55,14 @@ COMMAND_GROUPS = (
     Moving.copy,
     Cynicism.cynicism,
     Monitor.moderation,
+    Poll.poll,
     Notify.reminder,
     TalkData.talkdata,
     Voicevox.voice,
 )
 
 INDEPENDENT_COMMANDS = (Notify.remind, Speak.choice_command, Speak.hi)
-EXPECTED_SLASH_COMMAND_COUNT = 47
+EXPECTED_SLASH_COMMAND_COUNT = 49
 
 
 def ensure(condition: object) -> None:

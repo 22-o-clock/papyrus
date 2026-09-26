@@ -36,7 +36,9 @@ def valid_environment(**overrides: str) -> dict[str, str]:
         "OPENAI_ADMIN_API_KEY": "admin-key",
         "OPENAI_API_KEY": "openai-key",
         "OPENAI_USAGE_PROJECT_ID": "project-id",
+        "POLL_BALLOT_SECRET": "0123456789abcdef0123456789abcdef",
         "ROLE_ID_BOT_ADMIN": "3",
+        "ROLE_ID_ELECTORATE": "9",
         "SERVER_ID": "7",
         "SUPABASE_CONNECTION_STRING": "postgresql://main",
         "THREAD_ID_ANTHYME_LOG": "1",
@@ -115,6 +117,14 @@ class RuntimeEnvironmentTest(unittest.TestCase):
             message = str(error)
             ensure_contains("BOT_ENVIRONMENT must be production or debug", message)
             ensure_contains("CHANNEL_ID_DEBUG_CHATBOT must be a Discord ID", message)
+            return
+        raise AssertionError
+
+    def test_rejects_short_poll_ballot_secret(self) -> None:
+        try:
+            configure_runtime_environment(valid_environment(POLL_BALLOT_SECRET="short"))  # noqa: S106 - 検証用の短い値。
+        except RuntimeError as error:
+            ensure_contains("POLL_BALLOT_SECRET must be at least 32 characters", str(error))
             return
         raise AssertionError
 

@@ -18,6 +18,9 @@ PRODUCTION_API_USAGE_REPORT_TARGET_ID_KEY = "THREAD_ID_API_USAGE_REPORT"
 DEBUG_API_USAGE_REPORT_TARGET_ID_KEY = "THREAD_ID_DEBUG_API_USAGE_REPORT"
 PRODUCTION_CYNICISM_REPORT_TARGET_ID_KEY = "CHANNEL_ID_CYNICISM_REPORT"
 DEBUG_CYNICISM_REPORT_TARGET_ID_KEY = "CHANNEL_ID_DEBUG_CYNICISM_REPORT"
+POLL_BALLOT_SECRET_KEY = "POLL_BALLOT_SECRET"  # noqa: S105 - 秘密情報ではなく環境変数名のため。
+# 投票者の秘匿キーを総当たりで推測されないよう、十分な長さを求める。
+MIN_POLL_BALLOT_SECRET_LENGTH = 32
 OPTIONAL_ENVIRONMENT_KEYS = (
     "AUDIT_IMMUNITY",
     "LASTFM_IDS",
@@ -38,7 +41,9 @@ REQUIRED_ENVIRONMENT_KEYS = (
     "OPENAI_ADMIN_API_KEY",
     "OPENAI_API_KEY",
     "OPENAI_USAGE_PROJECT_ID",
+    POLL_BALLOT_SECRET_KEY,
     "ROLE_ID_BOT_ADMIN",
+    "ROLE_ID_ELECTORATE",
     "SERVER_ID",
     "SUPABASE_CONNECTION_STRING",
     "THREAD_ID_ANTHYME_LOG",
@@ -54,6 +59,7 @@ INTEGER_ENVIRONMENT_KEYS = (
     "CHANNEL_ID_LOBBY",
     DEBUG_API_USAGE_REPORT_TARGET_ID_KEY,
     "ROLE_ID_BOT_ADMIN",
+    "ROLE_ID_ELECTORATE",
     "SERVER_ID",
     "THREAD_ID_ANTHYME_LOG",
     "THREAD_ID_LOG",
@@ -71,6 +77,7 @@ AVAILABLE_COG_NAMES = (
     "hwh",
     "monitor",
     "moving",
+    "poll",
     "remind",
     "speak",
     "spotify_embed",
@@ -180,6 +187,10 @@ def _validate_environment(environ: Mapping[str, str]) -> list[str]:
         value = environ.get(key, "").strip()
         if value and not value.isdecimal():
             errors.append(f"{key} must be a Discord ID")
+
+    ballot_secret = environ.get(POLL_BALLOT_SECRET_KEY, "").strip()
+    if ballot_secret and len(ballot_secret) < MIN_POLL_BALLOT_SECRET_LENGTH:
+        errors.append(f"{POLL_BALLOT_SECRET_KEY} must be at least {MIN_POLL_BALLOT_SECRET_LENGTH} characters")
     return errors
 
 
