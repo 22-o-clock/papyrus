@@ -86,6 +86,7 @@ jobs:
           VOICEVOX_URL: ${{ secrets.VOICEVOX_URL }}
           SERVER_ID: ${{ secrets.SERVER_ID }}
           ROLE_ID_BOT_ADMIN: ${{ secrets.ROLE_ID_BOT_ADMIN }}
+          ROLE_ID_ELECTORATE: ${{ secrets.ROLE_ID_ELECTORATE }}
           CHANNEL_ID_LOBBY: ${{ secrets.CHANNEL_ID_LOBBY }}
           CHANNEL_ID_LISTEN_ONLY_MEMBER: ${{ secrets.CHANNEL_ID_LISTEN_ONLY_MEMBER }}
           CHANNEL_ID_CYNICISM_REPORT: ${{ secrets.CHANNEL_ID_CYNICISM_REPORT }}
@@ -98,6 +99,7 @@ jobs:
           AUDIT_IMMUNITY: ${{ secrets.AUDIT_IMMUNITY }}
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           LASTFM_IDS: ${{ secrets.LASTFM_IDS }}
+          POLL_BALLOT_SECRET: ${{ secrets.POLL_BALLOT_SECRET }}
           BOT_ENVIRONMENT: ${{ secrets.BOT_ENVIRONMENT }}
           ENABLED_COGS: ${{ secrets.ENABLED_COGS }}
           LOG_LEVEL: ${{ secrets.LOG_LEVEL }}
@@ -115,6 +117,7 @@ jobs:
             VOICEVOX_URL "$VOICEVOX_URL" \
             SERVER_ID "$SERVER_ID" \
             ROLE_ID_BOT_ADMIN "$ROLE_ID_BOT_ADMIN" \
+            ROLE_ID_ELECTORATE "$ROLE_ID_ELECTORATE" \
             CHANNEL_ID_LOBBY "$CHANNEL_ID_LOBBY" \
             CHANNEL_ID_LISTEN_ONLY_MEMBER "$CHANNEL_ID_LISTEN_ONLY_MEMBER" \
             CHANNEL_ID_CYNICISM_REPORT "$CHANNEL_ID_CYNICISM_REPORT" \
@@ -127,6 +130,7 @@ jobs:
             AUDIT_IMMUNITY "$AUDIT_IMMUNITY" \
             LASTFM_API_KEY "$LASTFM_API_KEY" \
             LASTFM_IDS "$LASTFM_IDS" \
+            POLL_BALLOT_SECRET "$POLL_BALLOT_SECRET" \
             BOT_ENVIRONMENT "$BOT_ENVIRONMENT" \
             ENABLED_COGS "$ENABLED_COGS" \
             LOG_LEVEL "$LOG_LEVEL" > "$container_env_file"
