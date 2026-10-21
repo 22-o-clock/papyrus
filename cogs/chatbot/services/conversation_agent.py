@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from cogs.chatbot.models.reply_conversation import ReplyConversation
 from cogs.chatbot.observability import observe_chatbot_api_call
 from cogs.chatbot.services.conversation_tools import FUNCTION_TOOLS, ConversationTools
+from cogs.chatbot.services.image_generation import ImageGeneration
 
 COMPACT_THRESHOLD = 30_000
 
@@ -42,19 +43,23 @@ class ObservedResponsesModel(OpenAIResponsesModel):
         return response
 
 
-def build_agent_tools(tools: ConversationTools, state: ReplyConversation, message_id: int) -> list[Tool]:
+def build_agent_tools(
+    tools: ConversationTools, state: ReplyConversation, message_id: int, images: ImageGeneration | None = None
+) -> list[Tool]:
     """既存の取得処理をSDKのツールへ接続します。
 
     Args:
         tools: Discordの権限確認と情報取得を行う処理。
         state: 結果本文を含めず呼び出し履歴を追記する会話状態。
         message_id: 呼び出しの起点となった投稿ID。
+        images: 今回の回答に添付する画像の生成処理。
 
     Returns:
         Web検索・コード実行と、既存のスキーマを使う関数ツールの一覧。
 
     """
     return [
+        *([images.tool(state, message_id), images.edit_tool(state, message_id, tools)] if images is not None else []),
         WebSearchTool(),
         CodeInterpreterTool(tool_config={"type": "code_interpreter", "container": {"type": "auto"}}),
         *[_function_tool(definition, tools, state, message_id) for definition in FUNCTION_TOOLS],

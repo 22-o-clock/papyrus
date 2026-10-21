@@ -11,9 +11,8 @@ from cogs.chatbot.services.custom_profile_parser import (
     InvalidCustomProfileDirectiveError,
     parse_custom_profile_directive,
 )
+from cogs.chatbot.services.model_selection import CUSTOM_PROFILE_MODELS, current_profile_model
 from core.runtime_environment import RuntimeEnvironment
-
-CUSTOM_PROFILE_MODELS = {"system_default", "gpt-5.6-terra", "gpt-5.6-luna"}
 
 
 class CustomProfileNotFoundError(LookupError):
@@ -52,7 +51,7 @@ class CustomProfileUseCases:
         return CustomProfile(
             name=stored_profile.name,
             instructions=stored_profile.instructions,
-            model=stored_profile.model,
+            model=current_profile_model(stored_profile.model),
             request_message_id=message_id,
             request_content=directive.content,
         )
@@ -78,7 +77,7 @@ class CustomProfileUseCases:
             return
         if model not in CUSTOM_PROFILE_MODELS:
             await interaction.response.send_message(
-                "モデルは system_default、gpt-5.6-terra、gpt-5.6-lunaから選択してください。",
+                "モデルは system_default、gpt-6-luna、gpt-6.1-solから選択してください。",
                 ephemeral=True,
             )
             return
@@ -124,7 +123,9 @@ class CustomProfileUseCases:
             )
             return
         status = "有効" if profile.enabled else "無効"
-        body = f"name: {profile.name}\nmodel: {profile.model}\nstatus: {status}\n\n{profile.instructions}"
+        body = (
+            f"name: {profile.name}\nmodel: {current_profile_model(profile.model)}\nstatus: {status}\n\n{profile.instructions}"
+        )
         if len(body) <= DISCORD_RESPONSE_CHUNK_LENGTH:
             await interaction.response.send_message(body, ephemeral=True)
             return
@@ -145,7 +146,7 @@ class CustomProfileUseCases:
                 ephemeral=True,
             )
             return
-        lines = [f"- {profile.name}: {profile.model}" for profile in profiles]
+        lines = [f"- {profile.name}: {current_profile_model(profile.model)}" for profile in profiles]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     async def _validate_shared_write(self, interaction: discord.Interaction) -> bool:

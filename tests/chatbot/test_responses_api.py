@@ -343,7 +343,7 @@ class MemoryModelConfigTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(observability, "_usage_repository", usage_repository):
             await MemoryDocumentUpdater(client).update({"channel_conversations": [{}] * expected_channel_count})
 
-        if responses.calls[0]["model"] != "gpt-5.6-luna":
+        if responses.calls[0]["model"] != "gpt-6-luna":
             self.fail("長期記憶文書の更新がLunaを使用していません")
         if responses.calls[0]["reasoning"] != {"effort": "medium"}:
             self.fail("長期記憶文書の更新の推論強度がmediumになっていません")

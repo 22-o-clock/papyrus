@@ -33,6 +33,7 @@ def create_usage(
         "failure_count": 0,
         "item_count": 1,
         "input_tokens": 0,
+        "image_input_tokens": 0,
         "cached_input_tokens": 0,
         "cache_write_input_tokens": 0,
         "output_tokens": 0,
@@ -186,6 +187,83 @@ class ApiUsageAggregationTest(TestCase):
 
         ensure_equal(usage.model_cost, Decimal("1.47"))
 
+    def test_gpt_6_luna_cost_includes_cached_and_uncached_tokens(self) -> None:
+        """キャッシュ読み書きと通常入力を重複課金せず計算します。"""
+        row = create_usage(
+            "reply_generation",
+            "gpt-6-luna",
+            input_tokens=200_000,
+            cached_input_tokens=150_000,
+            cache_write_input_tokens=40_000,
+            output_tokens=5_000,
+        )
+        row.usage_date = datetime.date(2026, 10, 21)
+        ensure_equal(aggregate_feature_usages([row])[0].model_cost, Decimal("0.010"))
+
+    def test_gpt_6_luna_long_context_cost(self) -> None:
+        """長文料金とキャッシュの内訳を確認します。"""
+        row = create_usage(
+            "reply_generation",
+            "gpt-6-luna",
+            input_tokens=300_000,
+            cached_input_tokens=100_000,
+            cache_write_input_tokens=100_000,
+            output_tokens=10_000,
+            long_context_input_tokens=300_000,
+            long_context_cached_input_tokens=100_000,
+            long_context_cache_write_input_tokens=100_000,
+            long_context_output_tokens=10_000,
+        )
+        row.usage_date = datetime.date(2026, 10, 21)
+        ensure_equal(aggregate_feature_usages([row])[0].model_cost, Decimal("0.0545"))
+
+    def test_gpt_6_1_sol_cost_includes_cached_and_uncached_tokens(self) -> None:
+        """キャッシュ読み書きと通常入力を重複課金せず計算します。"""
+        row = create_usage(
+            "reply_generation",
+            "gpt-6.1-sol",
+            input_tokens=200_000,
+            cached_input_tokens=150_000,
+            cache_write_input_tokens=40_000,
+            output_tokens=5_000,
+        )
+        row.usage_date = datetime.date(2026, 10, 21)
+        ensure_equal(aggregate_feature_usages([row])[0].model_cost, Decimal("0.185"))
+
+    def test_gpt_6_1_sol_long_context_cost(self) -> None:
+        """長文料金とキャッシュの内訳を確認します。"""
+        row = create_usage(
+            "reply_generation",
+            "gpt-6.1-sol",
+            input_tokens=300_000,
+            cached_input_tokens=100_000,
+            cache_write_input_tokens=100_000,
+            output_tokens=10_000,
+            long_context_input_tokens=300_000,
+            long_context_cached_input_tokens=100_000,
+            long_context_cache_write_input_tokens=100_000,
+            long_context_output_tokens=10_000,
+        )
+        row.usage_date = datetime.date(2026, 10, 21)
+        ensure_equal(aggregate_feature_usages([row])[0].model_cost, Decimal("1.07"))
+
+    def test_image_generation_cost_uses_text_input_and_image_output(self) -> None:
+        """画像生成APIの入力・出力をそれぞれの単価で計算します。"""
+        row = create_usage("image_generation", "gpt-image-2.5-flare", input_tokens=100, output_tokens=1_000)
+        row.usage_date = datetime.date(2026, 10, 21)
+        ensure_equal(aggregate_feature_usages([row])[0].model_cost, Decimal("0.0305"))
+
+    def test_image_editing_charges_image_and_text_inputs_separately(self) -> None:
+        """画像入力を通常入力と二重計上せず、画像単価で計算します。"""
+        row = create_usage(
+            "image_generation", "gpt-image-2.5-flare", input_tokens=300, image_input_tokens=200, output_tokens=1000
+        )
+        row.usage_date = datetime.date(2026, 10, 21)
+        usage = aggregate_feature_usages([row])[0]
+        ensure_equal(usage.input_tokens, 300)
+        ensure_equal(usage.image_input_tokens, 200)
+        ensure_equal(usage.model_cost, Decimal("0.0321"))
+
     def test_unknown_model_is_explicitly_marked(self) -> None:
         usage = aggregate_feature_usages([create_usage("draft_generation", "unknown-model", input_tokens=10_000)])[0]
 
@@ -247,72 +325,50 @@ class ApiUsageAggregationTest(TestCase):
 
 
 class ApiUsageEmbedTest(TestCase):
-    def test_embed_labels_judgment_and_generation_separately(self) -> None:
-        report_date = datetime.date(2026, 7, 15)
+    def test_embed_shows_totals_without_feature_breakdown(self) -> None:
+        """機能が増えても費用と利用量の集約だけを表示します。"""
+        report_date = datetime.date(2026, 10, 21)
         rows = [
-            create_usage("response_judgment", "gpt-5.4-nano", input_tokens=1_000),
-            create_usage("draft_generation", "gpt-5.6-terra", input_tokens=1_000),
-            create_usage(
-                "draft_generation_pending_memory_followup",
-                "gpt-5.6-luna",
-                input_tokens=1_000,
-            ),
+            create_usage("reply_generation", "gpt-6-luna", input_tokens=1_000, output_tokens=100, success_count=2),
+            create_usage("memory_document_update", "gpt-6-luna", input_tokens=2_000, failure_count=1),
         ]
         for row in rows:
             row.usage_date = report_date
-        features = aggregate_feature_usages(rows)
-
         embed = build_usage_embed(
             report_date,
-            features,
+            aggregate_feature_usages(rows),
+            OpenAIUsageSummary(report_date=report_date, costs={"Text models": Decimal("0.001")}),
+            ReportMeasurementState(started_at=datetime.datetime(2026, 10, 21, 12, tzinfo=JST), error_count=0),
+        )
+        ensure_equal([field.name for field in embed.fields], ["コスト概要", "利用量"])
+        ensure_contains("リクエスト **4回** (失敗 1回)", str(embed.fields[1].value))
+        ensure_contains("入力 **3,000** / 出力 **100**", str(embed.fields[1].value))
+        ensure_contains("部分集計", str(embed.fields[0].value))
+        ensure_contains("api-usage-report:2026-10-21", embed.footer.text or "")
+
+    def test_empty_usage_report_displays_zero_totals(self) -> None:
+        """利用のない日はゼロ件として簡潔に表示します。"""
+        embed = build_usage_embed(
+            datetime.date(2026, 10, 21),
+            [],
             None,
             ReportMeasurementState(started_at=None, error_count=0),
         )
+        ensure_equal([field.name for field in embed.fields], ["コスト概要", "利用量"])
+        ensure_contains("リクエスト **0回**", str(embed.fields[1].value))
 
-        field_names = [str(field.name or "") for field in embed.fields]
-        ensure(any(name.startswith("応答要否判定 —") for name in field_names))
-        ensure(any(name.startswith("応答生成 —") for name in field_names))
-        ensure(any(name.startswith("応答生成 (未反映記憶取得後) —") for name in field_names))
-        ensure(all("応答生成・行動判断" not in name for name in field_names))
-        judgment_field = next(field for field in embed.fields if str(field.name or "").startswith("応答要否判定 —"))
-        ensure_contains("判定 1件", str(judgment_field.value))
-        followup_field = next(
-            field for field in embed.fields if str(field.name or "").startswith("応答生成 (未反映記憶取得後) —")
-        )
-        ensure_contains("応答 1件", str(followup_field.value))
-
-    def test_embed_prioritizes_feature_costs_and_long_term_memory_breakdown(self) -> None:
-        report_date = datetime.date(2026, 7, 14)
-        features = aggregate_feature_usages(
-            [
-                create_usage("draft_generation", "gpt-5.6-terra", input_tokens=1_000, output_tokens=100),
-                create_usage("memory_document_update", "gpt-5.6-luna", item_count=2, input_tokens=2_000),
-                create_usage("memory_document_shorten", "gpt-5.6-luna", item_count=3, input_tokens=500),
-            ]
-        )
-        summary = OpenAIUsageSummary(report_date=report_date, costs={"Text models": Decimal("0.1234")})
-
+    def test_image_usage_is_compared_by_requests_not_completion_tokens(self) -> None:
+        """画像Usageにないトークン数で誤警告を出さないことを確認します。"""
+        date = datetime.date(2026, 10, 21)
+        row = create_usage("image_generation", "gpt-image-2.5-flare", input_tokens=100, output_tokens=1_000)
+        row.usage_date = date
         embed = build_usage_embed(
-            report_date,
-            features,
-            summary,
-            ReportMeasurementState(started_at=datetime.datetime(2026, 7, 14, 12, 30, tzinfo=JST), error_count=0),
+            date,
+            aggregate_feature_usages([row]),
+            OpenAIUsageSummary(report_date=date, image_requests=1, usage_available=True),
+            ReportMeasurementState(started_at=None, error_count=0),
         )
-
-        field_names = [str(field.name or "") for field in embed.fields]
-        ensure_equal(field_names[0], "コスト概要")
-        ensure(any(name.startswith("長期記憶 合計") for name in field_names))
-        ensure(any("長期記憶文書の更新" in name for name in field_names))
-        memory_fields = {
-            str(field.name or ""): str(field.value) for field in embed.fields if "長期記憶文書" in str(field.name or "")
-        }
-        ensure(any("チャンネル 2件" in value for value in memory_fields.values()))
-        ensure(any("文書 3件" in value for value in memory_fields.values()))
-        ensure_contains("input 1,000 tokens", "\n".join(str(field.value) for field in embed.fields))
-        ensure_contains("部分集計", str(embed.fields[0].value))
-        ensure_contains("api-usage-report:2026-07-14", embed.footer.text or "")
-        ensure_contains("対象期間: 2026-07-14 09:00 ~ 2026-07-15 09:00 JST", embed.description or "")
-        ensure("UTC" not in (embed.description or ""))
+        ensure_equal([field.name for field in embed.fields], ["コスト概要", "利用量"])
 
     def test_embed_warns_when_openai_cost_is_unavailable(self) -> None:
         embed = build_usage_embed(
@@ -387,7 +443,7 @@ class ApiUsageObservationTest(IsolatedAsyncioTestCase):
             patch.object(observability, "_usage_repository", repository),
             self.assertLogs("cogs.chatbot.observability", level="DEBUG") as captured_logs,
         ):
-            result = await observability.observe_chatbot_api_call("draft_generation", "gpt-5.6-terra", request())
+            result = await observability.observe_chatbot_api_call("reply_generation", "gpt-6.1-sol", request())
 
         ensure(result is response)
         increment = repository.add.await_args.args[0]

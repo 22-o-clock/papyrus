@@ -60,7 +60,7 @@ class ChatBot(commands.Cog):
     @app_commands.describe(
         profile_name="optionで指定する名前",
         instructions="基本指示へ追加するプロファイル指示",
-        model="system_default、gpt-5.6-terra、gpt-5.6-lunaのいずれか",
+        model="system_default、gpt-6-luna、gpt-6.1-solのいずれか",
     )
     async def upsert_chatbot_profile(
         self,

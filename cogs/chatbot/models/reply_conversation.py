@@ -62,7 +62,7 @@ class ReplyConversation(BaseModel):
     """返信経路ごとの継続点、要約、結果を含まないツール呼び出し履歴を保持します。"""
 
     response_id: str | None = None
-    model: str = "gpt-5.6-luna"
+    model: str = "gpt-6-luna"
     messages: list[ConversationMessage] = Field(default_factory=list)
     summary: str = ""
     calls: list[dict[str, Any]] = Field(default_factory=list)

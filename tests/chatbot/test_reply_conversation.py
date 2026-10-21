@@ -184,7 +184,7 @@ class ReplyConversationTest(unittest.IsolatedAsyncioTestCase):
             events.append("generate")
             return answer()
 
-        async def send(*_: object) -> list[SimpleNamespace]:
+        async def send(*_: object, **_kwargs: object) -> list[SimpleNamespace]:
             events.append("send")
             return [SimpleNamespace(id=4)]
 
@@ -313,7 +313,7 @@ class ReplyConversationTest(unittest.IsolatedAsyncioTestCase):
             await self.engine.respond(self.incoming, self.tools, None)  # type: ignore[arg-type]
         params = self.responses.create.call_args.kwargs
         ensure(params["previous_response_id"] == "resp_old")
-        ensure(params["model"] == "gpt-5.6-terra")
+        ensure(params["model"] == "gpt-6.1-sol")
         ensure(params["context_management"] == [{"type": "compaction", "compact_threshold": 30_000}])
         self.responses.input_tokens.count.assert_not_awaited()
         ensure(len(params["input"]) == 1)
@@ -369,6 +369,80 @@ class ReplyConversationTest(unittest.IsolatedAsyncioTestCase):
         output = await tool.on_invoke_tool(cast("Any", None), "{}")
         ensure(json.loads(output)["error"] == "not found")
         ensure(state.calls[0]["status"] == "failed")
+
+    async def test_sdk_generates_and_delivers_image_with_conversation_state(self) -> None:
+        """実際のRunnerから画像生成を呼び、画像返信を継続点として保存します。"""
+        self.repository.messages[3] = message(3)
+        self.client.images = SimpleNamespace(
+            generate=AsyncMock(
+                return_value=SimpleNamespace(
+                    data=[SimpleNamespace(b64_json="iVBORw0KGgp0ZXN0")],
+                    usage=None,
+                )
+            )
+        )
+        call = ResponseFunctionToolCall(
+            id="fc_image",
+            type="function_call",
+            call_id="call_image",
+            name="generate_image",
+            arguments='{"prompt":"猫を描いて"}',
+        )
+        self.responses.create.side_effect = [
+            Response.model_construct(id="resp_image", usage=None, output=[call]),
+            answer(),
+        ]
+        self.incoming.reply = AsyncMock(return_value=SimpleNamespace(id=4))
+        self.tools.snapshot.return_value = message(4, 3, assistant=True)
+        sent, _ = await self.engine.respond(self.incoming, self.tools, None)
+        ensure([m.id for m in sent] == [4])
+        ensure(self.repository.turns[4].response_id == "resp_new")
+        self.incoming.reply.assert_awaited_once()
+        sent_call = self.incoming.reply.await_args
+        if sent_call is None:
+            self.fail("返信が送信されていません")
+        ensure(sent_call.args == ("answer",))
+        ensure(sent_call.kwargs["files"][0].filename == "generated-1.png")
+        ensure("iVBOR" not in self.repository.turns[4].model_dump_json())
+        ensure(self.client.images.generate.await_args.kwargs["model"] == "gpt-image-2.5-flare")
+
+    async def test_sdk_edits_reply_attachment_and_delivers_result(self) -> None:
+        """返信先の画像編集をRunnerから呼び、本文と結果を一緒に送信します。"""
+        self.repository.messages[3] = message(3, 2)
+        self.repository.messages[2] = message(2, assistant=True)
+        self.tools.channel.return_value.fetch_message = AsyncMock(
+            return_value=SimpleNamespace(
+                attachments=[
+                    SimpleNamespace(
+                        id=5,
+                        filename="source.png",
+                        content_type="image/png",
+                        size=9,
+                        read=AsyncMock(return_value=b"source image"),
+                    )
+                ]
+            )
+        )
+        self.client.images = SimpleNamespace(
+            edit=AsyncMock(return_value=SimpleNamespace(data=[SimpleNamespace(b64_json="iVBORw0KGgp0ZXN0")], usage=None))
+        )
+        call = ResponseFunctionToolCall(
+            id="fc_edit",
+            type="function_call",
+            call_id="call_edit",
+            name="edit_image",
+            arguments=json.dumps(
+                {"prompt": "背景を青く", "images": [{"channel_id": "10", "message_id": "2", "attachment_id": "5"}]}
+            ),
+        )
+        self.responses.create.side_effect = [Response.model_construct(id="resp_edit", usage=None, output=[call]), answer()]
+        self.incoming.reply = AsyncMock(return_value=SimpleNamespace(id=4))
+        self.tools.snapshot.return_value = message(4, 3, assistant=True)
+        sent, _ = await self.engine.respond(self.incoming, self.tools, None)
+        ensure([m.id for m in sent] == [4])
+        self.client.images.edit.assert_awaited_once()
+        ensure(self.repository.turns[4].response_id == "resp_new")
+        ensure(self.repository.turns[4].calls[0]["name"] == "edit_image")
 
     async def test_sdk_executes_attachment_and_continues_with_native_media(self) -> None:
         """実際のRunnerでツール実行から画像・PDF付きの継続生成までを検証します。"""

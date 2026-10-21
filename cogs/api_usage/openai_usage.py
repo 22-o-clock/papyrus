@@ -40,6 +40,7 @@ class OpenAIUsageSummary:
     costs: dict[str, Decimal] = field(default_factory=dict)
     currency: str = "usd"
     usage_available: bool = False
+    image_requests: int = 0
 
     @property
     def total_cost(self) -> Decimal:
@@ -73,7 +74,7 @@ class OpenAIOrganizationUsageClient:
                 "/organization/costs",
                 [*base_parameters, ("group_by", "line_item")],
             )
-            completion_results, embedding_results, usage_available = await self._fetch_usage_results(
+            completion_results, embedding_results, image_results, usage_available = await self._fetch_usage_results(
                 session,
                 base_parameters,
             )
@@ -86,16 +87,17 @@ class OpenAIOrganizationUsageClient:
             costs=costs,
             currency=currency,
             usage_available=usage_available,
+            image_requests=sum(int(row.get("num_model_requests") or 0) for row in image_results),
         )
 
     async def _fetch_usage_results(
         self,
         session: aiohttp.ClientSession,
         base_parameters: list[tuple[str, str]],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
         """Usage API障害を確定コスト取得から分離する。"""
         try:
-            completion_results, embedding_results = await asyncio.gather(
+            completion_results, embedding_results, image_results = await asyncio.gather(
                 self._fetch_all_results(
                     session,
                     "/organization/usage/completions",
@@ -106,11 +108,16 @@ class OpenAIOrganizationUsageClient:
                     "/organization/usage/embeddings",
                     [*base_parameters, ("group_by", "model")],
                 ),
+                self._fetch_all_results(
+                    session,
+                    "/organization/usage/images",
+                    [*base_parameters, ("group_by", "model")],
+                ),
             )
         except Exception:
             logger.exception("Failed to fetch OpenAI organization usage details")
-            return [], [], False
-        return completion_results, embedding_results, True
+            return [], [], [], False
+        return completion_results, embedding_results, image_results, True
 
     async def _fetch_all_results(
         self,

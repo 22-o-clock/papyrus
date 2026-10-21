@@ -227,7 +227,7 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
         message = Mock(spec=Message)
         message.reply = AsyncMock()
         await reply_with_split_response(message, "https://example.com")
-        message.reply.assert_awaited_once_with("https://example.com", suppress_embeds=True)
+        message.reply.assert_awaited_once_with("https://example.com", files=[], suppress_embeds=True, allowed_mentions=ANY)
 
 
 class LongTermMemoryExclusionFlagTest(unittest.IsolatedAsyncioTestCase):

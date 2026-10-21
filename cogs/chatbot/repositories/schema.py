@@ -39,6 +39,7 @@ async def create_chatbot_tables(engine: AsyncEngine) -> None:
         await connection.execute(
             text(
                 "ALTER TABLE IF EXISTS chatbot.api_usage_daily "
+                "ADD COLUMN IF NOT EXISTS image_input_tokens BIGINT NOT NULL DEFAULT 0, "
                 "ADD COLUMN IF NOT EXISTS cache_write_input_tokens BIGINT NOT NULL DEFAULT 0, "
                 "ADD COLUMN IF NOT EXISTS long_context_cache_write_input_tokens BIGINT NOT NULL DEFAULT 0"
             )

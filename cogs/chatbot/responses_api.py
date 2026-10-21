@@ -23,7 +23,7 @@ logger = getLogger(__name__)
 
 MEMORY_DOCUMENT_UPDATE_INSTRUCTIONS = load_prompt("long_term_memory_update.md")
 MEMORY_DOCUMENT_SHORTEN_INSTRUCTIONS = load_prompt("long_term_memory_shorten.md")
-MEMORY_DOCUMENT_UPDATE_MODEL = "gpt-5.6-luna"
+MEMORY_DOCUMENT_UPDATE_MODEL = "gpt-6-luna"
 LOCAL_TIMEZONE = dateutil.tz.gettz("Asia/Tokyo")
 
 

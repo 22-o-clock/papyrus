@@ -5,7 +5,7 @@ from decimal import Decimal
 from cogs.chatbot.repositories.api_usage import ChatbotApiUsageDaily
 
 PRICING_SOURCE_URL = "https://developers.openai.com/api/docs/pricing"
-PRICING_VERIFIED_ON = datetime.date(2026, 7, 25)
+PRICING_VERIFIED_ON = datetime.date(2026, 10, 21)
 PER_MILLION = Decimal(1_000_000)
 
 
@@ -22,6 +22,7 @@ class ModelPrice:
     long_cached_input_per_million: Decimal | None = None
     long_cache_write_input_per_million: Decimal | None = None
     long_output_per_million: Decimal | None = None
+    image_input_per_million: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,43 @@ class EstimatedUsageCost:
 
 
 MODEL_PRICES: dict[str, tuple[ModelPrice, ...]] = {
+    # 生成・編集の画像入力とテキスト入力を分離し、出力には画像トークンの単価を使用する。
+    "gpt-image-2.5-flare": (
+        ModelPrice(
+            datetime.date(2026, 10, 21),
+            Decimal("5.00"),
+            Decimal("1.25"),
+            Decimal("5.00"),
+            Decimal("30.00"),
+            image_input_per_million=Decimal("8.00"),
+        ),
+    ),
+    "gpt-6.1-sol": (
+        ModelPrice(
+            datetime.date(2026, 10, 21),
+            Decimal("2.00"),
+            Decimal("0.10"),
+            Decimal("2.50"),
+            Decimal("10.00"),
+            Decimal("4.00"),
+            Decimal("0.20"),
+            Decimal("5.00"),
+            Decimal("15.00"),
+        ),
+    ),
+    "gpt-6-luna": (
+        ModelPrice(
+            datetime.date(2026, 9, 22),
+            Decimal("0.10"),
+            Decimal("0.01"),
+            Decimal("0.125"),
+            Decimal("0.50"),
+            Decimal("0.20"),
+            Decimal("0.02"),
+            Decimal("0.25"),
+            Decimal("0.75"),
+        ),
+    ),
     "gpt-5.6": (
         ModelPrice(
             datetime.date(2026, 7, 13),
@@ -154,6 +192,9 @@ def estimate_usage_cost(usage: ChatbotApiUsageDaily) -> EstimatedUsageCost:
             + Decimal(short_cache_write_tokens) * price.cache_write_input_per_million
             + Decimal(short_output_tokens) * price.output_per_million
         ) / PER_MILLION
+        if price.image_input_per_million is not None:
+            image_tokens = min(uncached_tokens, usage.image_input_tokens or 0)
+            model_cost += Decimal(image_tokens) * (price.image_input_per_million - price.input_per_million) / PER_MILLION
         if price.long_input_per_million is not None:
             model_cost += (
                 Decimal(long_uncached_tokens) * price.long_input_per_million
