@@ -1,4 +1,5 @@
-from dataclasses import asdict, dataclass
+import io
+from dataclasses import asdict, dataclass, field
 from logging import getLogger
 from pathlib import Path
 from typing import Any, cast
@@ -14,7 +15,9 @@ from cogs.chatbot.observability import observe_chatbot_api_call
 from cogs.chatbot.repositories.reply_conversation import ReplyConversationRepository
 from cogs.chatbot.services.conversation_agent import COMPACT_THRESHOLD, ObservedResponsesModel, build_agent_tools
 from cogs.chatbot.services.conversation_tools import ConversationTools
+from cogs.chatbot.services.image_generation import GeneratedImage, ImageGeneration
 from cogs.chatbot.services.message_delivery import reply_with_split_response
+from cogs.chatbot.services.model_selection import resolve_chatbot_model
 
 logger = getLogger(__name__)
 PROMPT_DIRECTORY = Path(__file__).resolve().parents[1] / "prompt"
@@ -26,6 +29,7 @@ class GeneratedReply:
 
     id: str | None
     output_text: str
+    images: list[GeneratedImage] = field(default_factory=list)
 
 
 def is_missing_response(error: BadRequestError | NotFoundError) -> bool:
@@ -125,9 +129,7 @@ class ReplyConversationUseCases:
         if profile is not None:
             state.profile = {key: value for key, value in asdict(profile).items() if key in {"name", "instructions", "model"}}
             state.messages[-1].content = profile.request_content
-        state.model = (state.profile or {}).get("model", "system_default")
-        if state.model == "system_default":
-            state.model = "gpt-5.6-luna"
+        state.model = resolve_chatbot_model((state.profile or {}).get("model", "system_default"))
         instructions = (
             PROMPT_DIRECTORY.joinpath("reply_conversation.md")
             .read_text(encoding="utf-8")
@@ -145,12 +147,14 @@ class ReplyConversationUseCases:
         if state.profile:
             instructions += "\n基本指示と矛盾しない範囲で次のプロファイルを適用してください。\n" + state.profile["instructions"]
 
+        guild = getattr(message, "guild", None)
+        images = ImageGeneration(self.client, guild.filesize_limit if guild else 10 * 1024 * 1024)
         model = ObservedResponsesModel(state, self.client)
         agent = Agent(
             name=tools.bot_name,
             instructions=instructions,
             model=model,
-            tools=build_agent_tools(tools, state, message.id),
+            tools=build_agent_tools(tools, state, message.id, images),
             model_settings=ModelSettings(
                 reasoning=Reasoning(effort="medium"),
                 parallel_tool_calls=False,
@@ -167,8 +171,8 @@ class ReplyConversationUseCases:
                 raise
             inputs = await self.rebuild(state, message.id, tools)
             result = await self._run(agent, inputs, None)
-        response = GeneratedReply(result.last_response_id, result.final_output)
-        if not response.output_text:
+        response = GeneratedReply(result.last_response_id, result.final_output or "", images.images)
+        if not response.output_text and not response.images:
             error_message = "モデルから回答本文が返りませんでした。"
             raise ValueError(error_message)
         return state, response
@@ -189,7 +193,12 @@ class ReplyConversationUseCases:
 
         """
         # Discordに出した本文だけを復元履歴に残す。思考やツール結果を再構成時に再挿入しない。
-        sent = await reply_with_split_response(message, response.output_text)
+        attachments = [discord.File(io.BytesIO(image.content), filename=image.filename) for image in response.images]
+        try:
+            sent = await reply_with_split_response(message, response.output_text, files=attachments)
+        finally:
+            for attachment in attachments:
+                attachment.close()
         for reply in sent:
             snapshot = await tools.snapshot(reply)
             await self.repository.save_message(snapshot)

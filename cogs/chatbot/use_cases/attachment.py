@@ -75,9 +75,9 @@ class AttachmentUseCases:
         try:
             response = await observe_chatbot_api_call(
                 "attachment_analysis",
-                "gpt-5.4-mini",
+                "gpt-6-luna",
                 AsyncOpenAI().responses.parse(
-                    model="gpt-5.4-mini",
+                    model="gpt-6-luna",
                     input=analysis_input,
                     text_format=AttachmentAnalysis,
                 ),

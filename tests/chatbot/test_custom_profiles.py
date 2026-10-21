@@ -1,10 +1,12 @@
 import unittest
+from unittest.mock import AsyncMock, MagicMock
 
 from cogs.chatbot.services.custom_profile_parser import (
     CustomProfileDirectiveError,
     InvalidCustomProfileDirectiveError,
     parse_custom_profile_directive,
 )
+from cogs.chatbot.use_cases.custom_profile import CustomProfileUseCases
 
 
 class CustomProfileParserTest(unittest.TestCase):
@@ -88,3 +90,24 @@ class CustomProfileParserTest(unittest.TestCase):
             return
 
         self.fail("不正なプロファイル名が拒否されていません")
+
+
+class CustomProfileModelMigrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_resolves_saved_models_without_rewriting_profiles(self) -> None:
+        """保存済みの旧設定を現在のモデルへ読み替えます。"""
+        for saved, expected in (
+            ("gpt-5.6-terra", "gpt-6.1-sol"),
+            ("gpt-5.6-luna", "gpt-6-luna"),
+            ("system_default", "system_default"),
+            ("gpt-6.1-sol", "gpt-6.1-sol"),
+        ):
+            with self.subTest(model=saved):
+                repository = MagicMock()
+                repository.get = AsyncMock(return_value=MagicMock(model=saved, instructions="test"))
+                use_cases = CustomProfileUseCases(repository, MagicMock())
+                profile = await use_cases.resolve(
+                    "<@123> option test 本文", message_id=456, bot_user_id=123, directly_mentioned=True
+                )
+                if profile is None or profile.model != expected:
+                    self.fail("保存済みモデルの移行結果が一致しません")
+                repository.upsert.assert_not_called()

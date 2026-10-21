@@ -87,7 +87,7 @@ async def observe_chatbot_api_call[T](
         web_search_calls,
         code_interpreter_sessions,
     )
-    is_long_context = model.startswith("gpt-5.6-") and input_tokens > LONG_CONTEXT_INPUT_TOKEN_THRESHOLD
+    is_long_context = model.startswith(("gpt-5.6-", "gpt-6-", "gpt-6.1-")) and input_tokens > LONG_CONTEXT_INPUT_TOKEN_THRESHOLD
     await _record_increment(
         ApiUsageIncrement(
             operation=operation,
