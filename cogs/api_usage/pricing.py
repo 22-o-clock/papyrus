@@ -5,7 +5,7 @@ from decimal import Decimal
 from cogs.chatbot.repositories.api_usage import ChatbotApiUsageDaily
 
 PRICING_SOURCE_URL = "https://developers.openai.com/api/docs/pricing"
-PRICING_VERIFIED_ON = datetime.date(2026, 7, 25)
+PRICING_VERIFIED_ON = datetime.date(2026, 10, 21)
 PER_MILLION = Decimal(1_000_000)
 
 
@@ -40,6 +40,36 @@ class EstimatedUsageCost:
 
 
 MODEL_PRICES: dict[str, tuple[ModelPrice, ...]] = {
+    # 新規画像生成はテキスト入力のみ。出力は画像トークンの単価を使用する。
+    "gpt-image-2.5-flare": (
+        ModelPrice(datetime.date(2026, 10, 21), Decimal("5.00"), Decimal("5.00"), Decimal("5.00"), Decimal("30.00")),
+    ),
+    "gpt-6.1-sol": (
+        ModelPrice(
+            datetime.date(2026, 10, 21),
+            Decimal("2.00"),
+            Decimal("0.10"),
+            Decimal("2.50"),
+            Decimal("10.00"),
+            Decimal("4.00"),
+            Decimal("0.20"),
+            Decimal("5.00"),
+            Decimal("15.00"),
+        ),
+    ),
+    "gpt-6-luna": (
+        ModelPrice(
+            datetime.date(2026, 9, 22),
+            Decimal("0.10"),
+            Decimal("0.01"),
+            Decimal("0.125"),
+            Decimal("0.50"),
+            Decimal("0.20"),
+            Decimal("0.02"),
+            Decimal("0.25"),
+            Decimal("0.75"),
+        ),
+    ),
     "gpt-5.6": (
         ModelPrice(
             datetime.date(2026, 7, 13),
