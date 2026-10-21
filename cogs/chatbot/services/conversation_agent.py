@@ -59,7 +59,7 @@ def build_agent_tools(
 
     """
     return [
-        *([images.tool(state, message_id)] if images is not None else []),
+        *([images.tool(state, message_id), images.edit_tool(state, message_id, tools)] if images is not None else []),
         WebSearchTool(),
         CodeInterpreterTool(tool_config={"type": "code_interpreter", "container": {"type": "auto"}}),
         *[_function_tool(definition, tools, state, message_id) for definition in FUNCTION_TOOLS],

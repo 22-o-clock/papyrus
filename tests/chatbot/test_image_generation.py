@@ -62,3 +62,69 @@ class ImageGenerationTest(unittest.IsolatedAsyncioTestCase):
         other = ImageGeneration(cast("Any", self.client), 1024)
         await self.service.generate('{"prompt":"test"}')
         self.assertEqual(other.images, [])
+
+    def editing_tools(self) -> Any:  # noqa: ANN401 - Discord取得処理のテストダブル。
+        """現在の投稿から添付を取得するモックを用意します。"""
+        self.source = SimpleNamespace(
+            id=5, filename="source.png", content_type="image/png", size=len(PNG), read=AsyncMock(return_value=PNG)
+        )
+        self.fetch = AsyncMock(return_value=SimpleNamespace(attachments=[self.source]))
+        self.edit = AsyncMock(return_value=self.generate.return_value)
+        self.client.images.edit = self.edit
+        return SimpleNamespace(channel=AsyncMock(return_value=SimpleNamespace(fetch_message=self.fetch)))
+
+    async def test_edits_current_attachment_and_records_image_input(self) -> None:
+        """元画像と編集指示を渡し、画像入力料金を記録します。"""
+        tools = self.editing_tools()
+        self.edit.return_value.usage = SimpleNamespace(
+            input_tokens=300, output_tokens=1000, input_tokens_details=SimpleNamespace(image_tokens=200)
+        )
+        repository = SimpleNamespace(add=AsyncMock())
+        state = ReplyConversation()
+        arguments = json.dumps(
+            {"prompt": "背景を青く", "images": [{"channel_id": "10", "message_id": "20", "attachment_id": "5"}]}
+        )
+        with patch("cogs.chatbot.observability._usage_repository", repository):
+            result = await self.service.edit_tool(state, 21, tools).on_invoke_tool(cast("Any", None), arguments)
+        self.assertEqual(json.loads(result)["status"], "ready_to_attach")
+        tools.channel.assert_awaited_once_with(10)
+        self.fetch.assert_awaited_once_with(20)
+        edit_call = self.edit.await_args
+        if edit_call is None:
+            self.fail("編集APIが呼ばれていません")
+        self.assertEqual(edit_call.kwargs["image"], [("source.png", PNG, "image/png")])
+        self.assertEqual(edit_call.kwargs["prompt"], "背景を青く")
+        self.assertEqual(repository.add.await_args.args[0].image_input_tokens, 200)
+        self.assertEqual(state.calls[0]["name"], "edit_image")
+        self.assertNotIn(base64.b64encode(PNG).decode(), state.model_dump_json())
+
+    async def test_rejects_unavailable_or_unsupported_sources_before_editing(self) -> None:
+        """閲覧不可・削除済み・非画像・サイズ超過でAPIを呼びません。"""
+        for scenario in ("forbidden", "missing", "pdf", "oversized"):
+            with self.subTest(scenario=scenario):
+                tools = self.editing_tools()
+                if scenario == "forbidden":
+                    tools.channel.side_effect = ValueError("forbidden")
+                elif scenario == "missing":
+                    self.fetch.return_value.attachments = []
+                elif scenario == "pdf":
+                    self.source.content_type = "application/pdf"
+                else:
+                    self.source.size = 50_000_000
+                arguments = json.dumps(
+                    {"prompt": "test", "images": [{"channel_id": "10", "message_id": "20", "attachment_id": "5"}]}
+                )
+                result = await self.service.edit_tool(ReplyConversation(), 21, tools).on_invoke_tool(
+                    cast("Any", None), arguments
+                )
+                self.assertIn("error", json.loads(result))
+                self.edit.assert_not_awaited()
+                self.source.read.assert_not_awaited()
+
+    async def test_invalid_edit_arguments_do_not_download_images(self) -> None:
+        tools = self.editing_tools()
+        for args in ({}, [], {"prompt": "test", "images": []}, {"prompt": "test", "images": [{}] * 17}):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                await self.service.edit(json.dumps(args), tools)
+        tools.channel.assert_not_awaited()
+        self.edit.assert_not_awaited()

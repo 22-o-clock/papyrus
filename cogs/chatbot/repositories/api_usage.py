@@ -24,6 +24,7 @@ class ChatbotApiUsageDaily(ChatbotBase):
     failure_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     item_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    image_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     cache_write_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
@@ -56,6 +57,7 @@ class ApiUsageIncrement:
     succeeded: bool
     item_count: int = 1
     input_tokens: int = 0
+    image_input_tokens: int = 0
     cached_input_tokens: int = 0
     cache_write_input_tokens: int = 0
     output_tokens: int = 0
@@ -91,6 +93,7 @@ class ChatbotApiUsageRepository:
             "failure_count": int(not increment.succeeded),
             "item_count": increment.item_count,
             "input_tokens": increment.input_tokens,
+            "image_input_tokens": increment.image_input_tokens,
             "cached_input_tokens": increment.cached_input_tokens,
             "cache_write_input_tokens": increment.cache_write_input_tokens,
             "output_tokens": increment.output_tokens,
@@ -118,6 +121,7 @@ class ChatbotApiUsageRepository:
                         "failure_count": ChatbotApiUsageDaily.failure_count + excluded.failure_count,
                         "item_count": ChatbotApiUsageDaily.item_count + excluded.item_count,
                         "input_tokens": ChatbotApiUsageDaily.input_tokens + excluded.input_tokens,
+                        "image_input_tokens": ChatbotApiUsageDaily.image_input_tokens + excluded.image_input_tokens,
                         "cached_input_tokens": ChatbotApiUsageDaily.cached_input_tokens + excluded.cached_input_tokens,
                         "cache_write_input_tokens": (
                             ChatbotApiUsageDaily.cache_write_input_tokens + excluded.cache_write_input_tokens

@@ -21,6 +21,7 @@ def aggregate_feature_usages(rows: list[ChatbotApiUsageDaily]) -> list[FeatureUs
         usage.failure_count += row.failure_count
         usage.item_count += row.item_count
         usage.input_tokens += row.input_tokens
+        usage.image_input_tokens += row.image_input_tokens or 0
         usage.cached_input_tokens += row.cached_input_tokens
         usage.cache_write_input_tokens += row.cache_write_input_tokens
         usage.output_tokens += row.output_tokens

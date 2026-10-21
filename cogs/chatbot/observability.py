@@ -95,6 +95,11 @@ async def observe_chatbot_api_call[T](
             succeeded=True,
             item_count=item_count,
             input_tokens=input_tokens,
+            image_input_tokens=(
+                _nested_integer_attribute(usage, "input_tokens_details", "image_tokens")
+                if model.startswith("gpt-image-")
+                else 0
+            ),
             cached_input_tokens=cached_input_tokens,
             cache_write_input_tokens=cache_write_input_tokens,
             output_tokens=output_tokens,

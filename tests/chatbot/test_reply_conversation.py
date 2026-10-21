@@ -406,6 +406,44 @@ class ReplyConversationTest(unittest.IsolatedAsyncioTestCase):
         ensure("iVBOR" not in self.repository.turns[4].model_dump_json())
         ensure(self.client.images.generate.await_args.kwargs["model"] == "gpt-image-2.5-flare")
 
+    async def test_sdk_edits_reply_attachment_and_delivers_result(self) -> None:
+        """返信先の画像編集をRunnerから呼び、本文と結果を一緒に送信します。"""
+        self.repository.messages[3] = message(3, 2)
+        self.repository.messages[2] = message(2, assistant=True)
+        self.tools.channel.return_value.fetch_message = AsyncMock(
+            return_value=SimpleNamespace(
+                attachments=[
+                    SimpleNamespace(
+                        id=5,
+                        filename="source.png",
+                        content_type="image/png",
+                        size=9,
+                        read=AsyncMock(return_value=b"source image"),
+                    )
+                ]
+            )
+        )
+        self.client.images = SimpleNamespace(
+            edit=AsyncMock(return_value=SimpleNamespace(data=[SimpleNamespace(b64_json="iVBORw0KGgp0ZXN0")], usage=None))
+        )
+        call = ResponseFunctionToolCall(
+            id="fc_edit",
+            type="function_call",
+            call_id="call_edit",
+            name="edit_image",
+            arguments=json.dumps(
+                {"prompt": "背景を青く", "images": [{"channel_id": "10", "message_id": "2", "attachment_id": "5"}]}
+            ),
+        )
+        self.responses.create.side_effect = [Response.model_construct(id="resp_edit", usage=None, output=[call]), answer()]
+        self.incoming.reply = AsyncMock(return_value=SimpleNamespace(id=4))
+        self.tools.snapshot.return_value = message(4, 3, assistant=True)
+        sent, _ = await self.engine.respond(self.incoming, self.tools, None)
+        ensure([m.id for m in sent] == [4])
+        self.client.images.edit.assert_awaited_once()
+        ensure(self.repository.turns[4].response_id == "resp_new")
+        ensure(self.repository.turns[4].calls[0]["name"] == "edit_image")
+
     async def test_sdk_executes_attachment_and_continues_with_native_media(self) -> None:
         """実際のRunnerでツール実行から画像・PDF付きの継続生成までを検証します。"""
         self.repository.messages[3] = message(3)

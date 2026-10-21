@@ -33,6 +33,7 @@ def create_usage(
         "failure_count": 0,
         "item_count": 1,
         "input_tokens": 0,
+        "image_input_tokens": 0,
         "cached_input_tokens": 0,
         "cache_write_input_tokens": 0,
         "output_tokens": 0,
@@ -251,6 +252,17 @@ class ApiUsageAggregationTest(TestCase):
         row = create_usage("image_generation", "gpt-image-2.5-flare", input_tokens=100, output_tokens=1_000)
         row.usage_date = datetime.date(2026, 10, 21)
         ensure_equal(aggregate_feature_usages([row])[0].model_cost, Decimal("0.0305"))
+
+    def test_image_editing_charges_image_and_text_inputs_separately(self) -> None:
+        """画像入力を通常入力と二重計上せず、画像単価で計算します。"""
+        row = create_usage(
+            "image_generation", "gpt-image-2.5-flare", input_tokens=300, image_input_tokens=200, output_tokens=1000
+        )
+        row.usage_date = datetime.date(2026, 10, 21)
+        usage = aggregate_feature_usages([row])[0]
+        ensure_equal(usage.input_tokens, 300)
+        ensure_equal(usage.image_input_tokens, 200)
+        ensure_equal(usage.model_cost, Decimal("0.0321"))
 
     def test_unknown_model_is_explicitly_marked(self) -> None:
         usage = aggregate_feature_usages([create_usage("draft_generation", "unknown-model", input_tokens=10_000)])[0]
