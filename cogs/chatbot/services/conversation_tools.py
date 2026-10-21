@@ -1,8 +1,10 @@
+import datetime
 import json
 from collections.abc import Mapping
 from typing import Any
 
 import discord
+from discord.http import Route
 
 from cogs.chatbot.models.reply_conversation import ConversationAttachment, ConversationMessage
 from cogs.chatbot.repositories.member_alias import ChatbotMemberAliasRepository
@@ -10,6 +12,10 @@ from cogs.chatbot.repositories.memory_document import ChatbotMemoryDocumentRepos
 from cogs.chatbot.repositories.short_term_message import ChatbotShortTermMessageRepository
 
 MESSAGE_LIMIT = 50
+SEARCH_QUERY_LIMIT = 1024
+SEARCH_INDEX_PENDING = 110000
+SEARCH_LIMIT = 25
+SEARCH_MAX_OFFSET = 9975
 
 
 def function(name: str, description: str, properties: dict[str, Any]) -> dict[str, Any]:
@@ -30,6 +36,53 @@ def function(name: str, description: str, properties: dict[str, Any]) -> dict[st
 
 ID = {"type": "string", "description": "Discord ID"}
 FUNCTION_TOOLS = [
+    function(
+        "search_messages",
+        "サーバー内の投稿をDiscordで検索します。保存期間の制限はありません。条件は組み合わせ可能です。",
+        {
+            "query": {
+                "type": ["string", "null"],
+                "maxLength": SEARCH_QUERY_LIMIT,
+                "description": "本文の検索語。nullで指定なし。",
+            },
+            "channel_id": {"type": ["string", "null"], "description": "対象チャンネル。nullでサーバー全体。"},
+            "author_id": {"type": ["string", "null"], "description": "投稿者ID。nullで指定なし。"},
+            "after": {"type": ["string", "null"], "description": "開始日時(タイムゾーン付きISO 8601)。nullで指定なし。"},
+            "before": {"type": ["string", "null"], "description": "終了日時(タイムゾーン付きISO 8601)。nullで指定なし。"},
+            "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": SEARCH_LIMIT, "description": "nullなら25件。"},
+            "offset": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "maximum": SEARCH_MAX_OFFSET,
+                "description": "追加取得位置。nullなら0。",
+            },
+        },
+    ),
+    function(
+        "get_message",
+        "指定した投稿を直接取得します。投稿リンクの末尾2要素がチャンネルID・メッセージIDです。",
+        {"channel_id": ID, "message_id": ID},
+    ),
+    function(
+        "get_message_context",
+        "指定投稿と同じチャンネルの前後の投稿を時系列順に取得します。返信関係による絞り込みは行いません。",
+        {
+            "channel_id": ID,
+            "message_id": ID,
+            "before_limit": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "maximum": MESSAGE_LIMIT,
+                "description": "前の件数。nullなら10。",
+            },
+            "after_limit": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "maximum": MESSAGE_LIMIT,
+                "description": "後の件数。nullなら10。",
+            },
+        },
+    ),
     function("list_members", "このサーバーのメンバー一覧と、各メンバーを一意に識別できる登録済みの別名を取得します。", {}),
     function(
         "get_memory",
@@ -193,7 +246,14 @@ class ConversationTools:
             raise TypeError(error_message)
         if name == "list_members":
             return await self._members()
-        handlers = {"get_memory": self._memory, "get_messages": self._messages, "get_attachment": self._attachment}
+        handlers = {
+            "get_memory": self._memory,
+            "get_messages": self._messages,
+            "get_attachment": self._attachment,
+            "search_messages": self._search,
+            "get_message": self._message,
+            "get_message_context": self._context,
+        }
         if name == "list_channels":
             return await self._channels()
         if name in handlers:
@@ -275,6 +335,85 @@ class ConversationTools:
             ensure_ascii=False,
         )
 
+    async def _message_data(self, message: discord.Message) -> dict[str, Any]:
+        """投稿本文・添付概要・参照リンクを返します。"""
+        snapshot = await self.snapshot(message)
+        data = snapshot.model_dump(exclude={"attachments": {"__all__": {"url"}}})
+        data["url"] = message.jump_url
+        return data
+
+    async def _message(self, args: dict[str, Any]) -> str:
+        """現在閲覧できる指定投稿を直接取得します。"""
+        channel = await self.channel(int(args["channel_id"]))
+        message = await channel.fetch_message(int(args["message_id"]))
+        return json.dumps(await self._message_data(message), ensure_ascii=False)
+
+    async def _context(self, args: dict[str, Any]) -> str:
+        """起点とその前後を取得し、時系列順で返します。"""
+        before_limit = integer_argument(args, "before_limit", 10, 0, MESSAGE_LIMIT)
+        after_limit = integer_argument(args, "after_limit", 10, 0, MESSAGE_LIMIT)
+        channel = await self.channel(int(args["channel_id"]))
+        anchor = await channel.fetch_message(int(args["message_id"]))
+        before = (
+            [m async for m in channel.history(limit=before_limit, before=anchor, oldest_first=False)] if before_limit else []
+        )
+        after = [m async for m in channel.history(limit=after_limit, after=anchor, oldest_first=True)] if after_limit else []
+        messages = [*reversed(before), anchor, *after]
+        return json.dumps(
+            {"anchor_message_id": str(anchor.id), "messages": [await self._message_data(m) for m in messages]},
+            ensure_ascii=False,
+        )
+
+    async def _search(self, args: dict[str, Any]) -> str:
+        """Discordの検索結果を現在の閲覧権限で確認して返します。
+
+        インデックス準備中は検索結果なしと区別し、再試行までの秒数を返します。
+        ページ末尾は返却件数ではなく検索APIの総件数から判断します。
+        """
+        limit = integer_argument(args, "limit", SEARCH_LIMIT, 1, SEARCH_LIMIT)
+        offset = integer_argument(args, "offset", 0, 0, SEARCH_MAX_OFFSET)
+        params: dict[str, Any] = {"limit": limit, "offset": offset, "sort_by": "timestamp", "sort_order": "desc"}
+        params.update(search_filters(args))
+        if args.get("channel_id"):
+            channel = await self.channel(int(args["channel_id"]))
+            params["channel_id"] = [str(channel.id)]
+        # discord.pyには検索用公開メソッドがないため、既存の認証・レート制御を使う。
+        data = await self.guild._state.http.request(  # noqa: SLF001
+            Route("GET", "/guilds/{guild_id}/messages/search", guild_id=self.guild.id), params=params
+        )
+        if data.get("code") == SEARCH_INDEX_PENDING:
+            return json.dumps({"status": "indexing", "retry_after": data.get("retry_after", 2)})
+        results = []
+        seen: set[int] = set()
+        unavailable: set[str] = set()
+        for group in data["messages"]:
+            for item in group:
+                message_id = int(item["id"])
+                if item.get("hit") is False or message_id in seen:
+                    continue
+                seen.add(message_id)
+                try:
+                    channel = await self.channel(int(item["channel_id"]))
+                    message = await channel.fetch_message(message_id)
+                except (discord.NotFound, discord.Forbidden, ValueError, TypeError):
+                    unavailable.add(str(message_id))
+                    continue
+                results.append(await self._message_data(message))
+        next_offset = offset + limit
+        has_more = next_offset < data["total_results"]
+        return json.dumps(
+            {
+                "status": "completed",
+                "messages": results,
+                "total_results": data["total_results"],
+                "next_offset": next_offset if has_more and next_offset <= SEARCH_MAX_OFFSET else None,
+                "pagination_limited": has_more and next_offset > SEARCH_MAX_OFFSET,
+                "indexing": data.get("doing_deep_historical_index", False),
+                "unavailable_message_ids": sorted(unavailable),
+            },
+            ensure_ascii=False,
+        )
+
     async def _attachment(self, args: dict[str, Any]) -> str | list[dict[str, Any]]:
         """指定投稿を再取得し、現在のURLから添付本体を参照する入力を返します。
 
@@ -341,6 +480,41 @@ class ConversationTools:
             },
             ensure_ascii=False,
         )
+
+
+def search_filters(args: dict[str, Any]) -> dict[str, Any]:
+    """検索条件を検証し、Discord APIのフィルターへ変換します。"""
+    params: dict[str, Any] = {}
+    query = args.get("query")
+    if query is not None:
+        if not isinstance(query, str) or len(query) > SEARCH_QUERY_LIMIT:
+            error_message = "検索語は1024文字以内の文字列です。"
+            raise ValueError(error_message)
+        params["content"] = query
+    if args.get("author_id"):
+        params["author_id"] = [str(int(args["author_id"]))]
+    for key, parameter in (("after", "min_id"), ("before", "max_id")):
+        if args.get(key):
+            value = datetime.datetime.fromisoformat(args[key])
+            if value.utcoffset() is None:
+                error_message = "検索日時にはタイムゾーンを指定してください。"
+                raise ValueError(error_message)
+            params[parameter] = str(discord.utils.time_snowflake(value))
+    if "min_id" in params and "max_id" in params and int(params["min_id"]) >= int(params["max_id"]):
+        error_message = "開始日時は終了日時より前にしてください。"
+        raise ValueError(error_message)
+    return params
+
+
+def integer_argument(args: dict[str, Any], key: str, default: int, minimum: int, maximum: int) -> int:
+    """省略可能な整数引数を範囲検証して返します。"""
+    value = args.get(key)
+    if value is None:
+        return default
+    if type(value) is not int or not minimum <= value <= maximum:
+        error_message = f"{key}は{minimum}〜{maximum}の整数で指定してください。"
+        raise ValueError(error_message)
+    return value
 
 
 def build_channel_tree(
