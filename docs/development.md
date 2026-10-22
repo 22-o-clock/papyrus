@@ -160,6 +160,31 @@ uv run ty check <変更対象>
 - PRではGitHub Actionsのテストとlintの結果を確認する。ローカルでCI環境全体を再現する必要はない。
 - pre-commitは現時点では必須としない。
 
+## 依存更新
+
+通常のminor・major更新は、PythonとGitHub Actionsを月次の1つのPRにまとめる。
+セキュリティ更新は月次を待たず、エコシステムごとに1つのPRにまとめる。
+Dependabotの仕様上、通常更新とセキュリティ更新、異なるエコシステムのセキュリティ更新は同じPRにできない。
+
+### 互換性確認
+
+- 非同期DB処理を使用するため、SQLAlchemyは `sqlalchemy[asyncio]` を依存に指定する。
+  2.1以降では、追加指定をしないと必要な `greenlet` がインストールされない。
+- 日時・タイムゾーン関連の更新では、JSTの日付境界と期間集計、WindowsとLinuxのタイムゾーン解決を確認する。
+- HTTPクライアントや会話処理の依存を更新した場合は、debug環境でコマンド応答と明示メンションへの返信も確認する。
+
+### CIのサブモジュール認証
+
+lintとtestは非公開のプロンプトサブモジュールを取得するため、GitHub Appの認証を使用する。
+`APP_CLIENT_ID` と `PRIVATE_KEY` を、リポジトリのActions SecretsとDependabot Secretsの両方に登録する。
+Dependabotが作成したPRでは、Actions Secretsの値は参照できない。
+GitHub Appには、親リポジトリとプロンプトリポジトリのContentsを読む権限を付与する。
+
+これらはCI専用の設定であり、Bot実行用の `.env` には含めない。
+秘密鍵が手元にない場合は、Appの管理画面から追加発行する。既存の鍵を削除せず、
+新しい鍵をDependabot Secretsへ登録すれば既存のActions Secretsを維持できる。
+秘密鍵をローテーションする際は両方のSecretsを更新し、通常PRとDependabot PRのlintとtestを確認する。
+
 ## ドキュメントの更新
 
 - 機能や利用方法を変更した場合は、実装と同じ変更単位で関連するドキュメントも更新する。

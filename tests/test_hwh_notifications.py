@@ -1,6 +1,7 @@
 import datetime
 import unittest
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import discord
@@ -15,7 +16,7 @@ class EventNotificationMemoryExclusionTest(unittest.IsolatedAsyncioTestCase):
         channel = SimpleNamespace(send=AsyncMock(side_effect=sent_messages))
         fetch_text_channel.return_value = channel
         bot = Mock()
-        cog = object.__new__(Patchwork)
+        cog = cast("Any", object.__new__(Patchwork))
         cog.bot = bot
         cog.runtime_environment = SimpleNamespace(is_debug=False)
         cog.event_notify_channel = 10

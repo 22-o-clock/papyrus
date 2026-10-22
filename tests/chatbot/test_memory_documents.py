@@ -37,9 +37,9 @@ class MemorySourceExclusionTest(unittest.IsolatedAsyncioTestCase):
         )
         use_cases = object.__new__(LongTermMemoryUseCases)
 
-        if use_cases._is_memory_evidence(message):  # noqa: SLF001
+        if use_cases._is_memory_evidence(message):
             self.fail("自動生成メッセージを長期記憶の根拠に含めています")
-        if use_cases._is_update_source(message):  # noqa: SLF001
+        if use_cases._is_update_source(message):
             self.fail("除外フラグ付きメッセージを長期記憶の更新起点にしています")
 
     async def test_excluded_message_is_serialized_as_automatically_generated_context(self) -> None:
@@ -62,9 +62,9 @@ class MemorySourceExclusionTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         use_cases = object.__new__(LongTermMemoryUseCases)
-        use_cases._messages = cast("Any", SimpleNamespace(get_attachments=AsyncMock(return_value=[])))  # noqa: SLF001
+        use_cases._messages = cast("Any", SimpleNamespace(get_attachments=AsyncMock(return_value=[])))
 
-        payload = await use_cases._serialize_messages([message])  # noqa: SLF001
+        payload = await use_cases._serialize_messages([message])
 
         if payload[0]["g"] is not True:
             self.fail("自動生成メッセージを文脈用の印付きで渡していません")
@@ -102,10 +102,10 @@ class MemoryDocumentBatchingTest(unittest.IsolatedAsyncioTestCase):
             enqueue=AsyncMock(side_effect=enqueue),
         )
         use_cases = object.__new__(LongTermMemoryUseCases)
-        use_cases._documents = cast("Any", repository)  # noqa: SLF001
-        use_cases._message_token_count = Mock(return_value=1)  # type: ignore[method-assign]  # noqa: SLF001
-        use_cases._schedule_worker = Mock()  # type: ignore[method-assign]  # noqa: SLF001
-        use_cases._schedule_daily_flush = Mock()  # type: ignore[method-assign]  # noqa: SLF001
+        use_cases._documents = cast("Any", repository)
+        use_cases._message_token_count = Mock(return_value=1)  # type: ignore[method-assign]
+        use_cases._schedule_worker = Mock()  # type: ignore[method-assign]
+        use_cases._schedule_daily_flush = Mock()  # type: ignore[method-assign]
 
         await use_cases.initialize()
 
@@ -134,11 +134,11 @@ class MemoryDocumentBatchingTest(unittest.IsolatedAsyncioTestCase):
             enqueue=AsyncMock(),
         )
         use_cases = object.__new__(LongTermMemoryUseCases)
-        use_cases._documents = cast("Any", repository)  # noqa: SLF001
-        use_cases._message_token_count = Mock(return_value=1)  # type: ignore[method-assign]  # noqa: SLF001
-        use_cases._schedule_worker = Mock()  # type: ignore[method-assign]  # noqa: SLF001
+        use_cases._documents = cast("Any", repository)
+        use_cases._message_token_count = Mock(return_value=1)  # type: ignore[method-assign]
+        use_cases._schedule_worker = Mock()  # type: ignore[method-assign]
 
-        await use_cases._enqueue_if_threshold_reached(50)  # noqa: SLF001
+        await use_cases._enqueue_if_threshold_reached(50)
 
         repository.enqueue.assert_awaited_once_with(
             0,
@@ -167,18 +167,18 @@ class MemoryDocumentBatchingTest(unittest.IsolatedAsyncioTestCase):
             )
 
         use_cases = object.__new__(LongTermMemoryUseCases)
-        use_cases._bot = cast(  # noqa: SLF001
+        use_cases._bot = cast(
             "Any",
             SimpleNamespace(
                 get_channel=lambda channel_id: SimpleNamespace(name=f"channel-{channel_id}"),
             ),
         )
-        use_cases._messages = cast(  # noqa: SLF001
+        use_cases._messages = cast(
             "Any",
             SimpleNamespace(get_attachments=AsyncMock(return_value=[])),
         )
 
-        payload = await use_cases._build_update_payload(  # noqa: SLF001
+        payload = await use_cases._build_update_payload(
             [cast("Any", message(1, 10, "一人目")), cast("Any", message(2, 20, "二人目"))],
             [],
             [],
@@ -222,9 +222,9 @@ class MemoryDocumentShorteningTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         use_cases = object.__new__(LongTermMemoryUseCases)
-        use_cases._updater = cast("Any", updater)  # noqa: SLF001
+        use_cases._updater = cast("Any", updater)
 
-        result = await use_cases._shorten_documents_if_needed(  # noqa: SLF001
+        result = await use_cases._shorten_documents_if_needed(
             MemoryDocumentUpdateResult(
                 updates=[original_person, unchanged_person],
                 aliases=[alias],
@@ -246,12 +246,12 @@ class MemoryDocumentShorteningTest(unittest.IsolatedAsyncioTestCase):
         if result.updates != [shortened_person, unchanged_person] or result.aliases != [alias]:
             self.fail("短縮結果の部分マージまたは元の別名候補の保持に失敗しています")
 
-        use_cases._validate_documents(result, {10, 20})  # noqa: SLF001
+        use_cases._validate_documents(result, {10, 20})
 
     async def test_does_not_shorten_person_document_at_trigger(self) -> None:
         updater = SimpleNamespace(shorten=AsyncMock())
         use_cases = object.__new__(LongTermMemoryUseCases)
-        use_cases._updater = cast("Any", updater)  # noqa: SLF001
+        use_cases._updater = cast("Any", updater)
         result = MemoryDocumentUpdateResult(
             updates=[
                 MemoryDocumentUpdate(
@@ -263,7 +263,7 @@ class MemoryDocumentShorteningTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        returned = await use_cases._shorten_documents_if_needed(result)  # noqa: SLF001
+        returned = await use_cases._shorten_documents_if_needed(result)
 
         if returned is not result:
             self.fail("短縮不要な結果を作り直しています")
@@ -273,7 +273,7 @@ class MemoryDocumentShorteningTest(unittest.IsolatedAsyncioTestCase):
         use_cases = object.__new__(LongTermMemoryUseCases)
 
         for document_type in ("person", "bot", "shared"):
-            if use_cases._document_character_limits(document_type) != (1000, 2000, 2500):  # noqa: SLF001
+            if use_cases._document_character_limits(document_type) != (1000, 2000, 2500):
                 self.fail(f"{document_type}文書の目標・短縮開始・強制拒否上限が統一されていません")
 
     def test_rejects_person_document_over_hard_maximum(self) -> None:
@@ -290,7 +290,7 @@ class MemoryDocumentShorteningTest(unittest.IsolatedAsyncioTestCase):
         )
 
         try:
-            use_cases._validate_documents(result, {10})  # noqa: SLF001
+            use_cases._validate_documents(result, {10})
         except MemoryDocumentValidationError:
             pass
         else:

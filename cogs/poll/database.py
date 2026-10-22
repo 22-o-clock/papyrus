@@ -1,7 +1,7 @@
 """秘密投票のテーブル定義と、実行環境に対応したスキーマ接続。"""
 
 import datetime
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import cast
 
@@ -88,7 +88,7 @@ class PollDatabase:
         self._database_schema = get_talkdata_schema(environment)
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
+    async def session(self) -> AsyncGenerator[AsyncSession]:
         """実行環境に対応するスキーマへ読み替えたSessionを返し、終了時にコミットする。
 
         スキーマの読み替えはコネクション単位の設定なので、ブロック全体を1つのトランザクションに閉じ込める。

@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, Mock
 
 from cogs.agree.agree import Agree
@@ -22,7 +22,7 @@ class AgreeMemoryExclusionTest(unittest.IsolatedAsyncioTestCase):
         )
         source = cast("Message", SimpleNamespace(content="同意します", jump_url="https://example.com/messages/1"))
         bot = Mock()
-        cog = Agree(cast("commands.Bot[Any]", bot))
+        cog = Agree(cast("commands.Bot", bot))
 
         await cog.agree(interaction, source)
 
@@ -39,7 +39,7 @@ class AgreeMemoryExclusionTest(unittest.IsolatedAsyncioTestCase):
         )
         source = cast("Message", SimpleNamespace(content="同意します"))
         bot = Mock()
-        cog = Agree(cast("commands.Bot[Any]", bot))
+        cog = Agree(cast("commands.Bot", bot))
 
         await cog.disagree(interaction, source)
 
