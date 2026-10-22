@@ -1,7 +1,7 @@
 import unittest
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import discord
@@ -132,7 +132,7 @@ class AuditLogMemoryExclusionTest(unittest.IsolatedAsyncioTestCase):
         bot = Mock()
         cog = object.__new__(Audit)
         cog.bot = cast("commands.Bot", bot)
-        cog.runtime_environment = SimpleNamespace(is_debug=False)
+        cog.runtime_environment = cast("Any", SimpleNamespace(is_debug=False))
         cog.server_id = 1
         cog.log_thread = 30
         cog.audit_immunity = []

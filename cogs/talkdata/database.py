@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -84,7 +84,7 @@ class TalkDataDatabase:
         self._database_schema = get_talkdata_schema(environment)
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
+    async def session(self) -> AsyncGenerator[AsyncSession]:
         """実行時設定に対応するスキーマへ接続したSessionを返す。"""
         async with self._session_factory() as session:
             await session.connection(execution_options={"schema_translate_map": {TALKDATA_SCHEMA: self._database_schema}})

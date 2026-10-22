@@ -3,7 +3,7 @@
 import datetime
 import sqlite3
 import unittest
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, cast
@@ -40,7 +40,7 @@ class QueryDatabase:
         )
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator["QueryDatabase"]:
+    async def session(self) -> AsyncGenerator["QueryDatabase"]:
         """SQLを実行するセッションの代役を返す。"""
         yield self
 
@@ -150,11 +150,9 @@ class TopMessageQueryTest(unittest.IsolatedAsyncioTestCase):
 class TopMessageRankingTest(unittest.IsolatedAsyncioTestCase):
     async def test_unqualified_member_can_have_top_message_but_bot_cannot(self) -> None:
         use_cases = object.__new__(CynicismReportUseCases)
-        use_cases._runtime_environment = cast(  # noqa: SLF001
-            "Any", SimpleNamespace(is_debug=False, chatbot_test_channel_ids=frozenset({99}))
-        )
-        use_cases._server_id = 500  # noqa: SLF001
-        use_cases._bot = cast(  # noqa: SLF001
+        use_cases._runtime_environment = cast("Any", SimpleNamespace(is_debug=False, chatbot_test_channel_ids=frozenset({99})))
+        use_cases._server_id = 500
+        use_cases._bot = cast(
             "Any",
             SimpleNamespace(
                 user=SimpleNamespace(id=100),
@@ -172,7 +170,7 @@ class TopMessageRankingTest(unittest.IsolatedAsyncioTestCase):
                 return_value=[MessageReactionCounts(20, 10, 2, 3), MessageReactionCounts(21, 10, 1, 3)]
             ),
         )
-        use_cases._reactions = cast("Any", reactions)  # noqa: SLF001
+        use_cases._reactions = cast("Any", reactions)
         period = period_from_start_date(CynicismPeriodType.WEEKLY, datetime.date(2026, 7, 26))
         ranking = await use_cases.build_ranking_for(period)
         ensure(ranking.rate_champion is not None and ranking.rate_champion.member_id == 1)

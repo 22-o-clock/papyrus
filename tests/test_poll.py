@@ -2,7 +2,7 @@
 
 import datetime
 import unittest
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, cast
@@ -76,7 +76,7 @@ class SqliteDatabase:
                 cast("Table", model.__table__).create(connection)
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[SimpleNamespace]:
+    async def session(self) -> AsyncGenerator[SimpleNamespace]:
         """SQLAlchemyの同期接続をリポジトリの非同期インターフェースへ適合させる。"""
         with self.engine.begin() as connection:
             yield SimpleNamespace(

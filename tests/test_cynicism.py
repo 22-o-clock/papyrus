@@ -2,7 +2,7 @@ import asyncio
 import datetime
 import io
 import unittest
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from decimal import Decimal
@@ -766,11 +766,11 @@ class ReportUseCasesTest(unittest.IsolatedAsyncioTestCase):
     def build_use_cases(self, *, is_debug: bool = False, is_paused: bool = False) -> CynicismReportUseCases:
         """DBへ接続せずにレポートユースケースを組み立てます。"""
         use_cases = object.__new__(CynicismReportUseCases)
-        use_cases._runtime_environment = cast("Any", SimpleNamespace(is_debug=is_debug))  # noqa: SLF001
+        use_cases._runtime_environment = cast("Any", SimpleNamespace(is_debug=is_debug))
         self.get_settings.return_value = make_settings(is_paused=is_paused)
-        use_cases._configuration = cast("Any", SimpleNamespace(get=self.get_settings))  # noqa: SLF001
-        use_cases._reactions = cast("Any", SimpleNamespace(earliest_recorded_date=self.earliest_recorded_date))  # noqa: SLF001
-        use_cases._reports = cast("Any", SimpleNamespace(has_delivery=AsyncMock(return_value=False)))  # noqa: SLF001
+        use_cases._configuration = cast("Any", SimpleNamespace(get=self.get_settings))
+        use_cases._reactions = cast("Any", SimpleNamespace(earliest_recorded_date=self.earliest_recorded_date))
+        use_cases._reports = cast("Any", SimpleNamespace(has_delivery=AsyncMock(return_value=False)))
         return use_cases
 
     def setUp(self) -> None:
@@ -849,7 +849,7 @@ class RecordingDatabase:
         self._session = session
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[RecordingSession]:
+    async def session(self) -> AsyncGenerator[RecordingSession]:
         yield self._session
 
 
@@ -1060,17 +1060,17 @@ class InteractionDeadlineTest(unittest.IsolatedAsyncioTestCase):
 
     def build_use_cases(self, interaction: InteractionRecorder) -> CynicismReportUseCases:
         use_cases = object.__new__(CynicismReportUseCases)
-        use_cases._runtime_environment = cast("Any", SimpleNamespace(is_debug=True))  # noqa: SLF001
-        use_cases._admin_role_id = self.ADMIN_ROLE_ID  # noqa: SLF001
-        use_cases._target_id = 7  # noqa: SLF001
-        use_cases._configuration = cast(  # noqa: SLF001
+        use_cases._runtime_environment = cast("Any", SimpleNamespace(is_debug=True))
+        use_cases._admin_role_id = self.ADMIN_ROLE_ID
+        use_cases._target_id = 7
+        use_cases._configuration = cast(
             "Any",
             SimpleNamespace(
                 get=interaction.record_database_access,
                 set_paused=interaction.record_database_access,
             ),
         )
-        use_cases._reports = cast(  # noqa: SLF001
+        use_cases._reports = cast(
             "Any",
             SimpleNamespace(get_last_delivery=AsyncMock(return_value=None)),
         )
@@ -1108,12 +1108,12 @@ class ShowMessagesTest(unittest.IsolatedAsyncioTestCase):
         display_names: dict[int, str] | None = None,
     ) -> CynicismReportUseCases:
         use_cases = object.__new__(CynicismReportUseCases)
-        use_cases._runtime_environment = cast(  # noqa: SLF001
+        use_cases._runtime_environment = cast(
             "Any",
             SimpleNamespace(is_debug=False, chatbot_test_channel_ids=frozenset({TEST_CHANNEL_ID})),
         )
-        use_cases._configuration = cast("Any", SimpleNamespace(get=AsyncMock(return_value=make_settings())))  # noqa: SLF001
-        use_cases._reactions = cast(  # noqa: SLF001
+        use_cases._configuration = cast("Any", SimpleNamespace(get=AsyncMock(return_value=make_settings())))
+        use_cases._reactions = cast(
             "Any",
             SimpleNamespace(
                 list_member_reactions=AsyncMock(return_value=records or []),
@@ -1127,8 +1127,8 @@ class ShowMessagesTest(unittest.IsolatedAsyncioTestCase):
                 SimpleNamespace(display_name="Papyrus", bot=True) if member_id == PAPYRUS_USER_ID else None
             )
         )
-        use_cases._bot = bot  # noqa: SLF001
-        use_cases._server_id = GUILD_ID  # noqa: SLF001
+        use_cases._bot = bot
+        use_cases._server_id = GUILD_ID
         return use_cases
 
     def make_member(self, *, display_name: str = "被発言者") -> discord.Member:
@@ -1217,13 +1217,13 @@ class ScheduledReportTest(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(is_empty=ranking_is_empty)
 
         use_cases = object.__new__(CynicismReportUseCases)
-        use_cases._runtime_environment = cast("Any", SimpleNamespace(is_debug=False))  # noqa: SLF001
-        use_cases._configuration = cast("Any", SimpleNamespace(get=AsyncMock(return_value=make_settings())))  # noqa: SLF001
-        use_cases._reactions = cast(  # noqa: SLF001
+        use_cases._runtime_environment = cast("Any", SimpleNamespace(is_debug=False))
+        use_cases._configuration = cast("Any", SimpleNamespace(get=AsyncMock(return_value=make_settings())))
+        use_cases._reactions = cast(
             "Any",
             SimpleNamespace(earliest_recorded_date=AsyncMock(return_value=datetime.date(2026, 1, 1))),
         )
-        use_cases._reports = cast(  # noqa: SLF001
+        use_cases._reports = cast(
             "Any",
             SimpleNamespace(
                 get_delivery=get_delivery,
@@ -1232,9 +1232,9 @@ class ScheduledReportTest(unittest.IsolatedAsyncioTestCase):
                 save_posted=save_posted,
             ),
         )
-        use_cases._target_id = self.TARGET_ID  # noqa: SLF001
-        use_cases._report_lock = asyncio.Lock()  # noqa: SLF001
-        use_cases.build_ranking_for = build_ranking_for  # type: ignore[method-assign]
+        use_cases._target_id = self.TARGET_ID
+        use_cases._report_lock = asyncio.Lock()
+        use_cases.build_ranking_for = AsyncMock(side_effect=build_ranking_for)
         return use_cases, recorded
 
     async def test_empty_periods_are_recorded_as_processed(self) -> None:

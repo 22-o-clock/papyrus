@@ -3,7 +3,7 @@ import unittest
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import ANY, AsyncMock, Mock
 
 import discord
@@ -52,7 +52,7 @@ class HistorySyncRangeTest(unittest.TestCase):
 class StartupHistorySyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_initializes_long_term_memory_before_releasing_message_events(self) -> None:
         events: list[str] = []
-        use_cases = object.__new__(ConversationUseCases)
+        use_cases = cast("Any", object.__new__(ConversationUseCases))
         use_cases.bot = SimpleNamespace(user=SimpleNamespace(id=123))
         use_cases.reply_conversations = SimpleNamespace(repository=SimpleNamespace(namespace=""))
         use_cases.runtime_environment = SimpleNamespace(is_debug=False)
@@ -89,7 +89,7 @@ class StartupHistorySyncTest(unittest.IsolatedAsyncioTestCase):
             history=history,
         )
         guild = SimpleNamespace(me=SimpleNamespace(), text_channels=[channel], threads=[])
-        use_cases = object.__new__(ConversationUseCases)
+        use_cases = cast("Any", object.__new__(ConversationUseCases))
         use_cases.bot = SimpleNamespace(guilds=[guild])
         use_cases.runtime_environment = SimpleNamespace(
             should_process_chatbot_channel=Mock(return_value=True),
@@ -233,7 +233,7 @@ class EmbedSuppressionTest(unittest.IsolatedAsyncioTestCase):
 class LongTermMemoryExclusionFlagTest(unittest.IsolatedAsyncioTestCase):
     async def test_records_exclusion_even_if_message_event_has_not_been_saved(self) -> None:
         message_id = 123
-        cog = object.__new__(ConversationUseCases)
+        cog = cast("Any", object.__new__(ConversationUseCases))
         cog.__dict__["_long_term_memory_excluded_message_ids"] = set()
         repository = SimpleNamespace(exclude_from_long_term_memory=AsyncMock())
         cog.short_term_message_repository = repository

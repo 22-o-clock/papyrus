@@ -2,7 +2,7 @@
 
 import datetime
 import unittest
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, cast
@@ -46,7 +46,7 @@ class SqliteDatabase:
             connection.exec_driver_sql("INSERT INTO talkdata.message VALUES (10), (11), (99)")
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[SimpleNamespace]:
+    async def session(self) -> AsyncGenerator[SimpleNamespace]:
         """SQLAlchemyの同期接続をリポジトリの非同期インターフェースへ適合させる。"""
         with self.engine.begin() as connection:
             yield SimpleNamespace(
