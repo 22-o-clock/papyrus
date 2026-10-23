@@ -5,7 +5,7 @@ from decimal import Decimal
 from cogs.chatbot.repositories.api_usage import ChatbotApiUsageDaily
 
 PRICING_SOURCE_URL = "https://developers.openai.com/api/docs/pricing"
-PRICING_VERIFIED_ON = datetime.date(2026, 10, 21)
+PRICING_VERIFIED_ON = datetime.date(2026, 10, 23)
 PER_MILLION = Decimal(1_000_000)
 
 
@@ -128,6 +128,18 @@ MODEL_PRICES: dict[str, tuple[ModelPrice, ...]] = {
             Decimal("0.20"),
             Decimal("2.50"),
             Decimal("9.00"),
+        ),
+        # 補正単価の適用開始前の履歴を保持する。
+        ModelPrice(
+            datetime.date(2026, 10, 19),
+            Decimal("0.20"),
+            Decimal("0.02"),
+            Decimal("0.25"),
+            Decimal("1.20"),
+            Decimal("0.40"),
+            Decimal("0.04"),
+            Decimal("0.50"),
+            Decimal("1.80"),
         ),
     ),
     "gpt-5.4-mini": (
