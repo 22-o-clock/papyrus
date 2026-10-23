@@ -45,6 +45,9 @@ Cogを読み込まず、カンマ区切りのCog名では指定したCogだけ�
 
 #### API usageレポート
 
+- API利用量の計測はChatbot側で初期化する。`ENABLED_COGS=chatbot`だけで起動しても記録する。
+- `api_usage`を単独で起動する場合は、保存済みの利用量を集計・投稿する。
+
 - production環境では定期投稿と手動投稿を行う。
 - debug環境では定期投稿を行わず、`/api_usage report` による手動投稿だけを行う。
 - production環境の投稿先は `THREAD_ID_API_USAGE_REPORT`、debug環境の投稿先は
