@@ -80,14 +80,21 @@ class OpenAIOrganizationUsageClient:
             )
 
         costs, currency = _aggregate_costs(cost_results)
+        completion_usage = _aggregate_model_usage(completion_results)
+        image_requests = {usage.model: usage.requests for usage in _aggregate_model_usage(image_results)}
+        for usage in completion_usage:
+            if usage.model.startswith(("gpt-image-", "chatgpt-image-")):
+                # 同じモデルが両方のエンドポイントに現れても二重計上しない。
+                image_requests[usage.model] = max(image_requests.get(usage.model, 0), usage.requests)
+        completion_usage = [usage for usage in completion_usage if not usage.model.startswith(("gpt-image-", "chatgpt-image-"))]
         return OpenAIUsageSummary(
             report_date=report_date,
-            completion_usage=_aggregate_model_usage(completion_results),
+            completion_usage=completion_usage,
             embedding_usage=_aggregate_model_usage(embedding_results),
             costs=costs,
             currency=currency,
             usage_available=usage_available,
-            image_requests=sum(int(row.get("num_model_requests") or 0) for row in image_results),
+            image_requests=sum(image_requests.values()),
         )
 
     async def _fetch_usage_results(

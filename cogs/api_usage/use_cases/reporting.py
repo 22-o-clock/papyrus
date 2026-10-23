@@ -12,8 +12,8 @@ from cogs.api_usage.openai_usage import JST, OpenAIOrganizationUsageClient, Open
 from cogs.api_usage.repositories.report import ApiUsageReportDatabase
 from cogs.api_usage.services.message_delivery import ApiUsageReportMessageDelivery, ReportMessageOwnershipError
 from cogs.api_usage.services.report_builder import aggregate_feature_usages, build_usage_embed
-from cogs.chatbot.observability import configure_chatbot_api_usage, get_measurement_error_count
-from cogs.chatbot.repositories.api_usage import UTC
+from cogs.chatbot.observability import get_measurement_error_count
+from cogs.chatbot.repositories.api_usage import UTC, ChatbotApiUsageRepository
 from core.exception.exception import ArgumentError, MissingRequiredRoleError
 from core.runtime_environment import RuntimeEnvironment, get_runtime_environment
 
@@ -43,7 +43,7 @@ class ApiUsageReportUseCases:
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._database = ApiUsageReportDatabase(session_factory)
         self._runtime_environment: RuntimeEnvironment = get_runtime_environment()
-        self._usage_repository = configure_chatbot_api_usage(session_factory)
+        self._usage_repository = ChatbotApiUsageRepository(session_factory)
         self._admin_role_id = int(os.environ["ROLE_ID_BOT_ADMIN"])
         self._target_id = self._runtime_environment.api_usage_report_target_id
         self._client = OpenAIOrganizationUsageClient(
@@ -54,10 +54,6 @@ class ApiUsageReportUseCases:
         self._report_lock = asyncio.Lock()
         self._last_daily_run: datetime.date | None = None
         self._last_openai_retry_at: datetime.datetime | None = None
-
-    async def initialize(self) -> None:
-        """計測開始日時を未作成の場合だけ初期化する。"""
-        await self._usage_repository.initialize_measurement()
 
     async def process_scheduled_reports(self, now: datetime.datetime | None = None) -> None:
         """設定時刻後の欠損補完、前日投稿、前々日再集計を行う。"""

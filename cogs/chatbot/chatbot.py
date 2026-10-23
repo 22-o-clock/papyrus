@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.runtime_environment import get_runtime_environment
 
+from .observability import configure_chatbot_api_usage
 from .use_cases.alias_excel_management import AliasExcelManagementUseCases
 from .use_cases.conversation import ConversationUseCases
 
@@ -16,12 +17,15 @@ class ChatBot(commands.Cog):
 
     def __init__(self, bot: commands.Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.runtime_environment = get_runtime_environment()
+        self._usage_repository = configure_chatbot_api_usage(session_factory)
         self.conversation_use_cases = ConversationUseCases(bot, session_factory)
         self.custom_profile_use_cases = self.conversation_use_cases.custom_profile_use_cases
         self.excel_management_use_cases = AliasExcelManagementUseCases(session_factory)
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
+        """利用量の計測を準備してから会話処理を開始します。"""
+        await self._usage_repository.initialize_measurement()
         await self.conversation_use_cases.on_ready()
 
     @commands.Cog.listener()

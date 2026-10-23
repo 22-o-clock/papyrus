@@ -9,6 +9,7 @@ from cogs.api_usage.openai_usage import (
     JST,
     UTC,
     ModelUsage,
+    OpenAIOrganizationUsageClient,
     OpenAIUsageSummary,
     _aggregate_costs,
     _aggregate_model_usage,
@@ -173,6 +174,31 @@ class ApiUsageAggregationTest(TestCase):
         ensure_equal(usages[0].model_cost, Decimal("9.6"))
         ensure_equal(usages[0].unknown_price_models, set())
 
+    def test_luna_price_history_preserves_earlier_estimates(self) -> None:
+        """確認済み期間の単価を修正し、それ以前の推定額を保持します。"""
+        row = create_usage("reply_generation", "gpt-5.6-luna", input_tokens=1_000_000, output_tokens=100_000)
+        row.usage_date = datetime.date(2026, 10, 18)
+        ensure_equal(aggregate_feature_usages([row])[0].model_cost, Decimal("1.6"))
+        row.usage_date = datetime.date(2026, 10, 19)
+        ensure_equal(aggregate_feature_usages([row])[0].model_cost, Decimal("0.32"))
+
+    def test_luna_revised_price_includes_long_context_and_cache(self) -> None:
+        """通常・長文のキャッシュ読み書きにも改定単価を適用します。"""
+        row = create_usage(
+            "reply_generation",
+            "gpt-5.6-luna",
+            input_tokens=600_000,
+            cached_input_tokens=200_000,
+            cache_write_input_tokens=200_000,
+            output_tokens=20_000,
+            long_context_input_tokens=300_000,
+            long_context_cached_input_tokens=100_000,
+            long_context_cache_write_input_tokens=100_000,
+            long_context_output_tokens=10_000,
+        )
+        row.usage_date = datetime.date(2026, 10, 19)
+        ensure_equal(aggregate_feature_usages([row])[0].model_cost, Decimal("0.171"))
+
     def test_nano_judgment_uses_configured_token_prices(self) -> None:
         row = create_usage(
             "response_judgment",
@@ -322,6 +348,61 @@ class ApiUsageAggregationTest(TestCase):
         ensure_equal(usages[0].input_tokens, 150)
         ensure_equal(usages[0].cached_input_tokens, 25)
         ensure_equal(usages[0].output_tokens, 15)
+
+
+class OpenAIUsageClientTest(IsolatedAsyncioTestCase):
+    async def test_image_models_in_completions_are_compared_as_images(self) -> None:
+        """画像モデルの集計元が変わっても一致する利用量に警告を出しません。"""
+        for completion_images, endpoint_images in [(2, 0), (0, 2), (2, 2)]:
+            with self.subTest(completions=completion_images, images=endpoint_images):
+                client = OpenAIOrganizationUsageClient("test-key", project_id="test-project")
+                image_row = {
+                    "model": "gpt-image-2.5-flare",
+                    "num_model_requests": 2,
+                    "input_tokens": 100,
+                    "output_tokens": 1_000,
+                }
+                completions = [{"model": "gpt-6-luna", "num_model_requests": 1, "input_tokens": 50, "output_tokens": 10}]
+                if completion_images:
+                    completions.append(image_row)
+                with patch.object(
+                    client,
+                    "_fetch_all_results",
+                    new=AsyncMock(
+                        side_effect=[
+                            [],
+                            completions,
+                            [],
+                            [image_row] if endpoint_images else [],
+                        ]
+                    ),
+                ):
+                    summary = await client.fetch_daily_summary(datetime.date(2026, 10, 21))
+                ensure_equal(summary.image_requests, 2)
+                ensure_equal([usage.model for usage in summary.completion_usage], ["gpt-6-luna"])
+                rows = [
+                    create_usage("reply_generation", "gpt-6-luna", input_tokens=50, output_tokens=10),
+                    create_usage(
+                        "image_generation", "gpt-image-2.5-flare", success_count=2, input_tokens=100, output_tokens=1_000
+                    ),
+                ]
+                for row in rows:
+                    row.usage_date = summary.report_date
+                embed = build_usage_embed(
+                    summary.report_date,
+                    aggregate_feature_usages(rows),
+                    summary,
+                    ReportMeasurementState(started_at=None, error_count=0),
+                )
+                ensure_equal([field.name for field in embed.fields], ["コスト概要", "利用量"])
+                rows[1].success_count = 1
+                embed = build_usage_embed(
+                    summary.report_date,
+                    aggregate_feature_usages(rows),
+                    summary,
+                    ReportMeasurementState(started_at=None, error_count=0),
+                )
+                ensure_contains("画像生成 +1 calls", str(embed.fields[-1].value))
 
 
 class ApiUsageEmbedTest(TestCase):

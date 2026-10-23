@@ -28,8 +28,7 @@ class ApiUsageReporter(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        """DB初期化完了後に計測開始日時を確定して日次ループを開始する。"""
-        await self._use_cases.initialize()
+        """DB初期化完了後に日次ループを開始する。"""
         if self._runtime_environment.is_debug:
             logger.info("Disabled scheduled API usage reports in debug environment")
             return
