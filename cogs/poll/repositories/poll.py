@@ -116,10 +116,7 @@ class PollRepository:
     async def count_electorate(self, poll_id: int) -> int:
         """作成時点の有権者数を返す。"""
         async with self._database.session() as session:
-            count = await session.scalar(
-                select(func.count()).select_from(PollElectorate).where(PollElectorate.poll_id == poll_id)
-            )
-            return count or 0
+            return await _count_electorate(session, poll_id)
 
     async def is_eligible(self, poll_id: int, user_id: int) -> bool:
         """指定メンバーが作成時点の有権者かを返す。"""
@@ -148,6 +145,8 @@ class PollRepository:
         now: datetime.datetime,
     ) -> BallotResult:
         """投票を保存する。変更可モードでは既存の票を上書きする。
+
+        変更不可モードで有権者全員の投票がそろった場合は、同じトランザクションで結果を確定する。
 
         Args:
             poll_id: 投票のID。
@@ -178,6 +177,22 @@ class PollRepository:
                     counts[index] += 1
                 await session.execute(insert(PollBallot).values(poll_id=poll_id, voter_key=voter_key, choices=None))
                 await session.execute(update(Poll).where(Poll.id == poll_id).values(live_counts=counts))
+                voter_count = await _count_voters(session, poll_id)
+                if voter_count >= await _count_electorate(session, poll_id):
+                    # 有権者全員が投票し、票が変わる余地も再開する意味もないため、締め切りを待たずに確定する。
+                    await session.execute(delete(PollBallot).where(PollBallot.poll_id == poll_id))
+                    await session.execute(
+                        update(Poll)
+                        .where(Poll.id == poll_id)
+                        .values(
+                            closed_at=now,
+                            finalized_at=now,
+                            result_counts=counts,
+                            result_voter_count=voter_count,
+                            live_counts=None,
+                        )
+                    )
+                    return BallotResult(BallotOutcome.ACCEPTED, voter_count, await _load(session, poll_id))
             return BallotResult(BallotOutcome.ACCEPTED, await _count_voters(session, poll_id))
 
     async def withdraw_ballot(self, poll_id: int, voter_key: str, now: datetime.datetime) -> BallotResult:
@@ -263,6 +278,12 @@ async def _load(session: AsyncSession, poll_id: int, *, lock: bool = False) -> P
 async def _count_voters(session: AsyncSession, poll_id: int) -> int:
     """投票者数を返す。"""
     count = await session.scalar(select(func.count()).select_from(PollBallot).where(PollBallot.poll_id == poll_id))
+    return count or 0
+
+
+async def _count_electorate(session: AsyncSession, poll_id: int) -> int:
+    """作成時点の有権者数を返す。"""
+    count = await session.scalar(select(func.count()).select_from(PollElectorate).where(PollElectorate.poll_id == poll_id))
     return count or 0
 
 

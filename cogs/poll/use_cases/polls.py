@@ -348,13 +348,18 @@ class PollUseCases:
                     view=self._vote_panel(poll, tuple(choices)),
                 )
             case BallotOutcome.ACCEPTED:
+                finalized_text = "\n有権者全員が投票したため、結果を確定しました。" if result.finalized_poll else ""
                 await interaction.response.edit_message(
                     content=(
                         f"投票を受け付けました。{describe_choices(poll.options, choices)}\n"
                         "変更不可モードのため、誰が何を選んだかは記録されず、後から確認・変更することはできません。"
+                        f"{finalized_text}"
                     ),
                     view=None,
                 )
+                if result.finalized_poll is not None:
+                    await self._after_finalize(result.finalized_poll)
+                    return
             case BallotOutcome.ALREADY_VOTED:
                 await interaction.response.edit_message(
                     content="投票済みです。この投票は変更不可モードのため、変更・取り消しはできません。", view=None
