@@ -86,7 +86,13 @@ class BallotOutcome(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class BallotResult:
-    """投票・取り消しの操作結果と、操作後の投票者数。"""
+    """投票・取り消しの操作結果と、操作後の投票者数。
+
+    Attributes:
+        finalized_poll: 変更不可モードで、この投票により有権者全員が投票して確定した場合の投票。
+
+    """
 
     outcome: BallotOutcome
     voter_count: int = 0
+    finalized_poll: PollRecord | None = None

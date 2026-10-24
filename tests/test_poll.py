@@ -13,7 +13,7 @@ from sqlalchemy import Table, create_engine, select
 
 from cogs.poll.constants import JST, REOPEN_WINDOW
 from cogs.poll.database import Poll, PollBallot, PollElectorate
-from cogs.poll.models import BallotOutcome, PollRecord, PollStatus
+from cogs.poll.models import BallotOutcome, BallotResult, PollRecord, PollStatus
 from cogs.poll.repositories.poll import PollRepository
 from cogs.poll.services.ballot_key import make_ballot_key
 from cogs.poll.services.duration import parse_deadline
@@ -198,6 +198,13 @@ class ChangeablePollRepositoryTest(PollRepositoryTestCase):
         ensure(self.stored_ballots() == [])
         ensure(await self.repository.list_electorate(self.poll.id) == [VOTER_ID, OTHER_VOTER_ID])
 
+    async def test_poll_stays_open_when_the_whole_electorate_has_voted(self) -> None:
+        await self.cast(VOTER_ID, [0])
+        result = await self.repository.cast_ballot(self.poll.id, OTHER_VOTER_ID, self.key(OTHER_VOTER_ID), [1], NOW)
+
+        ensure(result.finalized_poll is None)
+        ensure(require(await self.repository.get(self.poll.id)).status is PollStatus.OPEN)
+
     async def test_due_polls_are_listed_at_the_deadline(self) -> None:
         ensure(await self.repository.list_due_to_close(NOW) == [])
         ensure(await self.repository.list_due_to_close(NOW + datetime.timedelta(hours=1)) == [self.poll.id])
@@ -225,15 +232,30 @@ class FixedPollRepositoryTest(PollRepositoryTestCase):
         ensure(poll.live_counts == (1, 0, 0))
 
     async def test_close_and_finalize_use_the_added_counts(self) -> None:
-        await self.cast(VOTER_ID, [0])
-        await self.cast(OTHER_VOTER_ID, [0, 1])
+        await self.cast(VOTER_ID, [0, 1])
 
         closed = require(await self.repository.close(self.poll.id, NOW))
-        ensure(closed.result_counts == (2, 1, 0))
-        ensure(closed.result_voter_count == EXPECTED_VOTERS)
+        ensure(closed.result_counts == (1, 1, 0))
+        ensure(closed.result_voter_count == 1)
         finalized = require(await self.repository.finalize(self.poll.id, NOW + REOPEN_WINDOW))
         ensure(finalized.live_counts is None)
         ensure(self.stored_ballots() == [])
+
+    async def test_poll_is_finalized_when_the_whole_electorate_has_voted(self) -> None:
+        first = await self.repository.cast_ballot(self.poll.id, VOTER_ID, self.key(VOTER_ID), [0], NOW)
+        ensure(first.finalized_poll is None)
+
+        last = await self.repository.cast_ballot(self.poll.id, OTHER_VOTER_ID, self.key(OTHER_VOTER_ID), [0, 1], NOW)
+
+        ensure(last.outcome is BallotOutcome.ACCEPTED)
+        finalized = require(last.finalized_poll)
+        ensure(finalized.status is PollStatus.FINALIZED)
+        ensure(finalized.result_counts == (2, 1, 0))
+        ensure(finalized.result_voter_count == EXPECTED_VOTERS)
+        ensure(finalized.live_counts is None)
+        ensure(self.stored_ballots() == [])
+        ensure(await self.repository.list_due_to_close(NOW + datetime.timedelta(hours=1)) == [])
+        ensure(await self.repository.list_due_to_finalize(NOW + REOPEN_WINDOW) == [])
 
 
 class BallotKeyTest(unittest.TestCase):
@@ -518,3 +540,23 @@ class StatusChangeMessageTest(unittest.IsolatedAsyncioTestCase):
         ensure(self.sent_title().startswith("確定結果"))
         ensure(self.previous_result.edit.await_args.kwargs == {"view": None})
         self.repository.attach_result_message.assert_awaited_once_with(poll.id, 8)
+
+    async def test_last_fixed_ballot_posts_the_final_result(self) -> None:
+        finalized = make_record(
+            allow_change=False,
+            closed_at=self.closed_at,
+            finalized_at=self.closed_at,
+            result_counts=(1, 1),
+            result_voter_count=EXPECTED_VOTERS,
+        )
+        self.repository.get.return_value = make_record(allow_change=False, live_counts=(1, 0))
+        self.repository.cast_ballot.return_value = BallotResult(BallotOutcome.ACCEPTED, EXPECTED_VOTERS, finalized)
+        interaction = Mock(user=Mock(id=VOTER_ID))
+        interaction.response.edit_message = AsyncMock()
+
+        await self.use_cases._submit_ballot(1, interaction, [1])  # noqa: SLF001
+
+        ensure("結果を確定しました" in require(interaction.response.edit_message.await_args).kwargs["content"])
+        ensure(self.sent_title().startswith("確定結果"))
+        ensure("有権者全員が投票したため" in embed_text(self.channel.send.await_args.kwargs["embed"]))
+        self.repository.attach_result_message.assert_awaited_once_with(finalized.id, 8)

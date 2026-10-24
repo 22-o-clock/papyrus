@@ -164,7 +164,8 @@ def _result_status(poll: PollRecord) -> str:
                 return "締め切り済み"
             return f"{format_dt(finalizes_at, 'f')}に確定(それまでは作成者が再開できます)"
         case PollStatus.FINALIZED:
-            return "確定"
+            # 締め切りと確定が同時なのは、変更不可モードで有権者全員が投票した場合だけ。
+            return "確定(有権者全員が投票したため)" if poll.closed_at == poll.finalized_at else "確定"
 
 
 def _result_url(poll: PollRecord) -> str | None:
